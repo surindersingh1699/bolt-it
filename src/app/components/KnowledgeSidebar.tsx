@@ -1,0 +1,87 @@
+"use client";
+
+import { useAppState } from "./StateProvider";
+import { Citation } from "@/lib/types";
+import { BookOpen, User2 } from "lucide-react";
+
+export function KnowledgeSidebar() {
+  const { tickets, selectedTicketId, runbooks } = useAppState();
+  const ticket = tickets.find((t) => t.id === selectedTicketId);
+
+  if (!ticket) {
+    return (
+      <div className="bg-neutral-950 px-4 py-6">
+        <SectionHeader title="Knowledge" />
+        <p className="text-xs text-neutral-500">Select a ticket to see grounding sources.</p>
+      </div>
+    );
+  }
+
+  const niaCites = ticket.citations.filter((c) => c.source === "nia");
+  const userCites = ticket.citations.filter((c) => c.source === "hyperspell");
+
+  return (
+    <div className="bg-neutral-950 overflow-y-auto">
+      <div className="px-4 py-4 border-b border-neutral-800 sticky top-0 bg-neutral-950/95 backdrop-blur">
+        <SectionHeader title="Grounding sources" />
+        <p className="text-[11px] text-neutral-500 mt-1">
+          Every AI suggestion is cited. No grounding = no plan.
+        </p>
+      </div>
+
+      <section className="px-4 py-4 border-b border-neutral-800">
+        <div className="flex items-center gap-1.5 mb-3">
+          <BookOpen size={12} className="text-emerald-400" />
+          <span className="text-[11px] uppercase tracking-wider text-neutral-400">
+            Nia · runbook hits
+          </span>
+          <span className="text-[10px] text-neutral-600 ml-auto">{niaCites.length}</span>
+        </div>
+        {niaCites.length === 0 && (
+          <p className="text-xs text-neutral-500">No runbook matches yet.</p>
+        )}
+        <ul className="space-y-2">
+          {niaCites.map((c) => (
+            <CiteCard key={c.ref} cite={c} runbookCount={runbooks.length} />
+          ))}
+        </ul>
+      </section>
+
+      <section className="px-4 py-4">
+        <div className="flex items-center gap-1.5 mb-3">
+          <User2 size={12} className="text-violet-400" />
+          <span className="text-[11px] uppercase tracking-wider text-neutral-400">
+            Hyperspell · user context
+          </span>
+        </div>
+        {userCites.length === 0 ? (
+          <p className="text-xs text-neutral-500">No user context loaded.</p>
+        ) : (
+          <ul className="space-y-2">
+            {userCites.map((c) => (
+              <CiteCard key={c.ref} cite={c} runbookCount={0} />
+            ))}
+          </ul>
+        )}
+      </section>
+    </div>
+  );
+}
+
+function CiteCard({ cite, runbookCount: _runbookCount }: { cite: Citation; runbookCount: number }) {
+  return (
+    <li className="bg-neutral-900/60 border border-neutral-800 rounded-md p-3">
+      <div className="text-xs font-medium text-neutral-200 leading-snug mb-1">{cite.title}</div>
+      <p className="text-[11px] text-neutral-500 leading-relaxed line-clamp-3">{cite.snippet}</p>
+      <div className="text-[10px] text-neutral-600 font-mono mt-1.5">{cite.ref}</div>
+    </li>
+  );
+}
+
+function SectionHeader({ title }: { title: string }) {
+  return (
+    <div className="flex items-center justify-between">
+      <span className="text-xs uppercase tracking-wider text-neutral-500">{title}</span>
+    </div>
+  );
+}
