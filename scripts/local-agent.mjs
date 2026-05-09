@@ -30,6 +30,15 @@ const ANSI = {
 
 let currentJob = null;
 
+function humanLabel(command) {
+  const c = String(command || "");
+  if (c.startsWith("collect_vpn_diagnostics ")) return "Inspecting VPN client logs";
+  if (c.startsWith("collect_auth_logs ")) return "Reading authentication logs";
+  if (c.startsWith("collect_windows_event_logs ")) return "Checking Kerberos ticket status";
+  if (c.startsWith("collect_app_logs ")) return "Reviewing application crash logs";
+  return "Running sandboxed diagnostic";
+}
+
 console.log(`${ANSI.cyan}${ANSI.bold}╔════════════════════════════════════════════════════════════╗${ANSI.reset}`);
 console.log(`${ANSI.cyan}${ANSI.bold}║          🛡   LOCAL SANDBOX AGENT — STARTED                ║${ANSI.reset}`);
 console.log(`${ANSI.cyan}${ANSI.bold}╚════════════════════════════════════════════════════════════╝${ANSI.reset}`);
@@ -98,17 +107,18 @@ async function poll() {
     const data = await res.json();
     for (const job of data.jobs ?? []) {
       const startedAt = Date.now();
-      currentJob = { id: job.id, command: job.allowlistedCommand, startedAt };
+      const label = humanLabel(job.allowlistedCommand);
+      currentJob = { id: job.id, command: label, startedAt };
       void sendHeartbeat();
 
-      bigBanner(`▶  EXECUTING ON ${AGENT_HOSTNAME}`, ANSI.bgCyan);
-      console.log(`${ANSI.cyan}  job:${ANSI.reset}     ${job.id}`);
-      console.log(`${ANSI.cyan}  cmd:${ANSI.reset}     ${job.allowlistedCommand}`);
+      bigBanner(`▶  ${label.toUpperCase()} on ${AGENT_HOSTNAME}`, ANSI.bgCyan);
+      console.log(`${ANSI.cyan}  doing:${ANSI.reset}   ${label}`);
       console.log(`${ANSI.cyan}  user:${ANSI.reset}    ${job.targetUserEmail}`);
+      console.log(`${ANSI.cyan}  audit:${ANSI.reset}   ${job.allowlistedCommand}`);
       console.log("");
-      notify("🛡 Local Agent — Executing", AGENT_HOSTNAME, job.allowlistedCommand);
+      notify("🛡 Local Agent", AGENT_HOSTNAME, label);
       chime("Glass");
-      say(`Running diagnostic on ${AGENT_HOSTNAME.split(".")[0]}`);
+      say(`${label} on ${AGENT_HOSTNAME.split(".")[0]}`);
 
       const result = await runAllowlisted(job);
       const ms = Date.now() - startedAt;
@@ -130,14 +140,14 @@ async function poll() {
       void sendHeartbeat();
 
       const okBanner = result.ok
-        ? `✓  COMPLETED in ${ms}ms — sent results back to cloud`
-        : `✗  FAILED in ${ms}ms — ${result.error ?? "unknown"}`;
+        ? `✓  ${label.toUpperCase()} — done in ${ms}ms — results sent to cloud`
+        : `✗  ${label.toUpperCase()} — failed in ${ms}ms — ${result.error ?? "unknown"}`;
       bigBanner(okBanner, result.ok ? ANSI.bgGreen : ANSI.bgRed);
       console.log("");
       notify(
-        result.ok ? "✓ Local Agent — Done" : "✗ Local Agent — Failed",
+        result.ok ? "🛡 Local Agent — Done" : "🛡 Local Agent — Failed",
         AGENT_HOSTNAME,
-        `${job.allowlistedCommand.split(" ")[0]} (${ms}ms)`,
+        `${label} (${ms}ms)`,
       );
       chime(result.ok ? "Hero" : "Basso");
     }

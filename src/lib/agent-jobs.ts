@@ -28,13 +28,19 @@ export async function enqueueAgentJob(ticket: Ticket, step: PlanStep): Promise<A
   await insertAgentJob(job);
   await updateStep(ticket.id, step.id, {
     log: [
-      `[Agent Queue] Created ${job.id}`,
-      `[Agent Queue] Capability: ${step.capability ?? step.kind}`,
-      `[Agent Queue] Safe command: ${job.allowlistedCommand}`,
-      `[Agent Queue] Local sandbox agent may poll /api/agent/jobs to execute diagnostics.`,
+      `[Agent Queue] Plan step: ${humanLabelFor(step.capability)}`,
+      `[Agent Queue] Routing to local sandbox agent on the technician's machine`,
+      `[Agent Queue] Sandboxed command (audit): ${job.allowlistedCommand}`,
     ],
   });
   return job;
+}
+
+export function humanLabelFor(capability: string | undefined): string {
+  if (capability === "diag.network_probe") return "Inspect VPN client logs in sandbox";
+  if (capability === "sandbox.read_auth_logs") return "Read authentication logs to find lockout pattern";
+  if (capability === "sandbox.read_kerberos_logs") return "Check Kerberos ticket status";
+  return "Run diagnostic in sandbox";
 }
 
 function jobKindForCapability(capability?: string): AgentJob["kind"] {
