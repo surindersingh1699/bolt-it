@@ -10,6 +10,14 @@ const heartbeatSchema = z.object({
   hostname: z.string().min(1).max(253),
   os: z.string().min(1).max(200),
   version: z.string().min(1).max(64),
+  currentJob: z
+    .object({
+      id: z.string().min(1).max(64),
+      command: z.string().min(1).max(300),
+      startedAt: z.number(),
+    })
+    .nullable()
+    .optional(),
 });
 
 function authorized(req: Request): boolean {
@@ -45,5 +53,6 @@ export async function GET() {
     os: hb.os,
     lastPingAt: hb.lastPingAt,
     ageMs,
+    currentJob: hb.currentJob,
   });
 }
