@@ -29,8 +29,22 @@ export interface PlanStep {
   finishedAt?: number;
 }
 
+export interface Workspace {
+  id: string;
+  displayName: string;
+  isDemo: boolean;
+  slackTeamId?: string;
+  slackTeamName?: string;
+  slackAccessToken?: string;
+  slackConnectedAt?: number;
+  createdAt: number;
+  updatedAt: number;
+  lastUsedAt?: number;
+}
+
 export interface Ticket {
   id: string;
+  workspaceId: string;
   customerOrg: string;
   channel: "slack" | "email" | "portal";
   reporter: string;
@@ -52,6 +66,7 @@ export interface Ticket {
 
 export interface Runbook {
   id: string;
+  workspaceId: string;
   title: string;
   tags: string[];
   body: string;
@@ -76,4 +91,56 @@ export interface DeflectionStat {
   escalated: number;
   avgResolutionMs: number;
   rate: number;
+}
+
+export type ADAccountStatus = "active" | "locked" | "disabled" | "password_expired" | "stale_kerberos";
+
+export interface ADUser {
+  email: string;
+  workspaceId: string;
+  name: string;
+  passwordHash: string;
+  team: string;
+  title: string;
+  manager?: string;
+  groups: string[];
+  isITStaff: boolean;
+  createdAt: number;
+}
+
+export interface ADGroup {
+  id: string;
+  workspaceId: string;
+  name: string;
+  description: string;
+  members: string[];
+}
+
+export interface ADAccount {
+  email: string;
+  workspaceId: string;
+  status: ADAccountStatus;
+  failedLoginCount: number;
+  lockedAt?: number;
+  passwordChangedAt: number;
+  passwordExpiresAt: number;
+  lastLoginAt?: number;
+  lastLoginHost?: string;
+  kerberosTicketAt?: number;
+}
+
+export interface Session {
+  userEmail: string;
+  workspaceId: string;
+  issuedAt: number;
+  expiresAt: number;
+}
+
+export interface PublicUser {
+  email: string;
+  workspaceId: string;
+  name: string;
+  team: string;
+  title: string;
+  isITStaff: boolean;
 }

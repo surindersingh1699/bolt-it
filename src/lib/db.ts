@@ -1,4 +1,4 @@
-import { Ticket, Runbook, PlanStep, DeflectionStat } from "./types";
+import { Ticket, Runbook, PlanStep, DeflectionStat, ADUser, ADGroup, ADAccount, Workspace } from "./types";
 
 declare global {
   // eslint-disable-next-line no-var
@@ -6,9 +6,33 @@ declare global {
 }
 
 class ITDB {
+  workspaces: Map<string, Workspace> = new Map();
   tickets: Map<string, Ticket> = new Map();
   runbooks: Map<string, Runbook> = new Map();
+  adUsers: Map<string, ADUser> = new Map();
+  adGroups: Map<string, ADGroup> = new Map();
+  adAccounts: Map<string, ADAccount> = new Map();
   subscribers: Set<() => void> = new Set();
+
+  insertWorkspace(w: Workspace) {
+    this.workspaces.set(w.id, w);
+    this.emit();
+  }
+
+  getWorkspace(id: string) {
+    return this.workspaces.get(id);
+  }
+
+  listWorkspaces(): Workspace[] {
+    return Array.from(this.workspaces.values()).sort((a, b) => a.displayName.localeCompare(b.displayName));
+  }
+
+  updateWorkspace(id: string, patch: Partial<Workspace>) {
+    const existing = this.workspaces.get(id);
+    if (!existing) return;
+    this.workspaces.set(id, { ...existing, ...patch, updatedAt: Date.now() });
+    this.emit();
+  }
 
   emit() {
     this.subscribers.forEach((cb) => cb());
@@ -41,12 +65,17 @@ class ITDB {
     this.emit();
   }
 
-  listTickets(): Ticket[] {
-    return Array.from(this.tickets.values()).sort((a, b) => b.createdAt - a.createdAt);
+  listTickets(workspaceId?: string): Ticket[] {
+    const all = Array.from(this.tickets.values());
+    const scoped = workspaceId ? all.filter((t) => t.workspaceId === workspaceId) : all;
+    return scoped.sort((a, b) => b.createdAt - a.createdAt);
   }
 
-  getTicket(id: string) {
-    return this.tickets.get(id);
+  getTicket(id: string, workspaceId?: string) {
+    const t = this.tickets.get(id);
+    if (!t) return undefined;
+    if (workspaceId && t.workspaceId !== workspaceId) return undefined;
+    return t;
   }
 
   insertRunbook(r: Runbook) {
@@ -61,12 +90,75 @@ class ITDB {
     this.emit();
   }
 
-  listRunbooks(): Runbook[] {
-    return Array.from(this.runbooks.values()).sort((a, b) => b.updatedAt - a.updatedAt);
+  listRunbooks(workspaceId?: string): Runbook[] {
+    const all = Array.from(this.runbooks.values());
+    const scoped = workspaceId ? all.filter((r) => r.workspaceId === workspaceId) : all;
+    return scoped.sort((a, b) => b.updatedAt - a.updatedAt);
   }
 
-  deflectionStats(): DeflectionStat {
-    const all = this.listTickets();
+  insertADUser(u: ADUser) {
+    this.adUsers.set(`${u.workspaceId}:${u.email}`, u);
+    this.emit();
+  }
+
+  getADUser(email: string, workspaceId?: string) {
+    if (workspaceId) return this.adUsers.get(`${workspaceId}:${email}`);
+    for (const u of this.adUsers.values()) {
+      if (u.email === email) return u;
+    }
+    return undefined;
+  }
+
+  listADUsers(workspaceId?: string): ADUser[] {
+    const all = Array.from(this.adUsers.values());
+    const scoped = workspaceId ? all.filter((u) => u.workspaceId === workspaceId) : all;
+    return scoped.sort((a, b) => a.name.localeCompare(b.name));
+  }
+
+  updateADUser(email: string, patch: Partial<ADUser>, workspaceId?: string) {
+    const existing = this.getADUser(email, workspaceId);
+    if (!existing) return;
+    this.adUsers.set(`${existing.workspaceId}:${existing.email}`, { ...existing, ...patch });
+    this.emit();
+  }
+
+  insertADGroup(g: ADGroup) {
+    this.adGroups.set(`${g.workspaceId}:${g.id}`, g);
+    this.emit();
+  }
+
+  listADGroups(workspaceId?: string): ADGroup[] {
+    const all = Array.from(this.adGroups.values());
+    return workspaceId ? all.filter((g) => g.workspaceId === workspaceId) : all;
+  }
+
+  insertADAccount(a: ADAccount) {
+    this.adAccounts.set(`${a.workspaceId}:${a.email}`, a);
+    this.emit();
+  }
+
+  getADAccount(email: string, workspaceId?: string) {
+    if (workspaceId) return this.adAccounts.get(`${workspaceId}:${email}`);
+    for (const a of this.adAccounts.values()) {
+      if (a.email === email) return a;
+    }
+    return undefined;
+  }
+
+  listADAccounts(workspaceId?: string): ADAccount[] {
+    const all = Array.from(this.adAccounts.values());
+    return workspaceId ? all.filter((a) => a.workspaceId === workspaceId) : all;
+  }
+
+  updateADAccount(email: string, patch: Partial<ADAccount>, workspaceId?: string) {
+    const existing = this.getADAccount(email, workspaceId);
+    if (!existing) return;
+    this.adAccounts.set(`${existing.workspaceId}:${existing.email}`, { ...existing, ...patch });
+    this.emit();
+  }
+
+  deflectionStats(workspaceId?: string): DeflectionStat {
+    const all = this.listTickets(workspaceId);
     const resolved = all.filter((t) => t.status === "resolved");
     const aiResolved = resolved.filter((t) => t.resolvedByAi);
     const escalated = all.filter((t) => t.status === "escalated");

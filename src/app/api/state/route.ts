@@ -1,14 +1,17 @@
 import { NextResponse } from "next/server";
-import { db } from "@/lib/db";
+import { deflectionStats, listRunbooks, listTickets } from "@/lib/data";
 import { ensureSeeded } from "@/lib/seed";
+import { getCurrentWorkspaceId } from "@/lib/workspace";
 
 export const dynamic = "force-dynamic";
 
 export async function GET() {
-  ensureSeeded();
-  return NextResponse.json({
-    tickets: db.listTickets(),
-    runbooks: db.listRunbooks(),
-    stats: db.deflectionStats(),
-  });
+  await ensureSeeded();
+  const workspaceId = (await getCurrentWorkspaceId()) ?? undefined;
+  const [tickets, runbooks, stats] = await Promise.all([
+    listTickets(workspaceId),
+    listRunbooks(workspaceId),
+    deflectionStats(workspaceId),
+  ]);
+  return NextResponse.json({ tickets, runbooks, stats, workspaceId: workspaceId ?? null });
 }

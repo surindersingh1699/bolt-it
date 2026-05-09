@@ -3,9 +3,53 @@
 > Source of truth for current milestone, what's done, and what's next. Update on every milestone change.
 
 ## Current milestone
-**M2 — Real LLM drafting via AI Gateway, moat visualization, one-click demo arc.**
+**M4 — Real Hyperspell memory queries + seeded demo context.**
 
-## Done criteria for M2
+### M4 scope
+
+Replace the 3-user mock dictionary in [src/lib/integrations/hyperspell.ts](src/lib/integrations/hyperspell.ts) with a real Hyperspell memory query that augments the LLM draft with semantically relevant context (Slack threads, calendar invites, prior tickets) for the reporter. New users start empty; demo mode uses a single shared Hyperspell account pre-seeded with synthetic IT context. Per-user onboarding (Slack/Gmail OAuth via Hyperspell's integration flow) is **explicitly deferred** to a post-hackathon milestone.
+
+## Done criteria for M4
+
+- [ ] `HYPERSPELL_API_TOKEN` env wiring + bearer auth against `https://api.hyperspell.com`
+- [ ] New `queryMemories(ticketText, reporterEmail)` function returning ranked memory snippets
+- [ ] `draftPlan` Server Action passes memory snippets as additional context to Nia / AI Gateway
+- [ ] Demo seeding script (`scripts/seed-hyperspell.ts` or similar) populates demo account via `add-a-memory` with synthetic context for Alex / Priya / Jordan / Bob
+- [ ] `?demo=1` toggle (or env-gated demo mode) routes Hyperspell calls to the seeded demo account
+- [ ] Mock fallback preserved: when `HYPERSPELL_API_TOKEN` absent, falls back to current 3-user dictionary
+- [ ] `pnpm exec tsc --noEmit` clean
+- [ ] One demo prompt verifies real Hyperspell memory snippets visibly improve the draft (confidence or citation quality)
+
+### Deferred (post-hackathon)
+
+Per-user data source onboarding: settings page, Hyperspell integration OAuth flow, connection management UI, real Slack workspace. Out of M4 scope.
+
+## Done criteria for M3 (kept for reference)
+
+### M3 pivot rationale (2026-05-09, mid-session)
+
+Started M3 as a Convex migration; tickets + runbooks were ported and verified working against `moonlit-dachshund-294.convex.cloud`. Mid-flight, decided to add an Active Directory user feature (`ADUser`/`ADGroup`/`ADAccount`) for the auth side of the demo. InsForge's strength is Postgres + auth + edge functions in one package, which is a better fit for the user/login surface than Convex's reactive document store. To avoid running two backends, moved everything to InsForge — Convex code stays in the repo (gated off via env) so we can roll back if needed.
+
+## Done criteria for M3
+
+- [x] `@insforge/sdk` installed and `src/lib/insforge-client.ts` instantiated from `NEXT_PUBLIC_INSFORGE_*` env vars
+- [x] InsForge Postgres schema for `tickets`, `runbooks`, `ad_users`, `ad_groups`, `ad_accounts` (applied via `insforge db query`)
+- [x] `src/lib/data.ts` repointed: InsForge primary, in-memory fallback (Convex branch retired; `isConvexEnabled()` returns false)
+- [x] AD users seed + reads via InsForge — `/api/state` no longer 500s
+- [x] Demo Figma prompt resolves end-to-end against InsForge (T-8158 → resolved, conf 0.95, 4 steps, rb-figma-sso success_count 4→5)
+- [x] `pnpm exec tsc --noEmit` clean
+- [x] Demo still runs with zero env vars (no `NEXT_PUBLIC_INSFORGE_URL` → falls back to in-memory)
+- [x] HMAC-signed cookie auth ([src/lib/auth.ts](src/lib/auth.ts)) + login page at [/login](src/app/login/page.tsx); `/` redirects unauthenticated users
+- [x] AD seed includes 9 users (2 IT staff: morgan@, sam@) + 11 groups + account states (active, locked, password_expired, stale_kerberos)
+- [x] IT-staff approval gate: `approveAndExecute` checks `isITStaff` server-side; demo route uses `demoApproveAndExecute` to bypass for the public demo URL
+- [x] InsForge AD capabilities ([src/lib/integrations/insforge.ts](src/lib/integrations/insforge.ts)): `ad.lookup_user`, `ad.unlock_account`, `ad.reset_password`, `ad.refresh_kerberos`
+- [x] Vercel Sandbox read-only log inspection ([src/lib/integrations/sandbox.ts](src/lib/integrations/sandbox.ts)) wired through Tensorlake (`sandbox.read_auth_logs`, `sandbox.read_kerberos_logs`); secret redaction; mock-first with `VERCEL_SANDBOX_TOKEN` opt-in for real microVMs
+- [x] Two new runbooks (`rb-ad-account-locked`, `rb-stale-kerberos`) — real Nia matches both at ≥0.9 confidence
+- [x] End-to-end smoke: account-locked ticket as bob@acme.test → real Nia draft (conf 0.95) → IT approval → 4-step plan executes → resolved in 13.8s (in-memory fallback path, T-7823)
+
+**Status: M3 complete as of 2026-05-09.**
+
+## Done criteria for M2 (kept for reference)
 
 - [x] Real AI Gateway tier inserted between Nia and mock (cascade: Nia → AI Gateway → mock)
 - [x] AI Gateway uses runbooks-as-context with structured JSON output
@@ -15,7 +59,7 @@
 - [x] `pnpm exec tsc --noEmit` clean
 - [x] Demo still runnable with zero env vars (mocks remain default)
 
-**Status: M2 complete as of 2026-05-09.**
+**Status: M2 complete as of 2026-05-09. M3 in progress.**
 
 ## Done criteria for M1 (kept for reference)
 
@@ -67,6 +111,7 @@ Each task ships in <90 minutes. Each has a fallback. Each meaningfully reduces t
 
 ## Last 3 changes (most recent first)
 
+- 2026-05-09 — **M3 shipped: AD + login + Vercel Sandbox + IT-staff approval gate.** Seeded mock AD (9 users, 11 groups, mixed account states); HMAC cookie sessions; `/login` page with one-click user picker; Vercel Sandbox read-only log inspection through Tensorlake (mock-first, `VERCEL_SANDBOX_TOKEN` opt-in); InsForge gains 4 AD capabilities; 2 new runbooks for account-locked and stale-Kerberos flows; both match real Nia at ≥0.9 confidence. End-to-end verified: account-locked ticket → 4-step plan → resolved in 13.8s.
 - 2026-05-09 — **M2 shipped: AI Gateway tier + moat viz + one-click demo arc.** New `aiGatewayDraft()` adapter posts to `ai-gateway.vercel.sh/v1/chat/completions` (default model `anthropic/claude-haiku-4-5`); `niaDraft()` now cascades Nia → AI Gateway → mock. Runbook cards show avg resolve time + auto-generated badge. Header has a "Run demo arc" button that fires 4 tickets sequentially.
 - 2026-05-09 — **Removed AI Gateway adapter; Nia advisor now drafts response + action plan in one call.** Sponsor count 8→7. Verified 100% deflection across 3 demo tickets with real Nia (avg ~16s per ticket end-to-end). Demo helper now polls for `awaiting_approval` before auto-approving.
 - 2026-05-09 — Real Nia `/v2/advisor` integration with codebase-as-runbooks payload + graceful mock fallback.

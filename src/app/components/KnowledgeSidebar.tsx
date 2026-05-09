@@ -2,7 +2,7 @@
 
 import { useAppState } from "./StateProvider";
 import { Citation } from "@/lib/types";
-import { BookOpen, User2 } from "lucide-react";
+import { BookOpen, CloudCog, DatabaseZap, HardDrive, KeyRound, MessageSquare, ShieldCheck, User2 } from "lucide-react";
 
 export function KnowledgeSidebar() {
   const { tickets, selectedTicketId, runbooks } = useAppState();
@@ -28,6 +28,23 @@ export function KnowledgeSidebar() {
           Every AI suggestion is cited. No grounding = no plan.
         </p>
       </div>
+
+      <section className="px-4 py-4 border-b border-neutral-800">
+        <div className="flex items-center gap-1.5 mb-3">
+          <CloudCog size={12} className="text-cyan-400" />
+          <span className="text-[11px] uppercase tracking-wider text-neutral-400">
+            Connected MSP systems
+          </span>
+        </div>
+        <div className="grid grid-cols-1 gap-2">
+          <SystemRow icon={<MessageSquare size={12} />} label="Slack intake" value="thread watched" />
+          <SystemRow icon={<BookOpen size={12} />} label="Docs + runbooks" value={`${runbooks.length} indexed`} />
+          <SystemRow icon={<KeyRound size={12} />} label="Identity" value="AD / Okta scoped" />
+          <SystemRow icon={<HardDrive size={12} />} label="Device logs" value="read-only sandbox" />
+          <SystemRow icon={<DatabaseZap size={12} />} label="Hyperspell" value={userCites.length > 0 ? "context loaded" : "no user memory"} />
+          <SystemRow icon={<ShieldCheck size={12} />} label="Policy gate" value="human approval" />
+        </div>
+      </section>
 
       <section className="px-4 py-4 border-b border-neutral-800">
         <div className="flex items-center gap-1.5 mb-3">
@@ -64,6 +81,24 @@ export function KnowledgeSidebar() {
           </ul>
         )}
       </section>
+    </div>
+  );
+}
+
+function SystemRow({
+  icon,
+  label,
+  value,
+}: {
+  icon: React.ReactNode;
+  label: string;
+  value: string;
+}) {
+  return (
+    <div className="flex items-center gap-2 rounded border border-neutral-800 bg-neutral-900/40 px-2 py-1.5">
+      <span className="text-neutral-500">{icon}</span>
+      <span className="text-[11px] text-neutral-300">{label}</span>
+      <span className="ml-auto text-[10px] text-emerald-300">{value}</span>
     </div>
   );
 }

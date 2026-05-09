@@ -75,6 +75,86 @@ new ──► drafting ──► awaiting_approval ──► executing ──►
 
 ---
 
+## 4.5 Auth, sessions, and the mock Active Directory
+
+Added in M3 to make the demo demoable without external infra. All live in [src/lib/](src/lib/) and respect the mock-first rule.
+
+### 4.5.1 Identities
+
+[src/lib/seed.ts](src/lib/seed.ts) seeds an Acme Corp AD with **9 users**, **11 groups**, and per-user **account state**. Two users are members of the `it-staff` group (Morgan, Sam) — only they can approve agent plans.
+
+| Persona | Email | Status | Why it exists in the demo |
+| --- | --- | --- | --- |
+| Alice Nguyen | `alice@acme.test` | active | Default end-user; files Figma SSO ticket |
+| Bob Martinez | `bob@acme.test` | **locked** | Drives the `account_locked` runbook |
+| Carol Park | `carol@acme.test` | active | Sales manager; counterpart to Bob |
+| Dan O'Connor | `dan@acme.test` | active | Engineer with VPN access |
+| Eve Tanaka | `eve@acme.test` | **stale_kerberos** | Drives the Kerberos-renewal runbook |
+| Frank Adebayo | `frank@acme.test` | **password_expired** | Edge case: blocked at login by policy |
+| Priya Shah | `priya@acme.test` | active | Design manager |
+| Morgan Reilly | `morgan@acme.test` | active · IT staff | Primary technician for the demo |
+| Sam Iverson | `sam@acme.test` | active · IT staff | Secondary technician |
+
+### 4.5.2 Session model
+
+[src/lib/auth.ts](src/lib/auth.ts) issues an **HMAC-signed cookie** (`it_session`, 8h TTL). The token payload is `{ userEmail, issuedAt, expiresAt }` base64url-encoded with a SHA-256 HMAC suffix. **Stateless** — verifying a session needs only the secret and the cookie, no DB lookup, so it works across cold starts and multi-region routing. The secret comes from `SESSION_SECRET` if set, else a stable dev secret (zero-env-vars rule).
+
+Passwords are hashed with a per-user random salt + SHA-256 in [src/lib/password.ts](src/lib/password.ts). Web Crypto only — no new deps.
+
+### 4.5.3 Approval gate (defense in depth)
+
+The technician approval gate is enforced at **two** layers:
+
+1. **UI** — [ActiveTicket.tsx](src/app/components/ActiveTicket.tsx) hides the Approve / Escalate buttons when `currentUser.isITStaff === false`, replacing them with a banner pointing the user to the IT staff group.
+2. **Server Action** — [`approveAndExecute`](src/app/actions/tickets.ts) calls `getCurrentUser()` and throws if the requester is not in `it-staff`. A separate [`demoApproveAndExecute`](src/app/actions/tickets.ts) bypass exists for the public `/api/demo/ticket?autoApprove=true` route — that endpoint is the only thing allowed to skip the gate.
+
+### 4.5.4 User journey (the visual demo flow)
+
+```text
+END-USER VIEW                       IT-STAFF VIEW
+─────────────                       ─────────────
+GET /  (no cookie)
+   │ redirect
+   ▼
+GET /login
+   • renders 9 seeded AD users with status badges
+   • inactive users (locked / pwd_expired / stale_kerb) cannot log in
+   • banner explains the failure mode + nudges them to file a ticket
+   │
+   ▼  one-click as alice@acme.test
+   ▼  cookie: it_session=…
+   ▼
+GET / → AppShell (Slack tab)        GET / → AppShell (Console tab when IT)
+   • Posting as Alice Nguyen           • TicketQueue + ActiveTicket render
+   • 4 quick prompts
+   │ click "AD account locked"
+   ▼ Server Action: createTicket
+       │
+       ▼ status=new → drafting
+       │   Hyperspell user context
+       │   Nia advisor (rb-ad-account-locked, 0.95)
+       ▼ status=awaiting_approval
+   • banner: "Awaiting IT staff       • plan + citations rendered
+     approval"                        • [Approve & Execute] button visible
+                                      │ click
+                                      ▼ Server Action: approveAndExecute
+                                          │ status=executing
+                                          ▼ executePlan() runs serially
+                                            ✓ insforge   ad.lookup_user
+                                            ✓ tensorlake sandbox.read_auth_logs
+                                            ✓ insforge   identity.verify
+                                            ✓ insforge   ad.unlock_account
+                                            ✓ slack_reply
+                                          │ status=resolved (≈14s)
+                                          ▼ extractRunbook()
+                                            successCount += 1
+GET /login                          • Runbooks tab: counter incremented
+   • bob@acme.test now active
+   • can log in → /
+```
+
+---
+
 ## 5. Integration adapters
 
 All adapters live in [src/lib/integrations/](src/lib/integrations/) and follow the same shape:
@@ -89,9 +169,10 @@ return mock();  // always fall back, never throw
 | **Nia** | [nia.ts](src/lib/integrations/nia.ts) | `POST /v2/advisor` (codebase-as-runbooks payload) | `NIA_API_KEY` | Returns `{ matched_runbook_id, confidence, reasoning, response, plan }` parsed from JSON in `data.advice`. |
 | **AI Gateway** | [ai-gateway.ts](src/lib/integrations/ai-gateway.ts) | `POST /v1/chat/completions` (OpenAI-compatible) | `AI_GATEWAY_API_KEY` (model: `AI_GATEWAY_MODEL`, default `anthropic/claude-haiku-4-5`) | Drafts using runbooks dumped as system context. Same JSON output shape as Nia. |
 | **Hyperspell** | [hyperspell.ts](src/lib/integrations/hyperspell.ts) | `GET /v1/users/:email/context` | `HYPERSPELL_API_KEY` | 3-user dictionary (alex/priya/jordan) — name, team, recent apps. |
-| **InsForge** | [insforge.ts](src/lib/integrations/insforge.ts) | (not yet wired) | — | Edge-function-style policy gate. Mocks `okta.list_groups`, `mdm.push_vpn_config`, `identity.verify`. |
+| **InsForge** | [insforge.ts](src/lib/integrations/insforge.ts) | InsForge SDK (`@insforge/sdk`) for storage; edge functions not yet wired | `NEXT_PUBLIC_INSFORGE_URL`, `NEXT_PUBLIC_INSFORGE_ANON_KEY` | Edge-function-style policy gate. Mocks `okta.list_groups`, `mdm.push_vpn_config`, `identity.verify`, plus AD capabilities `ad.lookup_user`, `ad.unlock_account`, `ad.reset_password`, `ad.refresh_kerberos` (read/write the AD store). |
 | **Aside** | [aside.ts](src/lib/integrations/aside.ts) | (not yet wired) | — | Browser action in user's authenticated session — agent never holds creds. Mocks `okta.add_to_group`, `okta.send_reset`. |
-| **Tensorlake** | [tensorlake.ts](src/lib/integrations/tensorlake.ts) | (not yet wired) | — | Sandboxed compute. Mocks `diag.network_probe` with synthetic traceroute output. |
+| **Tensorlake** | [tensorlake.ts](src/lib/integrations/tensorlake.ts) | (not yet wired); delegates to [sandbox.ts](src/lib/integrations/sandbox.ts) for read-only log access | — | Sandboxed compute. Mocks `diag.network_probe` (traceroute), plus `sandbox.read_auth_logs` and `sandbox.read_kerberos_logs` which delegate to the Vercel Sandbox adapter. |
+| **Vercel Sandbox** | [sandbox.ts](src/lib/integrations/sandbox.ts) | Firecracker microVMs (real call gated, default mock) | `VERCEL_SANDBOX_TOKEN` | Read-only log inspection. Mounts FS read-only, no network egress to corp prod, secret-pattern redaction (`AKIA…`, `password=…`, PEM private keys), microVM destroyed after each call. |
 
 Each execution adapter returns `{ ok: boolean, log: string[] }`. The `log` is the user-visible per-step output rendered in the Active Ticket panel. The two drafting adapters (Nia, AI Gateway) return a `NiaDraftResult` with citations, confidence, response, and plan.
 
@@ -114,7 +195,7 @@ When `NIA_API_KEY` is set, [`realNiaDraft`](src/lib/integrations/nia.ts#L34):
 5. Maps the matched runbook into a `Citation` and the steps into `PlanStep`s with `status: "pending"`.
 6. On *any* failure (network, non-OK, malformed JSON) — returns `null` and the caller falls through to `mockNiaDraft`.
 
-The mock scores runbooks by tag overlap + title-word overlap + log-weighted prior `successCount`, then templates a response by inferred tag (`sso | vpn | password | laptop | generic`).
+The mock scores runbooks by tag overlap + title-word overlap + log-weighted prior `successCount`, then templates a response by inferred tag (`sso | vpn | password | laptop | account_locked | stale_kerberos | generic`).
 
 ---
 

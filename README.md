@@ -50,18 +50,63 @@ No keys required — every integration runs in mock mode by default. The demo is
 
 To go live: set `NIA_API_KEY` (and optionally `HYPERSPELL_API_KEY`) in `.env.local`. Each adapter auto-detects and switches to the real implementation.
 
-## 60-second demo script
+## How a user works the demo (visual walkthrough)
 
-1. **Open `Slack (demo)` tab.** Click any of the three quick prompts, or type your own as Alex / Priya / Jordan.
-2. **Switch to `Console` tab.** Watch the ticket appear live (queue updates every 600ms via `/api/state`).
-3. **Status flow**: `new → drafting → awaiting_approval`. The right sidebar fills with **Nia** runbook citations + **Hyperspell** user context.
-4. **Click "Approve & Execute"**. Each plan step runs with live logs:
-   - **InsForge** — policy-gated edge function (Okta group check)
-   - **Aside** — opens user's authenticated browser session, agent never holds creds
-   - **Tensorlake** — sandboxed diagnostic (for the VPN ticket)
-   - **Slack reply** — auto-posts back to the user
-5. **Open `Runbooks` tab.** The matching runbook's success count just incremented — the moat in motion.
-6. **Send a novel ticket** ("monitor flickers"). No high-confidence runbook match → new runbook synthesized + auto-indexed in Nia. Library grew.
+The demo has **two personas**, with two distinct surfaces:
+
+1. **End user** (Alice, Bob, Eve, …) — files tickets via the in-app Slack mock.
+2. **IT staff** (Morgan, Sam) — approves agent plans in the Console.
+
+```text
+END-USER VIEW                       IT-STAFF VIEW
+─────────────                       ─────────────
+1. /  (no cookie)                   
+       │                            
+       ▼                            
+   /login   ── one-click as alice ──►
+   (sees AD user list with status   
+    badges: active / locked /       
+    pwd_expired / stale_kerberos)   
+
+2. Slack tab opens by default       (when morgan logs in,
+   "Posting as Alice Nguyen"         Console opens by default)
+                                    
+3. Click a quick prompt        ───► Console: T-XXXX appears
+   OR type a message                status: drafting
+                                    │
+                                    ▼ Hyperspell + Nia draft
+                                    status: awaiting_approval
+                                    
+4. (Alice sees banner)              Plan + citations rendered
+   "Awaiting IT staff approval"     [Approve & Execute] button
+                                    │
+                                    ▼ Morgan clicks
+5.                                  Plan executes serially
+                                    each step shows live logs:
+                                    ✓ insforge / ad.lookup_user
+                                    ✓ tensorlake / sandbox.read_*
+                                    ✓ insforge / ad.unlock_account
+                                    ✓ slack_reply
+                                    status: resolved (≈14s)
+
+6.                                  Runbooks tab: matched runbook's
+                                    successCount +1 — the moat in motion.
+```
+
+### Detailed 90-second demo script
+
+1. **Open `/`** → redirects to `/login`. Right panel shows 9 seeded AD users with status badges (active, locked, password_expired, stale_kerberos).
+2. **One-click sign-in as `alice@acme.test`** (active). Default tab is `Slack (demo)` since Alice isn't IT staff.
+3. **Click any quick prompt** in the Slack tab — e.g. "AD account locked" or "Mapped drives keep prompting password." A ticket flows into the Console.
+4. **Switch to Console.** Status: `new → drafting → awaiting_approval`. Right sidebar fills with **Nia** runbook citations (e.g. `rb-ad-account-locked`) + **Hyperspell** user context. Alice sees the plan but no Approve button — only IT staff can approve.
+5. **Sign out → sign in as `morgan@acme.test`** (IT staff). Console opens by default; the pending ticket is selected.
+6. **Click "Approve & Execute".** Plan runs serially with live logs:
+   - **InsForge** `ad.lookup_user` / `ad.unlock_account` / `ad.refresh_kerberos` — policy-gated AD edge functions
+   - **Tensorlake → Vercel Sandbox** `sandbox.read_auth_logs` / `sandbox.read_kerberos_logs` — Firecracker microVM, **read-only mounts**, secret redaction, no network egress to corp prod
+   - **Aside** — browser action in the user's own authenticated session (agent never holds creds)
+   - **Slack reply** — auto-posts back to the reporter
+7. **Open `Runbooks` tab.** The matching runbook's `successCount` just incremented.
+8. **Try to log in as `bob@acme.test`** (status: locked) → red banner blocks login until an IT ticket unlocks the account. Send a novel ticket ("monitor flickers") to see a new runbook synthesized + auto-indexed in Nia.
 
 The dashboard shows deflection rate, AI-resolved count, escalations, and avg resolution time — live.
 

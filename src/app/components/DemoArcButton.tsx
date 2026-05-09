@@ -12,6 +12,12 @@ interface ArcPrompt {
 
 const ARC: ArcPrompt[] = [
   {
+    reporter: "Frank Adebayo",
+    reporterEmail: "frank@acme.test",
+    subject: "CFO cannot access VPN before board meeting",
+    body: "I have a board meeting in 20 minutes and my VPN keeps failing after my password change. I need access to the finance drive and NetSuite urgently.",
+  },
+  {
     reporter: "Alex Reyes",
     reporterEmail: "alex@acme.test",
     subject: "Can't access Figma anymore",
@@ -64,27 +70,56 @@ export function DemoArcButton({ onSwitchTab }: { onSwitchTab: (tab: "console") =
     }
   };
 
+  const runCfoIncident = async () => {
+    if (running) return;
+    setRunning(true);
+    onSwitchTab("console");
+    try {
+      setStep(1);
+      const cfo = ARC[0];
+      await fetch("/api/demo/ticket", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ ...cfo, autoApprove: false }),
+      });
+    } finally {
+      setRunning(false);
+      setStep(0);
+    }
+  };
+
   return (
-    <button
-      onClick={run}
-      disabled={running}
-      title="Fires Figma → VPN → Salesforce → novel ticket through the full pipeline"
-      className="flex items-center gap-1.5 px-2.5 py-1 text-xs rounded-md bg-emerald-500/15 hover:bg-emerald-500/25 disabled:opacity-60 disabled:cursor-not-allowed text-emerald-200 border border-emerald-500/30 transition-colors"
-    >
-      {running ? (
-        <>
-          <Loader2 size={12} className="animate-spin" />
-          <span>
-            Demo arc {step}/{ARC.length}
-          </span>
-        </>
-      ) : (
-        <>
-          <Sparkles size={12} />
-          <span>Run demo arc</span>
-        </>
-      )}
-    </button>
+    <div className="flex items-center gap-2">
+      <button
+        onClick={runCfoIncident}
+        disabled={running}
+        title="Creates a high-stakes CFO VPN incident with logs, identity context, runbook evidence, and approval-gated action"
+        className="flex items-center gap-1.5 px-2.5 py-1 text-xs rounded-md bg-cyan-500/15 hover:bg-cyan-500/25 disabled:opacity-60 disabled:cursor-not-allowed text-cyan-200 border border-cyan-500/30 transition-colors"
+      >
+        {running && step === 1 ? <Loader2 size={12} className="animate-spin" /> : <Sparkles size={12} />}
+        <span>CFO incident</span>
+      </button>
+      <button
+        onClick={run}
+        disabled={running}
+        title="Fires CFO VPN → Figma → VPN → Salesforce → novel ticket through the full pipeline"
+        className="flex items-center gap-1.5 px-2.5 py-1 text-xs rounded-md bg-emerald-500/15 hover:bg-emerald-500/25 disabled:opacity-60 disabled:cursor-not-allowed text-emerald-200 border border-emerald-500/30 transition-colors"
+      >
+        {running ? (
+          <>
+            <Loader2 size={12} className="animate-spin" />
+            <span>
+              Demo arc {step}/{ARC.length}
+            </span>
+          </>
+        ) : (
+          <>
+            <Sparkles size={12} />
+            <span>Run demo arc</span>
+          </>
+        )}
+      </button>
+    </div>
   );
 }
 

@@ -1,6 +1,7 @@
-import { db } from "../db";
+import { listRunbooks } from "../data";
 import { Citation, PlanStep } from "../types";
-import { extractJsonObject, NiaDraftInput, NiaDraftResult } from "./nia";
+import { NiaDraftInput, NiaDraftResult } from "./nia";
+import { extractJsonObject } from "./json";
 
 const AI_GATEWAY_URL = process.env.AI_GATEWAY_URL || "https://ai-gateway.vercel.sh/v1";
 const AI_GATEWAY_MODEL = process.env.AI_GATEWAY_MODEL || "anthropic/claude-haiku-4-5";
@@ -8,7 +9,7 @@ const AI_GATEWAY_MODEL = process.env.AI_GATEWAY_MODEL || "anthropic/claude-haiku
 export async function aiGatewayDraft(input: NiaDraftInput): Promise<NiaDraftResult | null> {
   if (!process.env.AI_GATEWAY_API_KEY) return null;
 
-  const runbooks = db.listRunbooks();
+  const runbooks = await listRunbooks();
   const firstName = input.reporter.split(/\s+/)[0];
 
   const runbookContext =
@@ -44,6 +45,16 @@ Use the literal string "{reporter_email}" as a placeholder for the user's email 
 
 If no good runbook match: matched_runbook_id null, confidence below 0.6, minimal plan with one slack_reply step asking for more detail.`;
 
+  const memoryContext =
+    input.memories && input.memories.length > 0
+      ? `\n\n## Relevant context (Hyperspell memory search)\n${input.memories
+          .map(
+            (m, i) =>
+              `[${i + 1}] (${m.source}, score ${m.score.toFixed(2)}) ${m.title}: ${m.summary}`,
+          )
+          .join("\n")}\n`
+      : "";
+
   const userPrompt = `## Runbook library
 ${runbookContext}
 
@@ -51,7 +62,7 @@ ${runbookContext}
 Subject: ${input.subject}
 Body: ${input.body}
 Reporter: ${input.reporter} <${input.reporterEmail}> (first name: ${firstName})
-Customer: ${input.customerOrg}
+Customer: ${input.customerOrg}${memoryContext}
 
 Produce the JSON object.`;
 
