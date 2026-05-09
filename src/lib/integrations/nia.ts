@@ -15,7 +15,7 @@ export interface NiaDraftResult {
   reasoning: string;
   response: string;
   plan: PlanStep[];
-  source: "nia-advisor" | "mock";
+  source: "nia-advisor" | "ai-gateway" | "mock";
 }
 
 const NIA_API_URL = process.env.NIA_API_URL || "https://apigcp.trynia.ai/v2";
@@ -28,6 +28,12 @@ export async function niaDraft(input: NiaDraftInput): Promise<NiaDraftResult> {
     });
     if (real) return real;
   }
+  const { aiGatewayDraft } = await import("./ai-gateway");
+  const aig = await aiGatewayDraft(input).catch((err) => {
+    console.warn("[AIGateway] threw:", (err as Error).message);
+    return null;
+  });
+  if (aig) return aig;
   return mockNiaDraft(input);
 }
 
@@ -179,7 +185,7 @@ function normalizeKind(k: string | undefined): PlanStep["kind"] {
   return "slack_reply";
 }
 
-function extractJsonObject(text: string): string | null {
+export function extractJsonObject(text: string): string | null {
   const start = text.indexOf("{");
   if (start === -1) return null;
   let depth = 0;
