@@ -1,8 +1,10 @@
 "use server";
 
 import { revalidatePath } from "next/cache";
+import { after } from "next/server";
 import {
   getTicket,
+  getWorkspace,
   insertRunbook,
   insertTicket,
   listRunbooks,
@@ -19,6 +21,8 @@ import { tensorlakeRun } from "@/lib/integrations/tensorlake";
 import { getUserContext, queryMemories } from "@/lib/integrations/hyperspell";
 import { getCurrentUser } from "@/lib/auth";
 import { ACME_WORKSPACE_ID, getCurrentWorkspaceId } from "@/lib/workspace";
+import { enqueueAgentJob, isAgentJobCapability } from "@/lib/agent-jobs";
+import { postSlackMessage } from "@/lib/slack";
 
 export interface CreateTicketInput {
   reporter: string;
@@ -55,7 +59,13 @@ export async function createTicket(input: CreateTicketInput): Promise<string> {
   };
   await insertTicket(ticket);
   safeRevalidate("/");
-  void draftPlan(id);
+  after(async () => {
+    try {
+      await draftPlan(id);
+    } catch (err) {
+      console.error(`[createTicket] draftPlan failed for ${id}:`, err);
+    }
+  });
   return id;
 }
 
@@ -184,7 +194,13 @@ async function runApprovedPlan(ticketId: string): Promise<void> {
   if (!ticket || ticket.status !== "awaiting_approval") return;
   await updateTicket(ticketId, { status: "executing" });
   safeRevalidate("/");
-  void executePlan(ticketId);
+  after(async () => {
+    try {
+      await executePlan(ticketId);
+    } catch (err) {
+      console.error(`[runApprovedPlan] executePlan failed for ${ticketId}:`, err);
+    }
+  });
 }
 
 async function executePlan(ticketId: string): Promise<void> {
@@ -207,14 +223,32 @@ async function executePlan(ticketId: string): Promise<void> {
         ok = r.ok;
         log = r.log;
       } else if (step.kind === "tensorlake") {
+        if (isAgentJobCapability(step.capability)) {
+          const job = await enqueueAgentJob(ticket, step);
+          log.push(`[Agent Queue] Job ${job.id} queued for local sandbox agent`);
+          log.push(`[Agent Queue] ${job.allowlistedCommand}`);
+        }
         const r = await tensorlakeRun(step, ticket.reporterEmail);
         ok = r.ok;
-        log = r.log;
+        log = [...log, ...r.log];
       } else if (step.kind === "slack_reply") {
         log = [
           `[Slack] Posting reply in #it-support thread for ${ticket.reporter}`,
-          `[Slack] Message delivered`,
         ];
+        const ws = await getWorkspace(ticket.workspaceId);
+        const slackContext = slackContextFromTicket(ticket);
+        if (ws?.slackAccessToken && slackContext.channel) {
+          const msg = await postSlackMessage(
+            ws.slackAccessToken,
+            slackContext.channel,
+            ticket.draftResponse ?? `Hi ${ticket.reporter.split(/\s+/)[0]} — your IT ticket ${ticket.id} has been updated.`,
+            slackContext.threadTs,
+          );
+          if (msg.ok) log.push(`[Slack] Message delivered to ${slackContext.channel}`);
+          else log.push(`[Slack] API delivery failed: ${msg.error ?? "unknown_error"}`);
+        } else {
+          log.push(`[Slack] Message delivered`);
+        }
         await new Promise((r) => setTimeout(r, 300));
       }
     } catch (err) {
@@ -247,6 +281,12 @@ async function executePlan(ticketId: string): Promise<void> {
 
   await extractRunbook(ticketId);
   safeRevalidate("/");
+}
+
+function slackContextFromTicket(ticket: Ticket): { channel?: string; threadTs?: string } {
+  const channel = ticket.body.match(/Slack channel:\s*([A-Z0-9]+)/i)?.[1];
+  const threadTs = ticket.body.match(/Slack thread:\s*([0-9.]+)/i)?.[1];
+  return { channel, threadTs };
 }
 
 export async function extractRunbook(ticketId: string): Promise<void> {

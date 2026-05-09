@@ -5,6 +5,7 @@ import {
   ADAccountStatus,
   ADGroup,
   ADUser,
+  AgentJob,
   Citation,
   DeflectionStat,
   PlanStep,
@@ -257,11 +258,72 @@ function adAccountPatchToRow(patch: Partial<ADAccount>): DbRow {
   return out;
 }
 
+function agentJobToRow(j: AgentJob): DbRow {
+  return {
+    id: j.id,
+    workspace_id: j.workspaceId,
+    ticket_id: j.ticketId,
+    step_id: j.stepId ?? null,
+    kind: j.kind,
+    target_user_email: j.targetUserEmail,
+    instructions: j.instructions,
+    allowlisted_command: j.allowlistedCommand,
+    status: j.status,
+    created_at: j.createdAt,
+    updated_at: j.updatedAt,
+    claimed_at: j.claimedAt ?? null,
+    completed_at: j.completedAt ?? null,
+    output: j.output ?? null,
+    error: j.error ?? null,
+  };
+}
+
+function agentJobFromRow(r: DbRow): AgentJob {
+  return {
+    id: r.id as string,
+    workspaceId: r.workspace_id as string,
+    ticketId: r.ticket_id as string,
+    stepId: (r.step_id as string | null) ?? undefined,
+    kind: r.kind as AgentJob["kind"],
+    targetUserEmail: r.target_user_email as string,
+    instructions: r.instructions as string,
+    allowlistedCommand: r.allowlisted_command as string,
+    status: r.status as AgentJob["status"],
+    createdAt: Number(r.created_at),
+    updatedAt: Number(r.updated_at),
+    claimedAt: r.claimed_at == null ? undefined : Number(r.claimed_at),
+    completedAt: r.completed_at == null ? undefined : Number(r.completed_at),
+    output: (r.output as string | null) ?? undefined,
+    error: (r.error as string | null) ?? undefined,
+  };
+}
+
+function agentJobPatchToRow(patch: Partial<AgentJob>): DbRow {
+  const out: DbRow = {};
+  if (patch.status !== undefined) out.status = patch.status;
+  if (patch.claimedAt !== undefined) out.claimed_at = patch.claimedAt;
+  if (patch.completedAt !== undefined) out.completed_at = patch.completedAt;
+  if (patch.output !== undefined) out.output = patch.output;
+  if (patch.error !== undefined) out.error = patch.error;
+  out.updated_at = Date.now();
+  return out;
+}
+
 function ifErr(error: unknown, op: string): void {
   if (error) {
-    const msg = (error as { message?: string }).message ?? String(error);
+    const msg =
+      (error as { message?: string }).message ??
+      (typeof error === "object" ? JSON.stringify(error) : String(error));
     throw new Error(`[InsForge] ${op}: ${msg}`);
   }
+}
+
+function isMissingRelationError(error: unknown): boolean {
+  if (!error) return false;
+  const text =
+    (error as { message?: string }).message ??
+    (typeof error === "object" ? JSON.stringify(error) : String(error));
+  return /agent_jobs|relation|does not exist|schema cache|not found/i.test(text);
 }
 
 // Workspace CRUD
@@ -288,6 +350,20 @@ export async function getWorkspace(id: string): Promise<Workspace | undefined> {
     return data ? workspaceFromRow(data as DbRow) : undefined;
   }
   return db.getWorkspace(id);
+}
+
+export async function getWorkspaceBySlackTeamId(teamId: string): Promise<Workspace | undefined> {
+  const ifg = isInsforgeEnabled() ? getInsforge() : null;
+  if (ifg) {
+    const { data, error } = await ifg.database
+      .from("workspaces")
+      .select()
+      .eq("slack_team_id", teamId)
+      .maybeSingle();
+    ifErr(error, "getWorkspaceBySlackTeamId");
+    return data ? workspaceFromRow(data as DbRow) : undefined;
+  }
+  return db.listWorkspaces().find((w) => w.slackTeamId === teamId);
 }
 
 export async function listWorkspaces(): Promise<Workspace[]> {
@@ -370,7 +446,7 @@ export async function deleteExpiredDemoWorkspaces(olderThanMs: number): Promise<
     ifErr(error, "deleteExpiredDemoWorkspaces:list");
     const ids = ((data as { id: string }[] | null) ?? []).map((r) => r.id);
     for (const wsId of ids) {
-      for (const table of ["tickets", "runbooks", "ad_users", "ad_groups", "ad_accounts"] as const) {
+      for (const table of ["tickets", "runbooks", "ad_users", "ad_groups", "ad_accounts", "agent_jobs"] as const) {
         const { error: delErr } = await ifg.database.from(table).delete().eq("workspace_id", wsId);
         ifErr(delErr, `deleteExpiredDemoWorkspaces:${table}`);
       }
@@ -388,6 +464,7 @@ export async function deleteExpiredDemoWorkspaces(olderThanMs: number): Promise<
     for (const u of db.listADUsers(w.id)) db.adUsers.delete(`${w.id}:${u.email}`);
     for (const g of db.listADGroups(w.id)) db.adGroups.delete(`${w.id}:${g.id}`);
     for (const a of db.listADAccounts(w.id)) db.adAccounts.delete(`${w.id}:${a.email}`);
+    for (const j of db.listAgentJobs(w.id)) db.agentJobs.delete(j.id);
     db.workspaces.delete(w.id);
   }
   return expired.map((w) => w.id);
@@ -628,6 +705,58 @@ export async function updateADAccount(
   db.updateADAccount(email, patch, workspaceId);
 }
 
+// Agent jobs
+
+export async function insertAgentJob(job: AgentJob): Promise<void> {
+  const ifg = isInsforgeEnabled() ? getInsforge() : null;
+  if (ifg) {
+    const { error } = await ifg.database.from("agent_jobs").insert([agentJobToRow(job)]);
+    ifErr(error, "insertAgentJob");
+    return;
+  }
+  db.insertAgentJob(job);
+}
+
+export async function getAgentJob(id: string): Promise<AgentJob | undefined> {
+  const ifg = isInsforgeEnabled() ? getInsforge() : null;
+  if (ifg) {
+    const { data, error } = await ifg.database
+      .from("agent_jobs")
+      .select()
+      .eq("id", id)
+      .maybeSingle();
+    ifErr(error, "getAgentJob");
+    return data ? agentJobFromRow(data as DbRow) : undefined;
+  }
+  return db.getAgentJob(id);
+}
+
+export async function listAgentJobs(
+  workspaceId?: string,
+  status?: AgentJob["status"],
+): Promise<AgentJob[]> {
+  const ifg = isInsforgeEnabled() ? getInsforge() : null;
+  if (ifg) {
+    let q = ifg.database.from("agent_jobs").select();
+    if (workspaceId) q = q.eq("workspace_id", workspaceId);
+    if (status) q = q.eq("status", status);
+    const { data, error } = await q.order("created_at", { ascending: true });
+    ifErr(error, "listAgentJobs");
+    return ((data as DbRow[]) ?? []).map(agentJobFromRow);
+  }
+  return db.listAgentJobs(workspaceId, status);
+}
+
+export async function updateAgentJob(id: string, patch: Partial<AgentJob>): Promise<void> {
+  const ifg = isInsforgeEnabled() ? getInsforge() : null;
+  if (ifg) {
+    const { error } = await ifg.database.from("agent_jobs").update(agentJobPatchToRow(patch)).eq("id", id);
+    ifErr(error, "updateAgentJob");
+    return;
+  }
+  db.updateAgentJob(id, patch);
+}
+
 // Bulk re-tag — used by claimDemoWorkspace to migrate demo rows to a real workspace.
 export async function reassignWorkspace(
   fromWorkspaceId: string,
@@ -635,11 +764,14 @@ export async function reassignWorkspace(
 ): Promise<void> {
   const ifg = isInsforgeEnabled() ? getInsforge() : null;
   if (ifg) {
-    for (const table of ["tickets", "runbooks", "ad_users", "ad_groups", "ad_accounts"] as const) {
+    for (const table of ["tickets", "runbooks", "ad_users", "ad_groups", "ad_accounts", "agent_jobs"] as const) {
       const { error } = await ifg.database
         .from(table)
         .update({ workspace_id: toWorkspaceId })
         .eq("workspace_id", fromWorkspaceId);
+      // Agent jobs were added after the original demo schema. Demo claim should
+      // not block signup when the optional local-agent table is not migrated yet.
+      if (table === "agent_jobs" && isMissingRelationError(error)) continue;
       ifErr(error, `reassignWorkspace(${table})`);
     }
     return;
@@ -649,6 +781,7 @@ export async function reassignWorkspace(
   for (const u of db.listADUsers(fromWorkspaceId)) u.workspaceId = toWorkspaceId;
   for (const g of db.listADGroups(fromWorkspaceId)) g.workspaceId = toWorkspaceId;
   for (const a of db.listADAccounts(fromWorkspaceId)) a.workspaceId = toWorkspaceId;
+  for (const j of db.listAgentJobs(fromWorkspaceId)) j.workspaceId = toWorkspaceId;
 }
 
 export async function deflectionStats(workspaceId?: string): Promise<DeflectionStat> {

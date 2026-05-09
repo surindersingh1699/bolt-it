@@ -2,6 +2,56 @@
 
 > Source of truth for current milestone, what's done, and what's next. Update on every milestone change.
 
+## Active queue (M5–M8 — "make every adapter real")
+
+User directive 2026-05-09: stop tolerating mock-only branches; opt-in real path everywhere a real impl is reachable. Each item below is a self-contained milestone with its own done criteria and fallback. M4 (real Hyperspell memory queries) remains in progress in parallel.
+
+### M5 — Real Slack outbound replies (`chat.postMessage`)
+
+Replace the canned `[Slack] Posting reply…` log lines for `slack_reply` plan steps with a real call to `https://slack.com/api/chat.postMessage` using the workspace's stored bot token. Mock fallback retained whenever the token is missing or starts with `xoxb-mock-`.
+
+Done criteria:
+
+- [ ] `postSlackMessage(token, channel, text)` helper in [src/lib/slack.ts](src/lib/slack.ts) using `fetch`, no new deps
+- [ ] `executePlan` in [src/app/actions/tickets.ts](src/app/actions/tickets.ts) loads `workspace.slackAccessToken`, posts when real, falls back to mock log when absent/mock
+- [ ] Channel resolved from `params.channel` if present, else default `#it-support`
+- [ ] Posts in-thread when `params.thread_ts` present (future-friendly, not required for current plan steps)
+- [ ] `pnpm exec tsc --noEmit` clean
+- [ ] Mock branch preserved (rule 1)
+
+### M6 — Real identity verification via Hyperspell
+
+Replace the 400ms-sleep-and-return-ok stub in [src/lib/integrations/insforge.ts:36-41](src/lib/integrations/insforge.ts) with a real `queryMemories(query, userEmail)` call. Pass when ≥1 hit ≥0.3 score; otherwise return `ok: false` so the plan halts and escalates.
+
+Done criteria:
+- [ ] `identity.verify` calls `queryMemories("recent login activity", userEmail)`
+- [ ] Threshold: ≥1 hit with score ≥0.3 → verified; else → `ok: false` and escalation
+- [ ] Logs include the matched memory titles for auditability
+- [ ] When `HYPERSPELL_API_KEY` unset, falls back to current always-ok mock (rule 9)
+- [ ] `pnpm exec tsc --noEmit` clean
+
+### M7 — Vercel Sandbox real branch (BLOCKED — needs dep approval)
+
+Implement the empty `realVercelSandboxRead` body in [src/lib/integrations/sandbox.ts:49-59](src/lib/integrations/sandbox.ts). Requires adding `@vercel/sandbox` (per CLAUDE.md rule 8 — not installed without explicit user OK) and a `VERCEL_SANDBOX_TOKEN` to test against.
+
+Done criteria:
+- [ ] **Blocked:** confirm `@vercel/sandbox` dep is acceptable
+- [ ] Spin up Firecracker microVM, mount target paths read-only, grep for user identifier
+- [ ] Pass redacted matches back through existing `SandboxLogReadResult` shape
+- [ ] Falls back to mock log corpus when token missing
+- [ ] Verified end-to-end against a `bob@acme.test` lockout ticket
+
+### M8 — `.env.local.example` documenting every key
+
+Single canonical file listing every env var the app honors, with one-line comments on what unlocks when set. Reduces "how do I make X real" to a copy-paste exercise.
+
+Done criteria:
+- [ ] All keys present: `HYPERSPELL_API_KEY`, `HYPERSPELL_DEMO_USER_ID`, `USE_NIA`, `NIA_API_KEY`, `NIA_API_URL`, `AI_GATEWAY_API_KEY`, `AI_GATEWAY_MODEL`, `AI_GATEWAY_URL`, `SLACK_CLIENT_ID`, `SLACK_CLIENT_SECRET`, `VERCEL_SANDBOX_TOKEN`, `NEXT_PUBLIC_INSFORGE_URL`, `NEXT_PUBLIC_INSFORGE_ANON_KEY`, `INSFORGE_SERVICE_ROLE_KEY`
+- [ ] Each key has a one-line comment naming the adapter it enables
+- [ ] File is `.env.local.example` (not `.env.local`) so it's safe to commit; ensure `.gitignore` keeps `.env.local` out
+
+---
+
 ## Current milestone
 **M4 — Real Hyperspell memory queries + seeded demo context.**
 

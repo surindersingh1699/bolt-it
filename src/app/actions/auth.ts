@@ -80,6 +80,10 @@ export async function signupAction(formData: FormData): Promise<void> {
     workspaceDisplayNameForDomain(domain) + " Corp",
     false,
   );
+  const existingGlobalUser = await getADUser(email);
+  if (existingGlobalUser) {
+    redirect(`/signup?err=email_taken&email=${encodeURIComponent(email)}`);
+  }
   const existing = await getADUser(email, workspace.id);
   if (existing) {
     redirect(`/signup?err=email_taken&email=${encodeURIComponent(email)}`);
@@ -114,7 +118,11 @@ export async function signupAction(formData: FormData): Promise<void> {
   const c = await cookies();
   const demoCookie = c.get(DEMO_COOKIE);
   if (demoCookie?.value && demoCookie.value !== workspace.id) {
-    await reassignWorkspace(demoCookie.value, workspace.id);
+    try {
+      await reassignWorkspace(demoCookie.value, workspace.id);
+    } catch (err) {
+      console.error("[signup] Demo workspace carry-over failed", err);
+    }
     await clearDemoCookie();
   }
 

@@ -1,4 +1,4 @@
-import { Ticket, Runbook, PlanStep, DeflectionStat, ADUser, ADGroup, ADAccount, Workspace } from "./types";
+import { Ticket, Runbook, PlanStep, DeflectionStat, ADUser, ADGroup, ADAccount, Workspace, AgentJob } from "./types";
 
 declare global {
   // eslint-disable-next-line no-var
@@ -12,6 +12,7 @@ class ITDB {
   adUsers: Map<string, ADUser> = new Map();
   adGroups: Map<string, ADGroup> = new Map();
   adAccounts: Map<string, ADAccount> = new Map();
+  agentJobs: Map<string, AgentJob> = new Map();
   subscribers: Set<() => void> = new Set();
 
   insertWorkspace(w: Workspace) {
@@ -154,6 +155,29 @@ class ITDB {
     const existing = this.getADAccount(email, workspaceId);
     if (!existing) return;
     this.adAccounts.set(`${existing.workspaceId}:${existing.email}`, { ...existing, ...patch });
+    this.emit();
+  }
+
+  insertAgentJob(job: AgentJob) {
+    this.agentJobs.set(job.id, job);
+    this.emit();
+  }
+
+  getAgentJob(id: string) {
+    return this.agentJobs.get(id);
+  }
+
+  listAgentJobs(workspaceId?: string, status?: AgentJob["status"]): AgentJob[] {
+    const all = Array.from(this.agentJobs.values());
+    return all
+      .filter((j) => (!workspaceId || j.workspaceId === workspaceId) && (!status || j.status === status))
+      .sort((a, b) => a.createdAt - b.createdAt);
+  }
+
+  updateAgentJob(id: string, patch: Partial<AgentJob>) {
+    const existing = this.agentJobs.get(id);
+    if (!existing) return;
+    this.agentJobs.set(id, { ...existing, ...patch, updatedAt: Date.now() });
     this.emit();
   }
 

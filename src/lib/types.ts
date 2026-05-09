@@ -42,6 +42,26 @@ export interface Workspace {
   lastUsedAt?: number;
 }
 
+export type AgentJobStatus = "queued" | "claimed" | "succeeded" | "failed";
+
+export interface AgentJob {
+  id: string;
+  workspaceId: string;
+  ticketId: string;
+  stepId?: string;
+  kind: "collect_logs" | "network_probe" | "app_diagnostic";
+  targetUserEmail: string;
+  instructions: string;
+  allowlistedCommand: string;
+  status: AgentJobStatus;
+  createdAt: number;
+  updatedAt: number;
+  claimedAt?: number;
+  completedAt?: number;
+  output?: string;
+  error?: string;
+}
+
 export interface Ticket {
   id: string;
   workspaceId: string;

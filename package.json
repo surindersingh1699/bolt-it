@@ -5,7 +5,8 @@
   "scripts": {
     "dev": "next dev",
     "build": "next build",
-    "start": "next start"
+    "start": "next start",
+    "agent": "node scripts/local-agent.mjs"
   },
   "dependencies": {
     "@insforge/sdk": "^1.2.7",

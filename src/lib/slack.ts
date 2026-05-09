@@ -1,4 +1,4 @@
-import { randomBytes } from "crypto";
+import { createHmac, randomBytes, timingSafeEqual } from "crypto";
 
 export const SLACK_OAUTH_AUTHORIZE = "https://slack.com/oauth/v2/authorize";
 export const SLACK_OAUTH_ACCESS = "https://slack.com/api/oauth.v2.access";
@@ -6,6 +6,7 @@ export const SLACK_OAUTH_ACCESS = "https://slack.com/api/oauth.v2.access";
 export const SLACK_SCOPES = [
   "channels:history",
   "channels:read",
+  "app_mentions:read",
   "chat:write",
   "groups:history",
   "groups:read",
@@ -71,4 +72,65 @@ export async function exchangeSlackCode(
 
 export function mintOAuthState(): string {
   return randomBytes(16).toString("hex");
+}
+
+export function isSlackSigningConfigured(): boolean {
+  return Boolean(process.env.SLACK_SIGNING_SECRET);
+}
+
+export async function verifySlackRequest(req: Request, rawBody: string): Promise<boolean> {
+  const secret = process.env.SLACK_SIGNING_SECRET;
+  if (!secret) return false;
+  const timestamp = req.headers.get("x-slack-request-timestamp");
+  const signature = req.headers.get("x-slack-signature");
+  if (!timestamp || !signature) return false;
+  const age = Math.abs(Date.now() / 1000 - Number(timestamp));
+  if (!Number.isFinite(age) || age > 60 * 5) return false;
+  const base = `v0:${timestamp}:${rawBody}`;
+  const expected = `v0=${createHmac("sha256", secret).update(base).digest("hex")}`;
+  const a = Buffer.from(expected);
+  const b = Buffer.from(signature);
+  return a.length === b.length && timingSafeEqual(a, b);
+}
+
+export async function fetchSlackUserEmail(
+  accessToken: string,
+  userId: string,
+): Promise<{ email?: string; name?: string }> {
+  const url = new URL("https://slack.com/api/users.info");
+  url.searchParams.set("user", userId);
+  const res = await fetch(url, {
+    headers: { Authorization: `Bearer ${accessToken}` },
+  });
+  const data = (await res.json()) as {
+    ok?: boolean;
+    user?: { real_name?: string; name?: string; profile?: { email?: string } };
+  };
+  if (!data.ok) return {};
+  return {
+    email: data.user?.profile?.email,
+    name: data.user?.real_name ?? data.user?.name,
+  };
+}
+
+export async function postSlackMessage(
+  accessToken: string,
+  channel: string,
+  text: string,
+  threadTs?: string,
+): Promise<{ ok: boolean; error?: string }> {
+  const res = await fetch("https://slack.com/api/chat.postMessage", {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${accessToken}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      channel,
+      text,
+      thread_ts: threadTs,
+    }),
+  });
+  const data = (await res.json()) as { ok?: boolean; error?: string };
+  return { ok: Boolean(data.ok), error: data.error };
 }
