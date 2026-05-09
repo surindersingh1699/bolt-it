@@ -21,8 +21,24 @@ import { tensorlakeRun } from "@/lib/integrations/tensorlake";
 import { getUserContext, queryMemories } from "@/lib/integrations/hyperspell";
 import { getCurrentUser } from "@/lib/auth";
 import { ACME_WORKSPACE_ID, getCurrentWorkspaceId } from "@/lib/workspace";
-import { enqueueAgentJob, isAgentJobCapability } from "@/lib/agent-jobs";
+import { enqueueAgentJob, humanLabelFor, isAgentJobCapability } from "@/lib/agent-jobs";
 import { postSlackMessage } from "@/lib/slack";
+
+async function postSlackUpdate(ticket: Ticket, text: string): Promise<void> {
+  const ws = await getWorkspace(ticket.workspaceId);
+  const ctx = slackContextFromTicket(ticket);
+  if (!ws?.slackAccessToken || !ctx.channel) return;
+  await postSlackMessage(ws.slackAccessToken, ctx.channel, text, ctx.threadTs).catch(() => undefined);
+}
+
+function humanStepLabel(step: PlanStep): string {
+  if (step.kind === "tensorlake") return humanLabelFor(step.capability);
+  if (step.kind === "insforge") return step.description || "Running secure backend action";
+  if (step.kind === "aside") return step.description || "Running action in your browser session";
+  if (step.kind === "slack_reply") return "Replying with the resolution";
+  return step.description || "Working";
+}
+import { classifyPlan } from "@/lib/policy";
 
 export interface CreateTicketInput {
   reporter: string;
@@ -61,6 +77,13 @@ export async function createTicket(input: CreateTicketInput): Promise<string> {
   safeRevalidate("/");
   after(async () => {
     try {
+      if (ticket.channel === "slack") {
+        const firstName = ticket.reporter.split(/\s+/)[0];
+        await postSlackUpdate(
+          ticket,
+          `👋 Hi ${firstName} — got it. I'm gathering context from your runbooks, user history, and recent activity. Logged as ticket ${ticket.id}.`,
+        );
+      }
       await draftPlan(id);
     } catch (err) {
       console.error(`[createTicket] draftPlan failed for ${id}:`, err);
@@ -128,10 +151,11 @@ export async function draftPlan(ticketId: string): Promise<void> {
       });
     }
 
-    const plan: PlanStep[] = draft.plan.map((step) => ({
+    const rawPlan: PlanStep[] = draft.plan.map((step) => ({
       ...step,
       params: substituteParams(step.params, ticket.reporterEmail),
     }));
+    const plan = await classifyPlan(rawPlan, ticket);
 
     await updateTicket(ticketId, {
       status: "awaiting_approval",
@@ -140,15 +164,20 @@ export async function draftPlan(ticketId: string): Promise<void> {
       draftResponse: draft.response,
       plan,
     });
+    const updatedForSlack = await getTicket(ticketId);
+    if (updatedForSlack) {
+      const firstName = ticket.reporter.split(/\s+/)[0];
+      const planLines = plan.map((s, i) => `   ${i + 1}. ${humanStepLabel(s)}`).join("\n");
+      await postSlackUpdate(
+        updatedForSlack,
+        `🔎 Hi ${firstName} — I have a plan and I'm waiting for an IT technician to approve it:\n${planLines}\n\n_Ticket ${ticketId} · saved for future reference_`,
+      );
+    }
   } catch (err) {
     console.warn(`[draftPlan] ${ticketId} failed (${(err as Error).message}); using minimal fallback`);
     const firstName = ticket.reporter.split(/\s+/)[0];
-    await updateTicket(ticketId, {
-      status: "awaiting_approval",
-      citations: [],
-      confidence: 0.4,
-      draftResponse: `Hi ${firstName} — I'm taking a look at this and will follow up shortly. Could you share any error message or screenshot if you have one?`,
-      plan: [
+    const fallbackPlan = await classifyPlan(
+      [
         {
           id: "step-0",
           kind: "slack_reply",
@@ -156,6 +185,14 @@ export async function draftPlan(ticketId: string): Promise<void> {
           status: "pending",
         },
       ],
+      ticket,
+    );
+    await updateTicket(ticketId, {
+      status: "awaiting_approval",
+      citations: [],
+      confidence: 0.4,
+      draftResponse: `Hi ${firstName} — I'm taking a look at this and will follow up shortly. Could you share any error message or screenshot if you have one?`,
+      plan: fallbackPlan,
     });
   }
   safeRevalidate("/");
@@ -208,7 +245,24 @@ async function executePlan(ticketId: string): Promise<void> {
   if (!ticket) return;
 
   for (const step of ticket.plan) {
+    if (step.approvalMode === "human") {
+      await updateStep(ticketId, step.id, {
+        status: "skipped",
+        log: [
+          ...(step.log ?? []),
+          `[Policy] Escalating to human — step requires manual review (${step.risk ?? "high"}: ${step.riskReason ?? "high-risk action"})`,
+        ],
+        finishedAt: Date.now(),
+      });
+      await updateTicket(ticketId, { status: "escalated" });
+      safeRevalidate("/");
+      return;
+    }
+
     await updateStep(ticketId, step.id, { status: "running", startedAt: Date.now() });
+    if (step.kind !== "slack_reply") {
+      await postSlackUpdate(ticket, `🔧 ${humanStepLabel(step)}…`);
+    }
 
     let ok = true;
     let log: string[] = [];
