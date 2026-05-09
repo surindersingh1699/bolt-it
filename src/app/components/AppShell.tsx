@@ -6,6 +6,7 @@ import { Console } from "./Console";
 import { SlackChat } from "./SlackChat";
 import { RunbooksTab } from "./RunbooksTab";
 import { DeflectionDashboard } from "./DeflectionDashboard";
+import { DemoArcButton } from "./DemoArcButton";
 import clsx from "clsx";
 import { LayoutGrid, MessageSquare, BookOpen } from "lucide-react";
 
@@ -33,7 +34,9 @@ export function AppShell() {
             for Acme Corp · Slack-native · zero standing access
           </span>
         </div>
-        <nav className="flex gap-1 ml-auto">
+        <div className="ml-auto flex items-center gap-3">
+          <DemoArcButton onSwitchTab={setTab} />
+          <nav className="flex gap-1">
           {TABS.map((t) => (
             <button
               key={t.id}
@@ -55,7 +58,8 @@ export function AppShell() {
               )}
             </button>
           ))}
-        </nav>
+          </nav>
+        </div>
       </header>
       <DeflectionDashboard stats={stats} />
       <main className="flex-1 overflow-hidden">
