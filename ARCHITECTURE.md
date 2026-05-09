@@ -23,7 +23,7 @@ A Slack message becomes an IT ticket. The agent retrieves matching runbooks (Nia
 | Validation | zod (installed, applied at any user-input boundary) | — |
 | Package manager | pnpm | `pnpm-lock.yaml` |
 
-**Sponsors wired (7):** Nia (retrieval + drafting), Convex (schema), Vercel (host), InsForge, Aside, Tensorlake, Hyperspell. Of those, **5 have adapter files** in [src/lib/integrations/](src/lib/integrations/) — Convex and Vercel are platform-level, not adapters.
+**Sponsors wired (7):** Nia (retrieval + drafting), Convex (schema), Vercel (host + AI Gateway), InsForge, Aside, Tensorlake, Hyperspell. **6 adapter files** in [src/lib/integrations/](src/lib/integrations/) — Convex is platform-level. The Vercel AI Gateway adapter is a Vercel product, so sponsor count stays at 7.
 
 ---
 
@@ -52,7 +52,7 @@ Keep this file 1:1 with [src/lib/types.ts](src/lib/types.ts). The schema is the 
 
 All state transitions live in [src/app/actions/tickets.ts](src/app/actions/tickets.ts).
 
-```
+```text
 new ──► drafting ──► awaiting_approval ──► executing ──► resolved
                             │                  │              │
                             └──► escalated ◄───┘              └──► extractRunbook()
@@ -68,6 +68,7 @@ new ──► drafting ──► awaiting_approval ──► executing ──►
 | 6. Escape hatch | [`escalateTicket`](src/app/actions/tickets.ts#L226) | Manual escalation from the UI. |
 
 **Invariants worth knowing:**
+
 - Status transitions only happen here. Never patch `status` from a component or adapter.
 - `revalidatePath("/")` is called after every state change — but the client doesn't rely on it; the 600ms poll catches everything.
 - Plan execution is serial, not parallel. A failed step short-circuits the rest. There is no retry.
@@ -86,14 +87,23 @@ return mock();  // always fall back, never throw
 | Adapter | File | Real API | Env gate | Capabilities used in mocks |
 | --- | --- | --- | --- | --- |
 | **Nia** | [nia.ts](src/lib/integrations/nia.ts) | `POST /v2/advisor` (codebase-as-runbooks payload) | `NIA_API_KEY` | Returns `{ matched_runbook_id, confidence, reasoning, response, plan }` parsed from JSON in `data.advice`. |
+| **AI Gateway** | [ai-gateway.ts](src/lib/integrations/ai-gateway.ts) | `POST /v1/chat/completions` (OpenAI-compatible) | `AI_GATEWAY_API_KEY` (model: `AI_GATEWAY_MODEL`, default `anthropic/claude-haiku-4-5`) | Drafts using runbooks dumped as system context. Same JSON output shape as Nia. |
 | **Hyperspell** | [hyperspell.ts](src/lib/integrations/hyperspell.ts) | `GET /v1/users/:email/context` | `HYPERSPELL_API_KEY` | 3-user dictionary (alex/priya/jordan) — name, team, recent apps. |
 | **InsForge** | [insforge.ts](src/lib/integrations/insforge.ts) | (not yet wired) | — | Edge-function-style policy gate. Mocks `okta.list_groups`, `mdm.push_vpn_config`, `identity.verify`. |
 | **Aside** | [aside.ts](src/lib/integrations/aside.ts) | (not yet wired) | — | Browser action in user's authenticated session — agent never holds creds. Mocks `okta.add_to_group`, `okta.send_reset`. |
 | **Tensorlake** | [tensorlake.ts](src/lib/integrations/tensorlake.ts) | (not yet wired) | — | Sandboxed compute. Mocks `diag.network_probe` with synthetic traceroute output. |
 
-Each adapter returns `{ ok: boolean, log: string[] }`. The `log` is the user-visible per-step output rendered in the Active Ticket panel.
+Each execution adapter returns `{ ok: boolean, log: string[] }`. The `log` is the user-visible per-step output rendered in the Active Ticket panel. The two drafting adapters (Nia, AI Gateway) return a `NiaDraftResult` with citations, confidence, response, and plan.
 
-### 5.1 Nia is the only real call
+### 5.1 Drafting cascade (the intelligence layer)
+
+`niaDraft()` in [nia.ts](src/lib/integrations/nia.ts) is the single entry point used by `draftPlan`. It cascades through three tiers, each falling through silently on missing key, network failure, or malformed output:
+
+1. **Real Nia** — `POST /v2/advisor` with all runbooks serialized as virtual `runbooks/<id>.md` files in the codebase payload. Best for semantic codebase-style retrieval. ~10–16s.
+2. **Real AI Gateway** — `POST /v1/chat/completions` to `ai-gateway.vercel.sh` with runbooks dumped into the system prompt and a strict JSON output instruction. Default model is `anthropic/claude-haiku-4-5` for speed. ~2–4s.
+3. **Mock template** — keyword-tag scoring against runbook tags + title words, weighted by prior `successCount`. Templates a response per inferred tag (`sso | vpn | password | laptop | generic`). <50ms.
+
+Both real tiers parse a single JSON object from the LLM response using the shared `extractJsonObject()` brace-matcher (string-aware). Both return identical `NiaDraftResult` shapes so callers don't care which tier produced the draft. The `source` field (`"nia-advisor" | "ai-gateway" | "mock"`) is the only way to tell which tier won.
 
 When `NIA_API_KEY` is set, [`realNiaDraft`](src/lib/integrations/nia.ts#L34):
 
@@ -133,7 +143,7 @@ Every component consumes this with `useAppState()`. There is no Zustand, Redux, 
 
 ### 7.2 Component tree
 
-```
+```text
 RootLayout (layout.tsx)
 └── Home (page.tsx)
     └── StateProvider
@@ -163,7 +173,7 @@ User clicks the "Can't access Figma anymore" quick prompt as Alex Reyes:
 2. **`createTicket`** seeds runbooks (idempotent), inserts a `Ticket` with `status: "new"`, then `void draftPlan(id)` (returns immediately so the UI doesn't block).
 3. **`draftPlan`** sets status to `drafting`, then:
    - Awaits `getUserContext("alex@acme.test")` → returns `{ name: "Alex Reyes", team: "design", recentApps: ["figma", "notion", "slack"] }` (mock).
-   - Awaits `niaDraft({...})` → real Nia (if `NIA_API_KEY` set) or mock template for tag `"sso"`. Returns `{ response, plan, citations, confidence, reasoning }`.
+   - Awaits `niaDraft({...})` → cascades through Nia → AI Gateway → mock until one returns. Returns `{ response, plan, citations, confidence, reasoning, source }`.
    - Pushes the user context as a `hyperspell` citation.
    - Substitutes `{reporter_email}` → `alex@acme.test` in step params.
    - Status → `awaiting_approval`.
@@ -179,7 +189,9 @@ User clicks the "Can't access Figma anymore" quick prompt as Alex Reyes:
 9. **Deflection dashboard** ticks: total tickets +1, AI resolved +1, deflection rate recomputed, avg resolve time updated.
 10. **Next time the same prompt fires**, the runbook now shows higher prior success → mock scoring boosts confidence; real Nia sees it in the codebase payload.
 
-Total wall-clock: ~3–5s mock-only, ~16s with real Nia.
+Total wall-clock: ~3–5s mock-only, ~5–7s with AI Gateway (Haiku), ~16s with real Nia.
+
+The **Run demo arc** button in the header ([DemoArcButton.tsx](src/app/components/DemoArcButton.tsx)) replays this whole sequence 4 times back-to-back (Figma → VPN → Salesforce → novel ticket), waiting for each to reach a terminal status before firing the next, so a judge sees the entire compounding-runbook story without clicking around.
 
 ---
 
@@ -211,4 +223,5 @@ These are enforced by code review (and CLAUDE.md), not by tests.
 
 Append on every architectural change. Most-recent first.
 
+- **2026-05-09** — **M2.** Added [ai-gateway.ts](src/lib/integrations/ai-gateway.ts) as a 6th adapter — `niaDraft()` now cascades Nia → AI Gateway → mock with shared `extractJsonObject` parser. Runbook cards in [RunbooksTab.tsx](src/app/components/RunbooksTab.tsx) compute `avgResolveSec` from `sourceTicketIds` and show an "auto" badge for synthesized runbooks. New [DemoArcButton.tsx](src/app/components/DemoArcButton.tsx) in the header fires the 4-ticket arc sequentially, waiting for terminal status between each.
 - **2026-05-09** — Initial ARCHITECTURE.md written. Snapshot of M1: 5 adapter files, in-memory mirror, 600ms polling, hard approval gate, runbook auto-extraction.
