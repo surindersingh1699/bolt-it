@@ -3,6 +3,7 @@
 import { useAppState } from "./StateProvider";
 import { Citation } from "@/lib/types";
 import { BookOpen, CloudCog, DatabaseZap, HardDrive, KeyRound, MessageSquare, ShieldCheck, User2 } from "lucide-react";
+import { ConnectDocsCard } from "./ConnectDocsCard";
 
 type RowTone = "live" | "mock" | "off";
 
@@ -77,11 +78,15 @@ export function KnowledgeSidebar() {
             icon={<DatabaseZap size={12} />}
             label="Hyperspell"
             value={
-              userCites.length > 0
-                ? `${userCites.length} context hit${userCites.length === 1 ? "" : "s"} (mocked)`
-                : "no user memory (mocked)"
+              integrations.hyperspellMode === "live"
+                ? userCites.length > 0
+                  ? `${userCites.length} context hit${userCites.length === 1 ? "" : "s"}`
+                  : "live · no prior memory"
+                : userCites.length > 0
+                  ? `${userCites.length} context hit${userCites.length === 1 ? "" : "s"} (mocked)`
+                  : "no user memory (mocked)"
             }
-            tone="mock"
+            tone={integrations.hyperspellMode === "live" ? "live" : "mock"}
           />
           <SystemRow
             icon={<ShieldCheck size={12} />}
@@ -95,6 +100,8 @@ export function KnowledgeSidebar() {
           />
         </div>
       </section>
+
+      <ConnectDocsCard />
 
       <section className="px-4 py-4 border-b border-neutral-800">
         <div className="flex items-center gap-1.5 mb-3">
@@ -122,7 +129,11 @@ export function KnowledgeSidebar() {
           </span>
         </div>
         {userCites.length === 0 ? (
-          <p className="text-xs text-neutral-500">No user context loaded.</p>
+          <p className="text-xs text-neutral-500">
+            {integrations.hyperspellMode === "live"
+              ? "Hyperspell connected · no prior memory for this user yet. New tickets will write here."
+              : "No user context loaded."}
+          </p>
         ) : (
           <ul className="space-y-2">
             {userCites.map((c) => (

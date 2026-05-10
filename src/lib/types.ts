@@ -37,6 +37,21 @@ export interface PlanStep {
   riskSource?: RiskSource;
 }
 
+export type NiaSourceType = "repository" | "documentation";
+export type NiaSourceStatus = "indexing" | "ready" | "failed";
+
+export interface NiaSource {
+  id: string;
+  identifier: string;
+  displayName: string;
+  type: NiaSourceType;
+  status: NiaSourceStatus;
+  url: string;
+  addedAt: number;
+  updatedAt: number;
+  errorMessage?: string;
+}
+
 export interface Workspace {
   id: string;
   displayName: string;
@@ -45,6 +60,7 @@ export interface Workspace {
   slackTeamName?: string;
   slackAccessToken?: string;
   slackConnectedAt?: number;
+  niaSources?: NiaSource[];
   createdAt: number;
   updatedAt: number;
   lastUsedAt?: number;

@@ -15,7 +15,8 @@ export async function GET() {
     deflectionStats(workspaceId),
     workspaceId ? getWorkspace(workspaceId) : Promise.resolve(null),
   ]);
-  const niaSources = niaIndexedSources();
+  const envSources = niaIndexedSources();
+  const wsSources = workspace?.niaSources ?? [];
   return NextResponse.json({
     tickets,
     runbooks,
@@ -24,8 +25,9 @@ export async function GET() {
     integrations: {
       slackConnected: Boolean(workspace?.slackAccessToken),
       slackTeamName: workspace?.slackTeamName ?? null,
-      niaSources,
-      hyperspellMode: "mock" as const,
+      niaSources: wsSources,
+      niaEnvSources: envSources,
+      hyperspellMode: process.env.HYPERSPELL_API_KEY ? ("live" as const) : ("mock" as const),
     },
   });
 }

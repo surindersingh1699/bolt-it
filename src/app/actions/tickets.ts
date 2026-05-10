@@ -127,6 +127,7 @@ export async function draftPlan(ticketId: string): Promise<void> {
         reporter: ticket.reporter,
         reporterEmail: ticket.reporterEmail,
         customerOrg: ticket.customerOrg,
+        workspaceId: ticket.workspaceId,
         memories,
       }),
       DRAFT_TIMEOUT_MS,

@@ -1,5 +1,5 @@
 import { Citation, PlanStep } from "../types";
-import { listRunbooks } from "../data";
+import { getWorkspace, listRunbooks } from "../data";
 import { extractJsonObject } from "./json";
 import { MemoryHit } from "./hyperspell";
 
@@ -9,6 +9,7 @@ export interface NiaDraftInput {
   reporter: string;
   reporterEmail: string;
   customerOrg: string;
+  workspaceId?: string;
   memories?: MemoryHit[];
 }
 
@@ -38,6 +39,13 @@ export function niaIndexedSources(): string[] {
     .split(",")
     .map((s) => s.trim())
     .filter(Boolean);
+}
+
+async function niaSourcesForWorkspace(workspaceId: string | undefined): Promise<string[]> {
+  if (!workspaceId) return [];
+  const ws = await getWorkspace(workspaceId).catch(() => undefined);
+  if (!ws?.niaSources) return [];
+  return ws.niaSources.filter((s) => s.status === "ready").map((s) => s.identifier);
 }
 
 export async function niaDraft(input: NiaDraftInput): Promise<NiaDraftResult> {
@@ -132,7 +140,9 @@ The "response" field must NEVER ask the user for clarification. Use:
 
 If no runbook match: still produce a real diagnostic-driven plan from the categories above. Set confidence below 0.6 to flag the missing runbook, but never produce a question-only plan.`;
 
-  const indexedSources = niaIndexedSources();
+  const envSources = niaIndexedSources();
+  const wsSources = await niaSourcesForWorkspace(input.workspaceId);
+  const indexedSources = Array.from(new Set([...wsSources, ...envSources]));
   const payload = {
     query: niaQuery,
     codebase: {
