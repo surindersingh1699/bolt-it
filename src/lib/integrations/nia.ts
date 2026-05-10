@@ -32,6 +32,14 @@ export interface NiaDraftResult {
 
 const NIA_API_URL = process.env.NIA_API_URL || "https://apigcp.trynia.ai/v2";
 
+export function niaIndexedSources(): string[] {
+  const raw = process.env.NIA_SOURCES ?? "";
+  return raw
+    .split(",")
+    .map((s) => s.trim())
+    .filter(Boolean);
+}
+
 export async function niaDraft(input: NiaDraftInput): Promise<NiaDraftResult> {
   if (process.env.USE_NIA === "1" && process.env.NIA_API_KEY) {
     const real = await realNiaDraft(input).catch((err) => {
@@ -106,13 +114,25 @@ Return ONLY a single JSON object with this exact shape (no markdown, no other te
 Capability kinds:
 - "insforge" — policy-gated backend action via customer-defined edge function
 - "aside" — browser action executed in the user's authenticated session (agent never holds creds)
-- "tensorlake" — sandboxed compute for AI-generated diagnostic scripts
+- "tensorlake" — sandboxed compute / real local sandbox agent on the technician's machine
 - "slack_reply" — auto-reply to the user in Slack
 
 Use the literal string "{reporter_email}" as a placeholder for the user's email in params.
 
-If no runbook matches confidently, return matched_runbook_id: null, confidence below 0.6, and a minimal plan with a slack_reply step that acknowledges and asks for more detail.`;
+CRITICAL behavior rule — DO NOT ask the user for OS, error message, screenshot, or whether they recently changed their password. Our agent gathers that automatically. ALWAYS prefer a tensorlake diagnostic step over a clarification question.
 
+Capability picker:
+- VPN/network/connectivity → tensorlake step with capability "diag.network_probe"
+- Login/lockout/auth/password → tensorlake step with capability "sandbox.read_auth_logs"
+- Mapped drives / Kerberos → tensorlake step with capability "sandbox.read_kerberos_logs"
+- App crash / "X is not working" → tensorlake step with capability "sandbox.read_auth_logs"
+
+The "response" field must NEVER ask the user for clarification. Use:
+"Hi <first name> — I'm pulling diagnostics from your machine and will reply with a fix plan shortly."
+
+If no runbook match: still produce a real diagnostic-driven plan from the categories above. Set confidence below 0.6 to flag the missing runbook, but never produce a question-only plan.`;
+
+  const indexedSources = niaIndexedSources();
   const payload = {
     query: niaQuery,
     codebase: {
@@ -123,11 +143,15 @@ If no runbook matches confidently, return matched_runbook_id: null, confidence b
         kind: "it-support-runbooks",
         count: runbooks.length,
         customer: input.customerOrg,
+        externalSources: indexedSources,
       }),
     },
-    search_scope: { repositories: [] },
+    search_scope: { repositories: indexedSources },
     output_format: "explanation",
   };
+  if (indexedSources.length > 0) {
+    console.log(`[Nia] including ${indexedSources.length} indexed source(s): ${indexedSources.join(", ")}`);
+  }
 
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), 25_000);
@@ -380,9 +404,10 @@ function templateForTag(
 
   return {
     reasoning,
-    response: `Hi ${firstName} — I'm looking into this and will have an update shortly. Could you share a screenshot if anything looks unusual?`,
+    response: `Hi ${firstName} — I'm pulling diagnostics from your machine right now and will reply with a fix plan in a moment.`,
     plan: [
-      { id: "step-0", kind: "slack_reply", description: "Acknowledge and request screenshot", status: "pending" },
+      { id: "step-0", kind: "tensorlake", description: "Run sandboxed diagnostic on the user's machine to gather logs and signals", capability: "sandbox.read_auth_logs", params: { user_email: "{reporter_email}" }, status: "pending" },
+      { id: "step-1", kind: "slack_reply", description: "Reply with diagnosis and recommended next step", status: "pending" },
     ],
   };
 }

@@ -38,12 +38,23 @@ Output ONLY a single JSON object with this exact shape (no markdown, no preface)
 Capability kinds:
 - insforge: policy-gated backend action via customer edge function
 - aside: browser action in user's authenticated session (agent never holds creds)
-- tensorlake: sandboxed compute for diagnostic scripts
+- tensorlake: sandboxed compute for diagnostic scripts (we have a real local sandbox agent on the technician's machine)
 - slack_reply: reply to user in Slack
 
 Use the literal string "{reporter_email}" as a placeholder for the user's email in params.
 
-If no good runbook match: matched_runbook_id null, confidence below 0.6, minimal plan with one slack_reply step asking for more detail.`;
+CRITICAL behavior rule — DO NOT ask the user for OS, error messages, screenshots, or whether they recently changed their password. Our agent gathers that automatically. ALWAYS prefer a tensorlake diagnostic step over a clarification question.
+
+Capability picker for common cases (use these instead of asking):
+- VPN/network/connectivity issues → tensorlake step with capability "diag.network_probe"
+- Login/lockout/auth/password issues → tensorlake step with capability "sandbox.read_auth_logs"
+- Mapped drives / Kerberos / domain auth issues → tensorlake step with capability "sandbox.read_kerberos_logs"
+- Application crash / "X is not working" → tensorlake step with capability "sandbox.read_auth_logs" as a starting point
+
+Reply text (the "response" field) should NEVER ask for clarification. Always say something like:
+"Hi <first name> — I'm pulling diagnostics from your machine right now and will reply with a fix plan in a moment."
+
+If no runbook match: still produce a real diagnostic plan based on the issue category above. Set confidence below 0.6 to flag the absence of a runbook, but the plan itself must be diagnostic-driven, not question-driven.`;
 
   const memoryContext =
     input.memories && input.memories.length > 0
