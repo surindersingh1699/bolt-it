@@ -5,6 +5,7 @@ import { AgentJob, PlanStep, Ticket } from "./types";
 export function isAgentJobCapability(capability?: string): boolean {
   return (
     capability === "diag.network_probe" ||
+    capability === "diag.system_info" ||
     capability === "sandbox.read_auth_logs" ||
     capability === "sandbox.read_kerberos_logs" ||
     capability === "fix.restart_app" ||
@@ -41,6 +42,7 @@ export async function enqueueAgentJob(ticket: Ticket, step: PlanStep): Promise<A
 
 export function humanLabelFor(capability: string | undefined): string {
   if (capability === "diag.network_probe") return "Run network diagnostic in sandbox";
+  if (capability === "diag.system_info") return "Collect device hardware and OS info";
   if (capability === "sandbox.read_auth_logs") return "Inspect system logs in sandbox";
   if (capability === "sandbox.read_kerberos_logs") return "Inspect domain auth logs in sandbox";
   if (capability === "fix.restart_app") return "Restart the application";
@@ -51,6 +53,7 @@ export function humanLabelFor(capability: string | undefined): string {
 
 function jobKindForCapability(capability?: string): AgentJob["kind"] {
   if (capability === "diag.network_probe") return "network_probe";
+  if (capability === "diag.system_info") return "system_info";
   if (capability === "sandbox.read_auth_logs" || capability === "sandbox.read_kerberos_logs") {
     return "collect_logs";
   }
@@ -69,6 +72,9 @@ function commandForCapability(
   const user = email.replace(/[^a-zA-Z0-9@._-]/g, "");
   if (capability === "diag.network_probe") {
     return `collect_vpn_diagnostics --user ${user} --redact-secrets`;
+  }
+  if (capability === "diag.system_info") {
+    return `collect_system_info --user ${user}`;
   }
   if (capability === "sandbox.read_kerberos_logs") {
     return `collect_windows_event_logs --user ${user} --source kerberos --redact-secrets`;

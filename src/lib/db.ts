@@ -181,6 +181,25 @@ class ITDB {
     this.emit();
   }
 
+  clearTicketsForWorkspace(workspaceId: string): { tickets: number; agentJobs: number } {
+    let tickets = 0;
+    for (const [id, t] of this.tickets) {
+      if (t.workspaceId === workspaceId) {
+        this.tickets.delete(id);
+        tickets++;
+      }
+    }
+    let agentJobs = 0;
+    for (const [id, j] of this.agentJobs) {
+      if (j.workspaceId === workspaceId) {
+        this.agentJobs.delete(id);
+        agentJobs++;
+      }
+    }
+    if (tickets > 0 || agentJobs > 0) this.emit();
+    return { tickets, agentJobs };
+  }
+
   deflectionStats(workspaceId?: string): DeflectionStat {
     const all = this.listTickets(workspaceId);
     const resolved = all.filter((t) => t.status === "resolved");

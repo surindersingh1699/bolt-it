@@ -3,17 +3,49 @@
 import { useAppState } from "./StateProvider";
 import { Ticket } from "@/lib/types";
 import clsx from "clsx";
-import { Inbox } from "lucide-react";
+import { Inbox, Trash2 } from "lucide-react";
+import { useState, useTransition } from "react";
+import { clearTicketQueue } from "@/app/actions/tickets";
 
 export function TicketQueue() {
   const { tickets, selectedTicketId, selectTicket } = useAppState();
+  const [pending, startTransition] = useTransition();
+  const [error, setError] = useState<string | null>(null);
+
+  const onClear = () => {
+    if (tickets.length === 0) return;
+    if (!confirm(`Delete all ${tickets.length} tickets in this workspace? Runbooks are kept.`)) return;
+    setError(null);
+    startTransition(async () => {
+      try {
+        await clearTicketQueue();
+      } catch (err) {
+        setError((err as Error).message || "Clear failed");
+      }
+    });
+  };
+
   return (
     <div className="overflow-y-auto bg-neutral-950">
       <div className="px-4 py-3 sticky top-0 bg-neutral-950/95 backdrop-blur border-b border-neutral-800 flex items-center gap-2">
         <Inbox size={14} className="text-neutral-500" />
         <span className="text-xs uppercase tracking-wider text-neutral-500">Queue</span>
         <span className="ml-auto text-xs text-neutral-600">{tickets.length}</span>
+        <button
+          onClick={onClear}
+          disabled={pending || tickets.length === 0}
+          title="Delete all tickets (runbooks kept)"
+          className="text-[11px] text-neutral-500 hover:text-rose-300 disabled:opacity-30 disabled:hover:text-neutral-500 flex items-center gap-1"
+        >
+          <Trash2 size={12} />
+          {pending ? "clearing…" : "clear"}
+        </button>
       </div>
+      {error && (
+        <div className="px-4 py-2 text-[11px] text-rose-300 border-b border-rose-900/40 bg-rose-950/20">
+          {error}
+        </div>
+      )}
       {tickets.length === 0 && (
         <div className="px-4 py-8 text-center text-neutral-500 text-xs">
           No tickets yet.<br />

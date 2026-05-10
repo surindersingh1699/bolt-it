@@ -3,21 +3,24 @@
 import { revalidatePath } from "next/cache";
 import { after } from "next/server";
 import {
+  clearTicketsAndJobsForWorkspace,
   getTicket,
   getWorkspace,
   insertRunbook,
   insertTicket,
+  listAgentJobs,
   listRunbooks,
   updateRunbook,
   updateStep,
   updateTicket,
 } from "@/lib/data";
-import { Citation, PlanStep, Ticket } from "@/lib/types";
+import { AgentJob, Citation, PlanStep, Ticket } from "@/lib/types";
 import { ensureSeeded } from "@/lib/seed";
 import { niaDraft, niaIngestTicketResolution } from "@/lib/integrations/nia";
 import { asideExecute } from "@/lib/integrations/aside";
 import { insforgeInvoke } from "@/lib/integrations/insforge";
 import { tensorlakeRun } from "@/lib/integrations/tensorlake";
+import { synthesizeSlackReply, SlackReplyEvidence } from "@/lib/integrations/ai-gateway";
 import { getUserContext, queryMemories } from "@/lib/integrations/hyperspell";
 import { getCurrentUser } from "@/lib/auth";
 import { ACME_WORKSPACE_ID, getCurrentWorkspaceId } from "@/lib/workspace";
@@ -291,16 +294,39 @@ async function executePlan(ticketId: string, approver: Approver): Promise<void> 
         ok = r.ok;
         log = [...log, ...r.log];
       } else if (step.kind === "slack_reply") {
-        log = [
-          `[Slack] Posting reply in #it-support thread for ${ticket.reporter}`,
-        ];
+        log = [`[Slack] Waiting for any pending local-agent jobs before composing reply`];
+        await waitForAgentJobs(ticketId, 20_000);
+
+        const fresh = await getTicket(ticketId);
+        const stepsBeforeReply = (fresh?.plan ?? []).filter((s) => s.id !== step.id);
+        const allJobs = await listAgentJobs(ticket.workspaceId);
+        const jobsForTicket = allJobs.filter((j) => j.ticketId === ticketId);
+
+        const evidence = buildSlackReplyEvidence(stepsBeforeReply, jobsForTicket);
+        log.push(`[Slack] Synthesizing reply from ${evidence.length} executed step(s)`);
+
+        const firstName = ticket.reporter.split(/\s+/)[0];
+        const synthesized = await synthesizeSlackReply({
+          reporterFirstName: firstName,
+          subject: ticket.subject,
+          body: ticket.body,
+          evidence,
+        }).catch(() => null);
+
+        const replyText =
+          synthesized ??
+          ticket.draftResponse ??
+          `Hi ${firstName} — your IT ticket ${ticket.id} has been updated.`;
+        if (synthesized) log.push(`[Slack] Reply synthesized from real step results`);
+        else log.push(`[Slack] Reply synthesizer unavailable — falling back to initial draft`);
+
         const ws = await getWorkspace(ticket.workspaceId);
         const slackContext = slackContextFromTicket(ticket);
         if (ws?.slackAccessToken && slackContext.channel) {
           const msg = await postSlackMessage(
             ws.slackAccessToken,
             slackContext.channel,
-            ticket.draftResponse ?? `Hi ${ticket.reporter.split(/\s+/)[0]} — your IT ticket ${ticket.id} has been updated.`,
+            replyText,
             slackContext.threadTs,
           );
           if (msg.ok) log.push(`[Slack] Message delivered to ${slackContext.channel}`);
@@ -335,13 +361,32 @@ async function executePlan(ticketId: string, approver: Approver): Promise<void> 
 
   if (finishedTicket.channel === "slack") {
     const firstName = finishedTicket.reporter.split(/\s+/)[0];
-    const ranSteps = finishedTicket.plan
-      .filter((s) => s.status === "succeeded")
-      .map((s, i) => `   ${i + 1}. ${humanStepLabel(s)}`)
-      .join("\n");
+    const hadSlackReplyStep = finishedTicket.plan.some((s) => s.kind === "slack_reply");
+
+    if (!hadSlackReplyStep) {
+      // Plan didn't include an explicit slack_reply step — wait for any local-agent
+      // jobs and synthesize findings here so the user actually gets the data they
+      // asked for.
+      await waitForAgentJobs(ticketId, 20_000);
+      const refreshed = await getTicket(ticketId);
+      const stepsForSynth = refreshed?.plan ?? [];
+      const allJobs = await listAgentJobs(finishedTicket.workspaceId);
+      const jobsForTicket = allJobs.filter((j) => j.ticketId === ticketId);
+      const evidence = buildSlackReplyEvidence(stepsForSynth, jobsForTicket);
+      const synthesized = await synthesizeSlackReply({
+        reporterFirstName: firstName,
+        subject: finishedTicket.subject,
+        body: finishedTicket.body,
+        evidence,
+      }).catch(() => null);
+      if (synthesized) {
+        await postSlackUpdate(finishedTicket, synthesized);
+      }
+    }
+
     await postSlackUpdate(
       finishedTicket,
-      `✅ Hi ${firstName} — I finished the plan on your machine:\n${ranSteps}\n\nIs the issue resolved? Reply *yes* or *no* in this thread (ticket ${ticketId}).`,
+      `Is the issue resolved? Reply *yes* or *no* in this thread (ticket ${ticketId}).`,
     );
   }
 }
@@ -381,6 +426,40 @@ export async function escalateAfterUserDenied(ticketId: string): Promise<void> {
     );
   }
   safeRevalidate("/");
+}
+
+async function waitForAgentJobs(ticketId: string, timeoutMs: number): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const ticket = await getTicket(ticketId);
+    if (!ticket) return;
+    const allJobs = await listAgentJobs(ticket.workspaceId);
+    const pending = allJobs.filter(
+      (j) => j.ticketId === ticketId && (j.status === "queued" || j.status === "claimed"),
+    );
+    if (pending.length === 0) return;
+    await new Promise((r) => setTimeout(r, 800));
+  }
+}
+
+function buildSlackReplyEvidence(
+  steps: PlanStep[],
+  jobs: AgentJob[],
+): SlackReplyEvidence[] {
+  return steps
+    .filter((s) => s.kind !== "slack_reply" && s.status !== "pending" && s.status !== "skipped")
+    .map((s) => {
+      const matchingJob = jobs
+        .filter((j) => j.stepId === s.id && j.status === "succeeded" && j.output)
+        .sort((a, b) => (b.completedAt ?? 0) - (a.completedAt ?? 0))[0];
+      return {
+        stepDescription: s.description || humanStepLabel(s),
+        capability: s.capability,
+        status: s.status,
+        logLines: s.log ?? [],
+        agentOutput: matchingJob?.output,
+      };
+    });
 }
 
 function slackContextFromTicket(ticket: Ticket): { channel?: string; threadTs?: string } {
@@ -440,6 +519,15 @@ function synthesizeRunbookBody(ticket: Ticket): string {
     .map((s, i) => `${i + 1}. (${s.kind}) ${s.description} — ${s.status}`)
     .join("\n");
   return `Symptom: ${ticket.subject}\n\nUser report: ${ticket.body}\n\nResolution plan executed:\n${steps}\n\nOutcome: resolved by AI in ${Math.round((ticket.resolutionTimeMs ?? 0) / 1000)}s.`;
+}
+
+export async function clearTicketQueue(): Promise<{ tickets: number; agentJobs: number }> {
+  const requestingUser = await getCurrentUser();
+  const workspaceId =
+    requestingUser?.workspaceId ?? (await getCurrentWorkspaceId()) ?? ACME_WORKSPACE_ID;
+  const result = await clearTicketsAndJobsForWorkspace(workspaceId);
+  safeRevalidate("/");
+  return result;
 }
 
 export async function escalateTicket(ticketId: string): Promise<void> {

@@ -74,7 +74,7 @@ export interface AgentJob {
   workspaceId: string;
   ticketId: string;
   stepId?: string;
-  kind: "collect_logs" | "network_probe" | "app_diagnostic";
+  kind: "collect_logs" | "network_probe" | "app_diagnostic" | "system_info";
   targetUserEmail: string;
   instructions: string;
   allowlistedCommand: string;

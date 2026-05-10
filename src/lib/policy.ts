@@ -13,6 +13,7 @@ const ALLOWLIST_LOW = new Set([
   "ad.lookup_user",
   "identity.verify",
   "diag.network_probe",
+  "diag.system_info",
   "sandbox.read_auth_logs",
   "sandbox.read_kerberos_logs",
 ]);

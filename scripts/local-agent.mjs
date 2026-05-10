@@ -45,6 +45,7 @@ function humanLabel(command) {
     return `Clearing ${m?.[1] || "app"} cache`;
   }
   if (c.startsWith("toggle_wifi")) return "Toggling Wi-Fi off and on";
+  if (c.startsWith("collect_system_info")) return "Collecting computer hardware/OS info";
   return "Running sandboxed diagnostic";
 }
 
@@ -86,6 +87,52 @@ async function clearAppCache(appName) {
   }
   await runShell("rm", ["-rf", target]);
   lines.push(`cleared ${target}`);
+  return { ok: true, output: lines.join("\n") };
+}
+
+async function collectSystemInfo() {
+  const lines = [];
+  const cn = await runShell("scutil", ["--get", "ComputerName"]);
+  const computerName = cn.code === 0 ? cn.stdout.trim() : os.hostname();
+  lines.push(`computer_name: ${computerName}`);
+  lines.push(`hostname: ${os.hostname()}`);
+
+  const sw = await runShell("sw_vers", []);
+  if (sw.code === 0) {
+    for (const line of sw.stdout.trim().split(/\r?\n/)) {
+      lines.push(line.trim().toLowerCase().replace(/:\s*/, ": "));
+    }
+  } else {
+    lines.push(`os: ${os.platform()} ${os.release()} (${os.arch()})`);
+  }
+
+  const totalMemBytes = os.totalmem();
+  const freeMemBytes = os.freemem();
+  const totalGib = (totalMemBytes / 1024 ** 3).toFixed(2);
+  const freeGib = (freeMemBytes / 1024 ** 3).toFixed(2);
+  lines.push(`ram_total: ${totalGib} GiB`);
+  lines.push(`ram_free: ${freeGib} GiB`);
+
+  const cpuModel = os.cpus()?.[0]?.model ?? "unknown";
+  lines.push(`cpu: ${cpuModel} (${os.cpus()?.length ?? "?"} cores)`);
+
+  const uptimeSec = Math.round(os.uptime());
+  const days = Math.floor(uptimeSec / 86400);
+  const hours = Math.floor((uptimeSec % 86400) / 3600);
+  const mins = Math.floor((uptimeSec % 3600) / 60);
+  lines.push(`uptime: ${days}d ${hours}h ${mins}m`);
+
+  if (IS_MAC) {
+    const sp = await runShell("system_profiler", ["SPHardwareDataType"]);
+    if (sp.code === 0) {
+      for (const raw of sp.stdout.split(/\r?\n/)) {
+        const line = raw.trim();
+        const m = line.match(/^(Model Name|Model Identifier|Chip|Processor Name|Serial Number \(system\)|Hardware UUID):\s*(.+)$/);
+        if (m) lines.push(`${m[1].toLowerCase().replace(/[ ()]+/g, "_").replace(/_+$/, "")}: ${m[2]}`);
+      }
+    }
+  }
+
   return { ok: true, output: lines.join("\n") };
 }
 
@@ -237,6 +284,9 @@ async function runAllowlisted(job) {
   }
   if (command.startsWith("toggle_wifi")) {
     return await toggleWifi();
+  }
+  if (command.startsWith("collect_system_info")) {
+    return await collectSystemInfo();
   }
   if (command.startsWith("collect_vpn_diagnostics ")) {
     return {

@@ -807,6 +807,35 @@ export async function reassignWorkspace(
   for (const j of db.listAgentJobs(fromWorkspaceId)) j.workspaceId = toWorkspaceId;
 }
 
+export async function clearTicketsAndJobsForWorkspace(
+  workspaceId: string,
+): Promise<{ tickets: number; agentJobs: number }> {
+  const ifg = isInsforgeEnabled() ? getInsforge() : null;
+  if (ifg) {
+    const before = await listTickets(workspaceId);
+    try {
+      const { error } = await ifg.database.from("tickets").delete().eq("workspace_id", workspaceId);
+      if (error) console.warn("[InsForge] clear tickets failed:", JSON.stringify(error));
+    } catch (err) {
+      console.warn("[InsForge] clear tickets threw:", (err as Error).message);
+    }
+    try {
+      const { error } = await ifg.database.from("agent_jobs").delete().eq("workspace_id", workspaceId);
+      if (error && !isMissingRelationError(error)) {
+        console.warn("[InsForge] clear agent_jobs failed:", JSON.stringify(error));
+      }
+    } catch (err) {
+      console.warn("[InsForge] clear agent_jobs threw:", (err as Error).message);
+    }
+    const inMem = db.clearTicketsForWorkspace(workspaceId);
+    return {
+      tickets: Math.max(before.length, inMem.tickets),
+      agentJobs: inMem.agentJobs,
+    };
+  }
+  return db.clearTicketsForWorkspace(workspaceId);
+}
+
 export async function deflectionStats(workspaceId?: string): Promise<DeflectionStat> {
   const all = await listTickets(workspaceId);
   const resolved = all.filter((t) => t.status === "resolved");

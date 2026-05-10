@@ -134,6 +134,7 @@ Diagnostic capabilities (read-only, sandboxed):
 - Login/lockout/auth/password → "sandbox.read_auth_logs"
 - Mapped drives / Kerberos → "sandbox.read_kerberos_logs"
 - App crash / "X is not working" → "sandbox.read_auth_logs"
+- "What is my hostname / computer name / RAM / OS / serial / uptime / model?" → "diag.system_info" (runs on the user's machine and returns the actual values)
 
 Fix capabilities (REAL execution on the user's machine via local agent — include AFTER diagnostics when the issue calls for it):
 - App crashed/frozen/not responding (Excel, Outlook, Chrome, Word, etc) → "fix.restart_app" with params: { "app": "<app name>" }

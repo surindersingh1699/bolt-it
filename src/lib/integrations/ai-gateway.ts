@@ -50,6 +50,7 @@ Diagnostic capabilities (read-only, sandboxed):
 - Login/lockout/auth/password → "sandbox.read_auth_logs"
 - Mapped drives / Kerberos / domain auth → "sandbox.read_kerberos_logs"
 - App crash / "X is not working" → "sandbox.read_auth_logs"
+- "What is my hostname / computer name / RAM / OS / serial number / uptime / model?" → "diag.system_info" (runs on the user's machine via local agent and returns the actual values)
 
 Fix capabilities (REAL execution on the user's machine via local agent — include these AFTER diagnostics when the issue calls for it):
 - App crashed/frozen/not responding (Excel, Outlook, Slack, Chrome, Word, PowerPoint, Teams, etc) → "fix.restart_app" with params: { "app": "<app name as it appears in /Applications>" }
@@ -194,4 +195,97 @@ Produce the JSON object.`;
 function normalizeKind(k: string | undefined): PlanStep["kind"] {
   if (k === "insforge" || k === "aside" || k === "tensorlake" || k === "slack_reply") return k;
   return "slack_reply";
+}
+
+export interface SlackReplyEvidence {
+  stepDescription: string;
+  capability?: string;
+  status: PlanStep["status"];
+  logLines: string[];
+  agentOutput?: string;
+}
+
+/**
+ * Re-write the Slack reply using the *actual* findings from the executed steps,
+ * not the placeholder draft generated at planning time. Returns null if the LLM
+ * is unavailable or returns an unusable response — caller should fall back to
+ * the original draft.
+ */
+export async function synthesizeSlackReply(args: {
+  reporterFirstName: string;
+  subject: string;
+  body: string;
+  evidence: SlackReplyEvidence[];
+}): Promise<string | null> {
+  if (!process.env.AI_GATEWAY_API_KEY) return null;
+  if (args.evidence.length === 0) return null;
+
+  const evidenceText = args.evidence
+    .map((e, i) => {
+      const header = `### Step ${i + 1}: ${e.stepDescription} [${e.capability ?? e.status}]`;
+      const log = e.logLines.length > 0 ? `Logs:\n${e.logLines.slice(0, 30).join("\n")}` : "Logs: (none)";
+      const out = e.agentOutput ? `\nLocal-agent output:\n${e.agentOutput.slice(0, 2000)}` : "";
+      return `${header}\n${log}${out}`;
+    })
+    .join("\n\n");
+
+  const systemPrompt = `You write the final Slack reply an IT support copilot sends to the user after running a diagnostic/fix plan.
+
+Rules:
+- Reply directly to the user by first name. Warm, concise, plain text. No markdown headers.
+- If the user asked a *question* (hostname, RAM, OS, etc.), answer it with the EXACT values from the local-agent output. Do not paraphrase or invent.
+- If the user reported a *problem* and you ran fixes, state what you did and what the next step on their side is (reconnect, reopen, etc.).
+- If the diagnostics produced no useful data (the local agent isn't running, or the step returned generic mock output), say so honestly — do not pretend you collected data you didn't.
+- 2–6 short sentences. No corporate fluff.
+
+Output ONLY the Slack message text, nothing else.`;
+
+  const userPrompt = `User's first name: ${args.reporterFirstName}
+User's original message subject: ${args.subject}
+User's original message body: ${args.body}
+
+What we actually executed and observed:
+
+${evidenceText}
+
+Write the Slack reply.`;
+
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), 15_000);
+  let res: Response;
+  try {
+    res = await fetch(`${AI_GATEWAY_URL}/chat/completions`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${process.env.AI_GATEWAY_API_KEY}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        model: AI_GATEWAY_MODEL,
+        messages: [
+          { role: "system", content: systemPrompt },
+          { role: "user", content: userPrompt },
+        ],
+        temperature: 0.3,
+      }),
+      signal: controller.signal,
+    });
+  } catch (err) {
+    console.warn("[AIGateway] synthesizeSlackReply fetch failed:", (err as Error).message);
+    return null;
+  } finally {
+    clearTimeout(timeoutId);
+  }
+
+  if (!res.ok) {
+    console.warn(`[AIGateway] synthesizeSlackReply returned ${res.status}`);
+    return null;
+  }
+
+  const data = (await res.json().catch(() => ({}))) as {
+    choices?: Array<{ message?: { content?: string } }>;
+  };
+  const text = data?.choices?.[0]?.message?.content?.trim();
+  if (!text) return null;
+  return text.slice(0, 1800);
 }
