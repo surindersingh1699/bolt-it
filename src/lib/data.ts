@@ -26,6 +26,7 @@ function workspaceToRow(w: Workspace): DbRow {
     slack_team_name: w.slackTeamName ?? null,
     slack_access_token: w.slackAccessToken ?? null,
     slack_connected_at: w.slackConnectedAt ?? null,
+    nia_sources: w.niaSources ?? [],
     created_at: w.createdAt,
     updated_at: w.updatedAt,
     last_used_at: w.lastUsedAt ?? w.updatedAt,
@@ -41,6 +42,7 @@ function workspaceFromRow(r: DbRow): Workspace {
     slackTeamName: (r.slack_team_name as string | null) ?? undefined,
     slackAccessToken: (r.slack_access_token as string | null) ?? undefined,
     slackConnectedAt: r.slack_connected_at == null ? undefined : Number(r.slack_connected_at),
+    niaSources: (r.nia_sources as Workspace["niaSources"]) ?? [],
     createdAt: Number(r.created_at),
     updatedAt: Number(r.updated_at),
     lastUsedAt: r.last_used_at == null ? undefined : Number(r.last_used_at),
@@ -406,6 +408,7 @@ export async function updateWorkspace(id: string, patch: Partial<Workspace>): Pr
   if (patch.slackTeamName !== undefined) row.slack_team_name = patch.slackTeamName;
   if (patch.slackAccessToken !== undefined) row.slack_access_token = patch.slackAccessToken;
   if (patch.slackConnectedAt !== undefined) row.slack_connected_at = patch.slackConnectedAt;
+  if (patch.niaSources !== undefined) row.nia_sources = patch.niaSources;
   row.updated_at = Date.now();
   const ifg = isInsforgeEnabled() ? getInsforge() : null;
   if (ifg) {
@@ -711,6 +714,11 @@ export async function insertAgentJob(job: AgentJob): Promise<void> {
   const ifg = isInsforgeEnabled() ? getInsforge() : null;
   if (ifg) {
     const { error } = await ifg.database.from("agent_jobs").insert([agentJobToRow(job)]);
+    if (error && isMissingRelationError(error)) {
+      console.warn("[InsForge] agent_jobs table missing — falling back to in-memory queue");
+      db.insertAgentJob(job);
+      return;
+    }
     ifErr(error, "insertAgentJob");
     return;
   }
@@ -725,6 +733,7 @@ export async function getAgentJob(id: string): Promise<AgentJob | undefined> {
       .select()
       .eq("id", id)
       .maybeSingle();
+    if (error && isMissingRelationError(error)) return db.getAgentJob(id);
     ifErr(error, "getAgentJob");
     return data ? agentJobFromRow(data as DbRow) : undefined;
   }
@@ -741,6 +750,7 @@ export async function listAgentJobs(
     if (workspaceId) q = q.eq("workspace_id", workspaceId);
     if (status) q = q.eq("status", status);
     const { data, error } = await q.order("created_at", { ascending: true });
+    if (error && isMissingRelationError(error)) return db.listAgentJobs(workspaceId, status);
     ifErr(error, "listAgentJobs");
     return ((data as DbRow[]) ?? []).map(agentJobFromRow);
   }
@@ -751,6 +761,10 @@ export async function updateAgentJob(id: string, patch: Partial<AgentJob>): Prom
   const ifg = isInsforgeEnabled() ? getInsforge() : null;
   if (ifg) {
     const { error } = await ifg.database.from("agent_jobs").update(agentJobPatchToRow(patch)).eq("id", id);
+    if (error && isMissingRelationError(error)) {
+      db.updateAgentJob(id, patch);
+      return;
+    }
     ifErr(error, "updateAgentJob");
     return;
   }
