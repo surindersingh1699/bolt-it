@@ -326,6 +326,15 @@ async function executePlan(ticketId: string): Promise<void> {
   const resolvedTicket = await getTicket(ticketId);
   if (!resolvedTicket) return;
 
+  const hasSlackReplyStep = resolvedTicket.plan.some((s) => s.kind === "slack_reply");
+  if (!hasSlackReplyStep && resolvedTicket.channel === "slack") {
+    const firstName = resolvedTicket.reporter.split(/\s+/)[0];
+    const finalMessage =
+      resolvedTicket.draftResponse ??
+      `Hi ${firstName} — I finished running diagnostics on your machine. Everything's been resolved. Let me know if anything still looks off.`;
+    await postSlackUpdate(resolvedTicket, `✅ ${finalMessage}`);
+  }
+
   const resolutionTimeMs = Date.now() - resolvedTicket.createdAt;
   await updateTicket(ticketId, {
     status: "resolved",
