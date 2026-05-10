@@ -713,14 +713,13 @@ export async function updateADAccount(
 export async function insertAgentJob(job: AgentJob): Promise<void> {
   const ifg = isInsforgeEnabled() ? getInsforge() : null;
   if (ifg) {
-    const { error } = await ifg.database.from("agent_jobs").insert([agentJobToRow(job)]);
-    if (error && isMissingRelationError(error)) {
-      console.warn("[InsForge] agent_jobs table missing — falling back to in-memory queue");
-      db.insertAgentJob(job);
-      return;
+    try {
+      const { error } = await ifg.database.from("agent_jobs").insert([agentJobToRow(job)]);
+      if (!error) return;
+      console.warn("[InsForge] insertAgentJob failed — falling back to in-memory queue:", JSON.stringify(error));
+    } catch (err) {
+      console.warn("[InsForge] insertAgentJob threw — falling back to in-memory queue:", (err as Error).message);
     }
-    ifErr(error, "insertAgentJob");
-    return;
   }
   db.insertAgentJob(job);
 }
@@ -728,14 +727,16 @@ export async function insertAgentJob(job: AgentJob): Promise<void> {
 export async function getAgentJob(id: string): Promise<AgentJob | undefined> {
   const ifg = isInsforgeEnabled() ? getInsforge() : null;
   if (ifg) {
-    const { data, error } = await ifg.database
-      .from("agent_jobs")
-      .select()
-      .eq("id", id)
-      .maybeSingle();
-    if (error && isMissingRelationError(error)) return db.getAgentJob(id);
-    ifErr(error, "getAgentJob");
-    return data ? agentJobFromRow(data as DbRow) : undefined;
+    try {
+      const { data, error } = await ifg.database
+        .from("agent_jobs")
+        .select()
+        .eq("id", id)
+        .maybeSingle();
+      if (!error) return data ? agentJobFromRow(data as DbRow) : db.getAgentJob(id);
+    } catch {
+      /* fall through */
+    }
   }
   return db.getAgentJob(id);
 }
@@ -746,13 +747,18 @@ export async function listAgentJobs(
 ): Promise<AgentJob[]> {
   const ifg = isInsforgeEnabled() ? getInsforge() : null;
   if (ifg) {
-    let q = ifg.database.from("agent_jobs").select();
-    if (workspaceId) q = q.eq("workspace_id", workspaceId);
-    if (status) q = q.eq("status", status);
-    const { data, error } = await q.order("created_at", { ascending: true });
-    if (error && isMissingRelationError(error)) return db.listAgentJobs(workspaceId, status);
-    ifErr(error, "listAgentJobs");
-    return ((data as DbRow[]) ?? []).map(agentJobFromRow);
+    try {
+      let q = ifg.database.from("agent_jobs").select();
+      if (workspaceId) q = q.eq("workspace_id", workspaceId);
+      if (status) q = q.eq("status", status);
+      const { data, error } = await q.order("created_at", { ascending: true });
+      if (!error) {
+        const remote = ((data as DbRow[]) ?? []).map(agentJobFromRow);
+        if (remote.length > 0) return remote;
+      }
+    } catch {
+      /* fall through */
+    }
   }
   return db.listAgentJobs(workspaceId, status);
 }
@@ -760,13 +766,12 @@ export async function listAgentJobs(
 export async function updateAgentJob(id: string, patch: Partial<AgentJob>): Promise<void> {
   const ifg = isInsforgeEnabled() ? getInsforge() : null;
   if (ifg) {
-    const { error } = await ifg.database.from("agent_jobs").update(agentJobPatchToRow(patch)).eq("id", id);
-    if (error && isMissingRelationError(error)) {
-      db.updateAgentJob(id, patch);
-      return;
+    try {
+      const { error } = await ifg.database.from("agent_jobs").update(agentJobPatchToRow(patch)).eq("id", id);
+      if (!error) return;
+    } catch {
+      /* fall through */
     }
-    ifErr(error, "updateAgentJob");
-    return;
   }
   db.updateAgentJob(id, patch);
 }
