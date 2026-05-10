@@ -37,10 +37,10 @@ export async function enqueueAgentJob(ticket: Ticket, step: PlanStep): Promise<A
 }
 
 export function humanLabelFor(capability: string | undefined): string {
-  if (capability === "diag.network_probe") return "Inspect VPN client logs in sandbox";
-  if (capability === "sandbox.read_auth_logs") return "Read authentication logs to find lockout pattern";
-  if (capability === "sandbox.read_kerberos_logs") return "Check Kerberos ticket status";
-  return "Run diagnostic in sandbox";
+  if (capability === "diag.network_probe") return "Run network diagnostic in sandbox";
+  if (capability === "sandbox.read_auth_logs") return "Inspect system logs in sandbox";
+  if (capability === "sandbox.read_kerberos_logs") return "Inspect domain auth logs in sandbox";
+  return "Run sandboxed diagnostic";
 }
 
 function jobKindForCapability(capability?: string): AgentJob["kind"] {

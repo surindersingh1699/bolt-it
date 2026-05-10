@@ -51,6 +51,8 @@ Capability picker for common cases (use these instead of asking):
 - Mapped drives / Kerberos / domain auth issues → tensorlake step with capability "sandbox.read_kerberos_logs"
 - Application crash / "X is not working" → tensorlake step with capability "sandbox.read_auth_logs" as a starting point
 
+CRITICAL — every step's "description" field MUST mention the user's specific issue by name. Bad: "Run diagnostic in sandbox". Good: "Check if Excel process is responding and inspect recent crash logs". The user sees this description in Slack — if you say "VPN" when they asked about Excel, they lose trust.
+
 Reply text (the "response" field) should NEVER ask for clarification. Always say something like:
 "Hi <first name> — I'm pulling diagnostics from your machine right now and will reply with a fix plan in a moment."
 

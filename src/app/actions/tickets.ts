@@ -32,11 +32,12 @@ async function postSlackUpdate(ticket: Ticket, text: string): Promise<void> {
 }
 
 function humanStepLabel(step: PlanStep): string {
+  if (step.description) return step.description;
   if (step.kind === "tensorlake") return humanLabelFor(step.capability);
-  if (step.kind === "insforge") return step.description || "Running secure backend action";
-  if (step.kind === "aside") return step.description || "Running action in your browser session";
+  if (step.kind === "insforge") return "Running secure backend action";
+  if (step.kind === "aside") return "Running action in your browser session";
   if (step.kind === "slack_reply") return "Replying with the resolution";
-  return step.description || "Working";
+  return "Working";
 }
 import { classifyPlan } from "@/lib/policy";
 
@@ -329,10 +330,14 @@ async function executePlan(ticketId: string): Promise<void> {
   const hasSlackReplyStep = resolvedTicket.plan.some((s) => s.kind === "slack_reply");
   if (!hasSlackReplyStep && resolvedTicket.channel === "slack") {
     const firstName = resolvedTicket.reporter.split(/\s+/)[0];
-    const finalMessage =
-      resolvedTicket.draftResponse ??
-      `Hi ${firstName} — I finished running diagnostics on your machine. Everything's been resolved. Let me know if anything still looks off.`;
-    await postSlackUpdate(resolvedTicket, `✅ ${finalMessage}`);
+    const ranSteps = resolvedTicket.plan
+      .filter((s) => s.status === "succeeded")
+      .map((s, i) => `   ${i + 1}. ${humanStepLabel(s)}`)
+      .join("\n");
+    await postSlackUpdate(
+      resolvedTicket,
+      `✅ Hi ${firstName} — diagnostics complete on your machine. Findings have been attached to ticket ${resolvedTicket.id} for review:\n${ranSteps}\n\nA technician will follow up if anything in the logs needs action.`,
+    );
   }
 
   const resolutionTimeMs = Date.now() - resolvedTicket.createdAt;
