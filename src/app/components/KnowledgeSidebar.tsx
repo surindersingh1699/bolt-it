@@ -13,9 +13,14 @@ export function KnowledgeSidebar() {
 
   if (!ticket) {
     return (
-      <div className="bg-neutral-950 px-4 py-6">
-        <SectionHeader title="Knowledge" />
-        <p className="text-xs text-neutral-500">Select a ticket to see grounding sources.</p>
+      <div className="bg-neutral-950 overflow-y-auto">
+        <div className="px-4 py-4 border-b border-neutral-800">
+          <SectionHeader title="Knowledge" />
+          <p className="text-[11px] text-neutral-500 mt-1">
+            Select a ticket to see per-ticket grounding sources.
+          </p>
+        </div>
+        <ConnectDocsCard />
       </div>
     );
   }
