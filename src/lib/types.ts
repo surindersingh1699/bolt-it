@@ -3,6 +3,7 @@ export type TicketStatus =
   | "drafting"
   | "awaiting_approval"
   | "executing"
+  | "awaiting_confirmation"
   | "resolved"
   | "escalated";
 

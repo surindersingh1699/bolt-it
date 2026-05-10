@@ -221,44 +221,47 @@ export async function approveAndExecute(ticketId: string): Promise<void> {
   if (!requestingUser?.isITStaff) {
     throw new Error("Only IT staff can approve plans.");
   }
-  await runApprovedPlan(ticketId);
+  await runApprovedPlan(ticketId, {
+    name: requestingUser.name,
+    email: requestingUser.email,
+  });
 }
 
 export async function demoApproveAndExecute(ticketId: string): Promise<void> {
-  await runApprovedPlan(ticketId);
+  await runApprovedPlan(ticketId, { name: "demo IT staff", email: "demo@local" });
 }
 
-async function runApprovedPlan(ticketId: string): Promise<void> {
+interface Approver {
+  name: string;
+  email: string;
+}
+
+async function runApprovedPlan(ticketId: string, approver: Approver): Promise<void> {
   const ticket = await getTicket(ticketId);
   if (!ticket || ticket.status !== "awaiting_approval") return;
   await updateTicket(ticketId, { status: "executing" });
   safeRevalidate("/");
   after(async () => {
     try {
-      await executePlan(ticketId);
+      await executePlan(ticketId, approver);
     } catch (err) {
       console.error(`[runApprovedPlan] executePlan failed for ${ticketId}:`, err);
     }
   });
 }
 
-async function executePlan(ticketId: string): Promise<void> {
+async function executePlan(ticketId: string, approver: Approver): Promise<void> {
   const ticket = await getTicket(ticketId);
   if (!ticket) return;
 
   for (const step of ticket.plan) {
     if (step.approvalMode === "human") {
       await updateStep(ticketId, step.id, {
-        status: "skipped",
         log: [
           ...(step.log ?? []),
-          `[Policy] Escalating to human — step requires manual review (${step.risk ?? "high"}: ${step.riskReason ?? "high-risk action"})`,
+          `[Policy] High-risk step approved by ${approver.name} (${approver.email}) — proceeding`,
         ],
-        finishedAt: Date.now(),
       });
-      await updateTicket(ticketId, { status: "escalated" });
-      safeRevalidate("/");
-      return;
     }
 
     await updateStep(ticketId, step.id, { status: "running", startedAt: Date.now() });
@@ -324,31 +327,59 @@ async function executePlan(ticketId: string): Promise<void> {
     }
   }
 
-  const resolvedTicket = await getTicket(ticketId);
-  if (!resolvedTicket) return;
+  const finishedTicket = await getTicket(ticketId);
+  if (!finishedTicket) return;
 
-  const hasSlackReplyStep = resolvedTicket.plan.some((s) => s.kind === "slack_reply");
-  if (!hasSlackReplyStep && resolvedTicket.channel === "slack") {
-    const firstName = resolvedTicket.reporter.split(/\s+/)[0];
-    const ranSteps = resolvedTicket.plan
+  await updateTicket(ticketId, { status: "awaiting_confirmation" });
+  safeRevalidate("/");
+
+  if (finishedTicket.channel === "slack") {
+    const firstName = finishedTicket.reporter.split(/\s+/)[0];
+    const ranSteps = finishedTicket.plan
       .filter((s) => s.status === "succeeded")
       .map((s, i) => `   ${i + 1}. ${humanStepLabel(s)}`)
       .join("\n");
     await postSlackUpdate(
-      resolvedTicket,
-      `✅ Hi ${firstName} — diagnostics complete on your machine. Findings have been attached to ticket ${resolvedTicket.id} for review:\n${ranSteps}\n\nA technician will follow up if anything in the logs needs action.`,
+      finishedTicket,
+      `✅ Hi ${firstName} — I finished the plan on your machine:\n${ranSteps}\n\nIs the issue resolved? Reply *yes* or *no* in this thread (ticket ${ticketId}).`,
     );
   }
+}
 
-  const resolutionTimeMs = Date.now() - resolvedTicket.createdAt;
+export async function confirmTicketResolved(
+  ticketId: string,
+  source: "user_slack" | "auto_timeout" = "user_slack",
+): Promise<void> {
+  const ticket = await getTicket(ticketId);
+  if (!ticket || ticket.status !== "awaiting_confirmation") return;
   await updateTicket(ticketId, {
     status: "resolved",
     resolvedAt: Date.now(),
     resolvedByAi: true,
-    resolutionTimeMs,
+    resolutionTimeMs: Date.now() - ticket.createdAt,
   });
-
+  if (ticket.channel === "slack" && source === "user_slack") {
+    const firstName = ticket.reporter.split(/\s+/)[0];
+    await postSlackUpdate(
+      ticket,
+      `🎉 Glad I could help, ${firstName}. I've saved this fix to the runbook so the next identical issue will resolve even faster.`,
+    );
+  }
   await extractRunbook(ticketId);
+  safeRevalidate("/");
+}
+
+export async function escalateAfterUserDenied(ticketId: string): Promise<void> {
+  const ticket = await getTicket(ticketId);
+  if (!ticket || ticket.status !== "awaiting_confirmation") return;
+  await updateTicket(ticketId, { status: "escalated" });
+  if (ticket.channel === "slack") {
+    const firstName = ticket.reporter.split(/\s+/)[0];
+    await postSlackUpdate(
+      ticket,
+      `🙏 Sorry that didn't fix it, ${firstName}. I've escalated ticket ${ticketId} to a human technician — they'll reach out shortly.`,
+    );
+  }
   safeRevalidate("/");
 }
 

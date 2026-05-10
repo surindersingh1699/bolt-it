@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
-import { createTicket } from "@/app/actions/tickets";
-import { getWorkspaceBySlackTeamId } from "@/lib/data";
-import { fetchSlackUserEmail, isSlackSigningConfigured, verifySlackRequest } from "@/lib/slack";
+import { confirmTicketResolved, createTicket, escalateAfterUserDenied } from "@/app/actions/tickets";
+import { getWorkspaceBySlackTeamId, listTickets } from "@/lib/data";
+import { fetchSlackUserEmail, isSlackSigningConfigured, postSlackMessage, verifySlackRequest } from "@/lib/slack";
 
 export const dynamic = "force-dynamic";
 
@@ -50,6 +50,36 @@ export async function POST(req: Request) {
   const text = (event.text ?? "").replace(/<@[^>]+>/g, "").trim();
   if (!text) return NextResponse.json({ ok: true });
 
+  if (event.thread_ts && event.thread_ts !== event.ts) {
+    const tickets = await listTickets(workspace.id);
+    const open = tickets.find(
+      (t) =>
+        t.status === "awaiting_confirmation" &&
+        (t.body.includes(`Slack thread: ${event.thread_ts}`) ||
+          t.body.includes(`Slack thread: ${event.ts}`)),
+    );
+    if (open) {
+      const verdict = classifyConfirmation(text);
+      if (verdict === "yes") {
+        await confirmTicketResolved(open.id);
+        return NextResponse.json({ ok: true, ticketId: open.id, action: "resolved" });
+      }
+      if (verdict === "no") {
+        await escalateAfterUserDenied(open.id);
+        return NextResponse.json({ ok: true, ticketId: open.id, action: "escalated" });
+      }
+      if (event.channel) {
+        await postSlackMessage(
+          workspace.slackAccessToken,
+          event.channel,
+          "Was that a *yes* (issue resolved) or *no* (still broken)?",
+          event.thread_ts,
+        ).catch(() => undefined);
+      }
+      return NextResponse.json({ ok: true, ticketId: open.id, action: "ambiguous" });
+    }
+  }
+
   const user = event.user
     ? await fetchSlackUserEmail(workspace.slackAccessToken, event.user)
     : {};
@@ -72,4 +102,15 @@ export async function POST(req: Request) {
   });
 
   return NextResponse.json({ ok: true, ticketId });
+}
+
+function classifyConfirmation(text: string): "yes" | "no" | "ambiguous" {
+  const t = text.toLowerCase().trim();
+  if (/^(yes|y|yep|yeah|fixed|works|working|resolved|thanks|thank you|ty|done|all good|good|great|perfect|that did it|that worked)\b/.test(t)) {
+    return "yes";
+  }
+  if (/^(no|n|nope|nah|still|broken|not (?:working|fixed)|same|didn't (?:work|help))\b/.test(t)) {
+    return "no";
+  }
+  return "ambiguous";
 }

@@ -55,6 +55,7 @@ function StatusDot({ status }: { status: Ticket["status"] }) {
     drafting: "bg-violet-400 animate-pulse",
     awaiting_approval: "bg-amber-400 animate-pulse",
     executing: "bg-cyan-400 animate-pulse",
+    awaiting_confirmation: "bg-sky-400 animate-pulse",
     resolved: "bg-emerald-400",
     escalated: "bg-rose-400",
   }[status];
@@ -67,6 +68,7 @@ function labelForStatus(status: Ticket["status"]): string {
     drafting: "AI drafting…",
     awaiting_approval: "needs approval",
     executing: "executing…",
+    awaiting_confirmation: "waiting on user reply",
     resolved: "resolved by AI",
     escalated: "escalated",
   }[status];

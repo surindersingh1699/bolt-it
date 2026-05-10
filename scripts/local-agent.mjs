@@ -36,7 +36,70 @@ function humanLabel(command) {
   if (c.startsWith("collect_auth_logs ")) return "Reading authentication logs";
   if (c.startsWith("collect_windows_event_logs ")) return "Checking Kerberos ticket status";
   if (c.startsWith("collect_app_logs ")) return "Reviewing application crash logs";
+  if (c.startsWith("restart_app ")) {
+    const m = c.match(/--app "([^"]+)"/);
+    return `Restarting ${m?.[1] || "app"}`;
+  }
+  if (c.startsWith("clear_app_cache ")) {
+    const m = c.match(/--app "([^"]+)"/);
+    return `Clearing ${m?.[1] || "app"} cache`;
+  }
+  if (c.startsWith("toggle_wifi")) return "Toggling Wi-Fi off and on";
   return "Running sandboxed diagnostic";
+}
+
+function runShell(cmd, args) {
+  return new Promise((resolve) => {
+    const p = spawn(cmd, args, { stdio: ["ignore", "pipe", "pipe"] });
+    let stdout = "";
+    let stderr = "";
+    p.stdout.on("data", (d) => (stdout += d.toString()));
+    p.stderr.on("data", (d) => (stderr += d.toString()));
+    p.on("close", (code) => resolve({ code, stdout, stderr }));
+    p.on("error", (err) => resolve({ code: -1, stdout, stderr: err.message }));
+  });
+}
+
+async function restartApp(appName) {
+  const lines = [];
+  lines.push(`requesting quit for "${appName}" via osascript`);
+  await runShell("osascript", ["-e", `tell application "${appName}" to quit`]);
+  await new Promise((r) => setTimeout(r, 1500));
+  lines.push(`reopening "${appName}"`);
+  const open = await runShell("open", ["-a", appName]);
+  if (open.code !== 0) {
+    return { ok: false, output: lines.join("\n"), error: `open failed: ${open.stderr.trim() || open.code}` };
+  }
+  lines.push(`"${appName}" restarted successfully`);
+  return { ok: true, output: lines.join("\n") };
+}
+
+async function clearAppCache(appName) {
+  const lines = [];
+  const safeName = appName.replace(/[^a-zA-Z0-9 _-]/g, "");
+  const target = `${os.homedir()}/Library/Caches/${safeName}`;
+  lines.push(`target cache: ${target}`);
+  const ls = await runShell("ls", [target]);
+  if (ls.code !== 0) {
+    lines.push(`no user cache directory found at ${target} — nothing to clear`);
+    return { ok: true, output: lines.join("\n") };
+  }
+  await runShell("rm", ["-rf", target]);
+  lines.push(`cleared ${target}`);
+  return { ok: true, output: lines.join("\n") };
+}
+
+async function toggleWifi() {
+  const lines = [];
+  lines.push(`turning Wi-Fi off (en0)`);
+  const off = await runShell("networksetup", ["-setairportpower", "en0", "off"]);
+  if (off.code !== 0) return { ok: false, output: lines.join("\n"), error: off.stderr.trim() };
+  await new Promise((r) => setTimeout(r, 1500));
+  lines.push(`turning Wi-Fi back on`);
+  const on = await runShell("networksetup", ["-setairportpower", "en0", "on"]);
+  if (on.code !== 0) return { ok: false, output: lines.join("\n"), error: on.stderr.trim() };
+  lines.push(`Wi-Fi cycled`);
+  return { ok: true, output: lines.join("\n") };
 }
 
 console.log(`${ANSI.cyan}${ANSI.bold}╔════════════════════════════════════════════════════════════╗${ANSI.reset}`);
@@ -162,6 +225,19 @@ async function poll() {
 
 async function runAllowlisted(job) {
   const command = String(job.allowlistedCommand || "");
+  if (command.startsWith("restart_app ")) {
+    const m = command.match(/--app "([^"]+)"/);
+    if (!m?.[1]) return { ok: false, error: "missing --app argument" };
+    return await restartApp(m[1]);
+  }
+  if (command.startsWith("clear_app_cache ")) {
+    const m = command.match(/--app "([^"]+)"/);
+    if (!m?.[1]) return { ok: false, error: "missing --app argument" };
+    return await clearAppCache(m[1]);
+  }
+  if (command.startsWith("toggle_wifi")) {
+    return await toggleWifi();
+  }
   if (command.startsWith("collect_vpn_diagnostics ")) {
     return {
       ok: true,

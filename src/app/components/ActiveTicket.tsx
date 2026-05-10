@@ -397,6 +397,7 @@ function StatusBadge({ status }: { status: Ticket["status"] }) {
     drafting: "bg-violet-500/15 text-violet-300",
     awaiting_approval: "bg-amber-500/15 text-amber-300",
     executing: "bg-cyan-500/15 text-cyan-300",
+    awaiting_confirmation: "bg-sky-500/15 text-sky-300",
     resolved: "bg-emerald-500/15 text-emerald-300",
     escalated: "bg-rose-500/15 text-rose-300",
   } as const;
@@ -405,6 +406,7 @@ function StatusBadge({ status }: { status: Ticket["status"] }) {
     drafting: "drafting",
     awaiting_approval: "awaiting approval",
     executing: "executing",
+    awaiting_confirmation: "awaiting user confirmation",
     resolved: "resolved",
     escalated: "escalated",
   } as const;

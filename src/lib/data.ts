@@ -333,9 +333,13 @@ function isMissingRelationError(error: unknown): boolean {
 export async function insertWorkspace(w: Workspace): Promise<void> {
   const ifg = isInsforgeEnabled() ? getInsforge() : null;
   if (ifg) {
-    const { error } = await ifg.database.from("workspaces").insert([workspaceToRow(w)]);
-    ifErr(error, "insertWorkspace");
-    return;
+    try {
+      const { error } = await ifg.database.from("workspaces").insert([workspaceToRow(w)]);
+      if (!error) return;
+      console.warn("[InsForge] insertWorkspace failed — falling back to in-memory:", JSON.stringify(error));
+    } catch (err) {
+      console.warn("[InsForge] insertWorkspace threw — falling back to in-memory:", (err as Error).message);
+    }
   }
   db.insertWorkspace(w);
 }

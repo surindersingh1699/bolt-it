@@ -6,7 +6,10 @@ export function isAgentJobCapability(capability?: string): boolean {
   return (
     capability === "diag.network_probe" ||
     capability === "sandbox.read_auth_logs" ||
-    capability === "sandbox.read_kerberos_logs"
+    capability === "sandbox.read_kerberos_logs" ||
+    capability === "fix.restart_app" ||
+    capability === "fix.clear_app_cache" ||
+    capability === "fix.toggle_wifi"
   );
 }
 
@@ -20,7 +23,7 @@ export async function enqueueAgentJob(ticket: Ticket, step: PlanStep): Promise<A
     kind: jobKindForCapability(step.capability),
     targetUserEmail: ticket.reporterEmail,
     instructions: instructionsForCapability(ticket, step),
-    allowlistedCommand: commandForCapability(step.capability, ticket.reporterEmail),
+    allowlistedCommand: commandForCapability(step.capability, ticket.reporterEmail, step.params),
     status: "queued",
     createdAt: now,
     updatedAt: now,
@@ -40,7 +43,10 @@ export function humanLabelFor(capability: string | undefined): string {
   if (capability === "diag.network_probe") return "Run network diagnostic in sandbox";
   if (capability === "sandbox.read_auth_logs") return "Inspect system logs in sandbox";
   if (capability === "sandbox.read_kerberos_logs") return "Inspect domain auth logs in sandbox";
-  return "Run sandboxed diagnostic";
+  if (capability === "fix.restart_app") return "Restart the application";
+  if (capability === "fix.clear_app_cache") return "Clear application cache";
+  if (capability === "fix.toggle_wifi") return "Toggle Wi-Fi";
+  return "Run sandboxed action";
 }
 
 function jobKindForCapability(capability?: string): AgentJob["kind"] {
@@ -51,7 +57,15 @@ function jobKindForCapability(capability?: string): AgentJob["kind"] {
   return "app_diagnostic";
 }
 
-function commandForCapability(capability: string | undefined, email: string): string {
+function sanitizeAppName(s: unknown): string {
+  return String(s ?? "").replace(/[^a-zA-Z0-9 _-]/g, "").slice(0, 64);
+}
+
+function commandForCapability(
+  capability: string | undefined,
+  email: string,
+  params: Record<string, unknown> | undefined,
+): string {
   const user = email.replace(/[^a-zA-Z0-9@._-]/g, "");
   if (capability === "diag.network_probe") {
     return `collect_vpn_diagnostics --user ${user} --redact-secrets`;
@@ -61,6 +75,17 @@ function commandForCapability(capability: string | undefined, email: string): st
   }
   if (capability === "sandbox.read_auth_logs") {
     return `collect_auth_logs --user ${user} --window 2h --redact-secrets`;
+  }
+  if (capability === "fix.restart_app") {
+    const app = sanitizeAppName(params?.app);
+    return `restart_app --app "${app}"`;
+  }
+  if (capability === "fix.clear_app_cache") {
+    const app = sanitizeAppName(params?.app);
+    return `clear_app_cache --app "${app}"`;
+  }
+  if (capability === "fix.toggle_wifi") {
+    return `toggle_wifi`;
   }
   return `collect_app_logs --user ${user} --redact-secrets`;
 }
