@@ -10,10 +10,18 @@ import {
 } from "react";
 import { Ticket, Runbook, DeflectionStat } from "@/lib/types";
 
+export interface IntegrationsState {
+  slackConnected: boolean;
+  slackTeamName: string | null;
+  niaSources: string[];
+  hyperspellMode: "mock" | "live";
+}
+
 interface AppState {
   tickets: Ticket[];
   runbooks: Runbook[];
   stats: DeflectionStat;
+  integrations: IntegrationsState;
   selectedTicketId: string | null;
   selectTicket: (id: string | null) => void;
   refresh: () => Promise<void>;
@@ -25,6 +33,7 @@ export function StateProvider({ children }: { children: React.ReactNode }) {
   const [tickets, setTickets] = useState<Ticket[]>([]);
   const [runbooks, setRunbooks] = useState<Runbook[]>([]);
   const [stats, setStats] = useState<DeflectionStat>(emptyStats());
+  const [integrations, setIntegrations] = useState<IntegrationsState>(emptyIntegrations());
   const [selectedTicketId, setSelectedTicketId] = useState<string | null>(null);
 
   const refresh = useCallback(async () => {
@@ -34,6 +43,7 @@ export function StateProvider({ children }: { children: React.ReactNode }) {
     setTickets(data.tickets);
     setRunbooks(data.runbooks);
     setStats(data.stats);
+    if (data.integrations) setIntegrations(data.integrations);
     setSelectedTicketId((curr) => {
       if (curr && data.tickets.some((t: Ticket) => t.id === curr)) return curr;
       const firstActive = data.tickets.find(
@@ -58,17 +68,22 @@ export function StateProvider({ children }: { children: React.ReactNode }) {
       tickets,
       runbooks,
       stats,
+      integrations,
       selectedTicketId,
       selectTicket: setSelectedTicketId,
       refresh,
     }),
-    [tickets, runbooks, stats, selectedTicketId, refresh],
+    [tickets, runbooks, stats, integrations, selectedTicketId, refresh],
   );
   return <Ctx.Provider value={value}>{children}</Ctx.Provider>;
 }
 
 function emptyStats(): DeflectionStat {
   return { totalTickets: 0, aiResolved: 0, escalated: 0, avgResolutionMs: 0, rate: 0 };
+}
+
+function emptyIntegrations(): IntegrationsState {
+  return { slackConnected: false, slackTeamName: null, niaSources: [], hyperspellMode: "mock" };
 }
 
 export function useAppState(): AppState {

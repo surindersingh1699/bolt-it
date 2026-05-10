@@ -4,8 +4,10 @@ import { useAppState } from "./StateProvider";
 import { Citation } from "@/lib/types";
 import { BookOpen, CloudCog, DatabaseZap, HardDrive, KeyRound, MessageSquare, ShieldCheck, User2 } from "lucide-react";
 
+type RowTone = "live" | "mock" | "off";
+
 export function KnowledgeSidebar() {
-  const { tickets, selectedTicketId, runbooks } = useAppState();
+  const { tickets, selectedTicketId, runbooks, integrations } = useAppState();
   const ticket = tickets.find((t) => t.id === selectedTicketId);
 
   if (!ticket) {
@@ -19,6 +21,8 @@ export function KnowledgeSidebar() {
 
   const niaCites = ticket.citations.filter((c) => c.source === "nia");
   const userCites = ticket.citations.filter((c) => c.source === "hyperspell");
+  const humanGated = ticket.plan.filter((s) => s.approvalMode === "human").length;
+  const niaSourceCount = integrations.niaSources.length;
 
   return (
     <div className="bg-neutral-950 overflow-y-auto">
@@ -37,12 +41,58 @@ export function KnowledgeSidebar() {
           </span>
         </div>
         <div className="grid grid-cols-1 gap-2">
-          <SystemRow icon={<MessageSquare size={12} />} label="Slack intake" value="thread watched" />
-          <SystemRow icon={<BookOpen size={12} />} label="Docs + runbooks" value={`${runbooks.length} indexed`} />
-          <SystemRow icon={<KeyRound size={12} />} label="Identity" value="AD / Okta scoped" />
-          <SystemRow icon={<HardDrive size={12} />} label="Device logs" value="read-only sandbox" />
-          <SystemRow icon={<DatabaseZap size={12} />} label="Hyperspell" value={userCites.length > 0 ? "context loaded" : "no user memory"} />
-          <SystemRow icon={<ShieldCheck size={12} />} label="Policy gate" value="human approval" />
+          <SystemRow
+            icon={<MessageSquare size={12} />}
+            label="Slack intake"
+            value={
+              integrations.slackConnected
+                ? `connected${integrations.slackTeamName ? ` · ${integrations.slackTeamName}` : ""}`
+                : "not connected"
+            }
+            tone={integrations.slackConnected ? "live" : "off"}
+          />
+          <SystemRow
+            icon={<BookOpen size={12} />}
+            label="Docs + runbooks"
+            value={
+              niaSourceCount > 0
+                ? `${runbooks.length} runbook${runbooks.length === 1 ? "" : "s"} · ${niaSourceCount} Nia source${niaSourceCount === 1 ? "" : "s"}`
+                : `${runbooks.length} runbook${runbooks.length === 1 ? "" : "s"}`
+            }
+            tone="live"
+          />
+          <SystemRow
+            icon={<KeyRound size={12} />}
+            label="Identity actions"
+            value="AD / Okta (mocked)"
+            tone="mock"
+          />
+          <SystemRow
+            icon={<HardDrive size={12} />}
+            label="Device logs"
+            value="read-only sandbox"
+            tone="live"
+          />
+          <SystemRow
+            icon={<DatabaseZap size={12} />}
+            label="Hyperspell"
+            value={
+              userCites.length > 0
+                ? `${userCites.length} context hit${userCites.length === 1 ? "" : "s"} (mocked)`
+                : "no user memory (mocked)"
+            }
+            tone="mock"
+          />
+          <SystemRow
+            icon={<ShieldCheck size={12} />}
+            label="Policy gate"
+            value={
+              humanGated > 0
+                ? `${humanGated} step${humanGated === 1 ? "" : "s"} → escalate`
+                : "all auto"
+            }
+            tone="live"
+          />
         </div>
       </section>
 
@@ -89,16 +139,24 @@ function SystemRow({
   icon,
   label,
   value,
+  tone = "live",
 }: {
   icon: React.ReactNode;
   label: string;
   value: string;
+  tone?: RowTone;
 }) {
+  const valueColor =
+    tone === "live"
+      ? "text-emerald-300"
+      : tone === "mock"
+        ? "text-amber-300"
+        : "text-neutral-500";
   return (
     <div className="flex items-center gap-2 rounded border border-neutral-800 bg-neutral-900/40 px-2 py-1.5">
       <span className="text-neutral-500">{icon}</span>
       <span className="text-[11px] text-neutral-300">{label}</span>
-      <span className="ml-auto text-[10px] text-emerald-300">{value}</span>
+      <span className={`ml-auto text-[10px] ${valueColor}`}>{value}</span>
     </div>
   );
 }

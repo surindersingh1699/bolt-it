@@ -10,6 +10,10 @@ export type ActionStatus = "pending" | "running" | "succeeded" | "failed" | "ski
 
 export type ActionKind = "insforge" | "aside" | "tensorlake" | "slack_reply";
 
+export type StepRisk = "low" | "medium" | "high";
+export type StepApprovalMode = "auto" | "human";
+export type RiskSource = "allowlist" | "judge" | "fallback";
+
 export interface Citation {
   source: "nia" | "hyperspell";
   title: string;
@@ -27,6 +31,10 @@ export interface PlanStep {
   log?: string[];
   startedAt?: number;
   finishedAt?: number;
+  risk?: StepRisk;
+  approvalMode?: StepApprovalMode;
+  riskReason?: string;
+  riskSource?: RiskSource;
 }
 
 export interface Workspace {

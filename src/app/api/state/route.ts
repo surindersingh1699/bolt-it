@@ -1,17 +1,31 @@
 import { NextResponse } from "next/server";
-import { deflectionStats, listRunbooks, listTickets } from "@/lib/data";
+import { deflectionStats, getWorkspace, listRunbooks, listTickets } from "@/lib/data";
 import { ensureSeeded } from "@/lib/seed";
 import { getCurrentWorkspaceId } from "@/lib/workspace";
+import { niaIndexedSources } from "@/lib/integrations/nia";
 
 export const dynamic = "force-dynamic";
 
 export async function GET() {
   await ensureSeeded();
   const workspaceId = (await getCurrentWorkspaceId()) ?? undefined;
-  const [tickets, runbooks, stats] = await Promise.all([
+  const [tickets, runbooks, stats, workspace] = await Promise.all([
     listTickets(workspaceId),
     listRunbooks(workspaceId),
     deflectionStats(workspaceId),
+    workspaceId ? getWorkspace(workspaceId) : Promise.resolve(null),
   ]);
-  return NextResponse.json({ tickets, runbooks, stats, workspaceId: workspaceId ?? null });
+  const niaSources = niaIndexedSources();
+  return NextResponse.json({
+    tickets,
+    runbooks,
+    stats,
+    workspaceId: workspaceId ?? null,
+    integrations: {
+      slackConnected: Boolean(workspace?.slackAccessToken),
+      slackTeamName: workspace?.slackTeamName ?? null,
+      niaSources,
+      hyperspellMode: "mock" as const,
+    },
+  });
 }
