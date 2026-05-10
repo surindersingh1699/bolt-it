@@ -1,12 +1,21 @@
 # AI-Native IT Support — Hackathon MVP
 
-A working prototype of an **AI-native managed IT support service**. Built around the wedge: *match offshore cost, beat onshore quality, with zero-standing-access security architecture.*
+A working prototype of an **AI-native IT copilot** that remembers every ticket, issue, and company-specific runbook so it can resolve full-stack IT problems — network, identity, devices, app crashes, front-desk asks — in seconds, with high security and a human in the loop.
 
 Sponsor stack: **Nia** (headline) · Convex · Vercel · InsForge · Aside · Tensorlake · Hyperspell.
 
+## The problem
+
+Companies still burn enormous time and money on IT tickets that today's AI agents can't solve — because those agents have no persistent context (your runbooks, your users, this user's recent activity) and no real capability (they can read docs but can't actually push an MDM profile, restart an app on a laptop, or unlock an AD account). So the ticket falls back to a human, in person, slow and expensive.
+
+This copilot fixes both halves:
+
+- **Context** — every resolved ticket is auto-extracted into a runbook and re-indexed (Nia). The next identical ticket resolves faster. Per-user signals (recent apps, calendar, device posture) come from Hyperspell. Plans cite the exact runbook + user-context snippets they were grounded in.
+- **Capability** — plans execute through capability-scoped backends (InsForge), sandboxed compute (Tensorlake / Vercel Sandbox), the user's own authenticated browser (Aside), or a local agent that runs allowlisted shell commands on the technician's machine. The AI **never holds standing credentials**, and any high-risk step is gated behind an explicit IT-staff approval click.
+
 ## The product
 
-**Customers report IT issues in their existing Slack channel.** A US-based technician sees a live console with the AI's drafted response + action plan, every step grounded in cited runbooks (Nia). One click approves; actions execute via capability-scoped backends (InsForge), the user's own authenticated browser (Aside), sandboxed compute (Tensorlake), or a **local sandbox agent** that runs allowlisted macOS commands (restart app, clear cache, toggle Wi-Fi) on the technician's machine — the agent **never holds standing credentials**. After execution, the bot asks the reporter in-thread "is this resolved?" and only marks the ticket resolved on a *yes*; a *no* escalates to a human. Resolved tickets auto-extract back into runbooks (re-indexed in Nia), so identical tickets resolve faster the second time. That's the compounding moat.
+**Employees report IT issues in their existing Slack channel.** An IT technician sees a live console with the AI's drafted response + action plan, every step grounded in cited runbooks (Nia). One click approves; actions execute via capability-scoped backends (InsForge), the user's own authenticated browser (Aside), sandboxed compute (Tensorlake), or a **local sandbox agent** that runs allowlisted macOS commands (restart app, clear cache, toggle Wi-Fi) on the technician's machine. After execution, the bot asks the reporter in-thread "is this resolved?" and only marks the ticket resolved on a *yes*; a *no* escalates to a human. Resolved tickets auto-extract back into runbooks (re-indexed in Nia), so identical tickets resolve faster the second time. That's the compounding moat.
 
 ## What's in here
 
@@ -185,10 +194,12 @@ curl -s http://localhost:3000/api/state | jq '.stats'
 
 ## The economic thesis (what the demo proves)
 
-- **Offshore tech blended:** ~$15–25/hr, 1 tech ≈ 1 customer L1 stream
-- **AI-native US tech:** ~$40–60/hr, 1 tech + this console ≈ 3–4 customer L1 streams
-- **Effective per-customer labor cost:** ~$2–3K/mo (matches offshore) **with** US fluency, timezone, retained context
-- **Charge:** $5–7K/mo for a 50-seat startup → 50%+ gross margin headroom
+The cost isn't the technician's hourly rate — it's the unresolved ticket. Every IT issue today's AI agents can't solve falls back to a human walking to a desk, screen-sharing, or rebuilding a laptop. That's where the time and money go.
+
+- **Average L1 ticket today:** ~20–40 min of human-attended work (triage + remote session + follow-up)
+- **With this copilot:** the deflectable ticket takes ~15s end-to-end (drafted, approved, executed, confirmed by the user in Slack), and the *non*-deflectable ticket arrives at the technician with a full evidence pack already attached — so even escalations are faster
+- **Memory effect:** every resolved ticket becomes a runbook, so the second occurrence of any issue is cheaper than the first. The deflection-rate curve bends up over time
+- **For a 200-seat company:** if 60% of weekly tickets get deflected, that's roughly one full-time technician's worth of capacity recovered without hiring
 
 The deflection-rate counter on the dashboard is the founder pitch number.
 
