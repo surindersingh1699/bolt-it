@@ -1,0 +1,81 @@
+- id: rb-figma-sso
+  title: "Figma access lost after team change (SSO group drift)"
+  tags: [figma, sso, okta, access]
+  success_count: 4
+  body: |
+    Symptom: User can't open Figma after switching teams.
+    Root cause: Okta group membership for figma-designers was stripped during
+    the team-change automation.
+    Resolution:
+      1. okta.list_groups — confirm figma-designers is missing.
+      2. okta.add_to_group — re-add the user to figma-designers (runs in user's
+         own authenticated browser session, agent holds no creds).
+      3. slack.send_message — notify user the access is restored.
+
+- id: rb-vpn-slow
+  title: "VPN slow / dropping connections (stale config)"
+  tags: [vpn, network, mdm]
+  success_count: 2
+  body: |
+    Symptom: VPN performance degraded; intermittent drops.
+    Common cause: client config still references the decommissioned us-west-1
+    gateway; MTU mismatch with the new us-east-1 gateway.
+    Resolution:
+      1. diag.network_probe target=corp-vpn-gateway — sandboxed traceroute,
+         confirms MTU mismatch.
+      2. mdm.push_vpn_config profile=corp-vpn — push refreshed VPN profile.
+      3. slack.send_message — ask user to reconnect.
+
+- id: rb-password-reset
+  title: "Password reset (verified user)"
+  tags: [password, reset, okta, identity]
+  success_count: 7
+  body: |
+    Symptom: User locked out or forgot password.
+    Resolution:
+      1. identity.verify — confirm the requester is who they claim (sso_session
+         match against recent activity).
+      2. okta.send_reset — trigger Okta reset email in the user's authenticated
+         browser via Aside (agent never holds creds).
+      3. slack.send_message — notify user the reset email is on its way.
+
+- id: rb-laptop-onboard
+  title: "New hire laptop onboarding (Day 0)"
+  tags: [laptop, onboarding, mdm, new-hire]
+  success_count: 1
+  body: |
+    On a new hire's first day:
+      1. ad.lookup_user — confirm the AD record exists.
+      2. mdm.push_vpn_config — push baseline VPN profile.
+      3. okta.add_to_group — add to default groups for their team (engineering
+         → github-org, vpn-users; design → designers; etc).
+      4. slack.send_message — welcome the user and link to the onboarding doc.
+
+- id: rb-ad-account-locked
+  title: "AD account locked after failed logins"
+  tags: [ad, lockout, password, identity, account-locked]
+  success_count: 3
+  body: |
+    Symptom: User cannot sign in; AD account status=locked after threshold of
+    failed attempts.
+    Resolution:
+      1. ad.lookup_user — confirm lock state and failed-login count.
+      2. sandbox.read_auth_logs — read recent auth events (read-only sandbox,
+         secret redaction). Confirms legitimate user, not a brute-force.
+      3. identity.verify — out-of-band identity check.
+      4. ad.unlock_account — clear the lock.
+      5. slack.send_message — notify user.
+
+- id: rb-stale-kerberos
+  title: "Stale Kerberos ticket (Windows host won't auth)"
+  tags: [kerberos, ad, windows, stale-kerberos]
+  success_count: 1
+  body: |
+    Symptom: User logged in but mapped drives + intranet sites prompt for
+    credentials.
+    Cause: Kerberos TGT expired; clock skew or hibernated laptop.
+    Resolution:
+      1. ad.lookup_user — verify account is healthy.
+      2. sandbox.read_kerberos_logs — confirm expired TGT.
+      3. ad.refresh_kerberos — issue klist purge + krenew via the AD adapter.
+      4. slack.send_message — confirm with user.

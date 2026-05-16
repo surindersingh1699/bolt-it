@@ -1,0 +1,53 @@
+- email: alice@acme.test
+  name: Alice Nguyen
+  status: active
+  is_it_staff: false
+  groups: [everyone, designers, figma-designers]
+
+- email: bob@acme.test
+  name: Bob Martinez
+  status: locked
+  is_it_staff: false
+  groups: [everyone, sales, salesforce-users]
+
+- email: carol@acme.test
+  name: Carol Park
+  status: active
+  is_it_staff: false
+  groups: [everyone, sales, managers]
+
+- email: dan@acme.test
+  name: Dan O'Connor
+  status: active
+  is_it_staff: false
+  groups: [everyone, engineering, github-org, vpn-users]
+
+- email: eve@acme.test
+  name: Eve Tanaka
+  status: stale_kerberos
+  is_it_staff: false
+  groups: [everyone, engineering, vpn-users]
+
+- email: frank@acme.test
+  name: Frank Adebayo
+  status: password_expired
+  is_it_staff: false
+  groups: [everyone, finance, managers]
+
+- email: priya@acme.test
+  name: Priya Shah
+  status: active
+  is_it_staff: false
+  groups: [everyone, designers, managers]
+
+- email: morgan@acme.test
+  name: Morgan Reilly
+  status: active
+  is_it_staff: true
+  groups: [everyone, it-staff, managers]
+
+- email: sam@acme.test
+  name: Sam Iverson
+  status: active
+  is_it_staff: true
+  groups: [everyone, it-staff]

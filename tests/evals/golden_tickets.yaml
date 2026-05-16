@@ -1,0 +1,40 @@
+# Eight ticket→runbook pairs covering the seeded runbooks.
+- reporter: alice@acme.test
+  subject: "AD account locked"
+  body: "I keep getting 'account locked' when I try to log in this morning."
+  expect_runbook: rb-ad-account-locked
+
+- reporter: bob@acme.test
+  subject: "Cannot sign in - locked out"
+  body: "Locked out of my windows login after a few wrong tries."
+  expect_runbook: rb-ad-account-locked
+
+- reporter: dan@acme.test
+  subject: "Figma SSO error"
+  body: "Figma says I don't have access after we re-orged into the new team."
+  expect_runbook: rb-figma-sso
+
+- reporter: priya@acme.test
+  subject: "VPN keeps dropping"
+  body: "Corp VPN is super slow today and drops every few minutes."
+  expect_runbook: rb-vpn-slow
+
+- reporter: eve@acme.test
+  subject: "Mapped drives prompting for password"
+  body: "My shared drives keep asking me to re-auth, also intranet sites prompt."
+  expect_runbook: rb-stale-kerberos
+
+- reporter: frank@acme.test
+  subject: "Forgot password"
+  body: "I forgot my password, please send a reset."
+  expect_runbook: rb-password-reset
+
+- reporter: carol@acme.test
+  subject: "Help — locked out of my account!"
+  body: "Got the message that my account is locked, can you help."
+  expect_runbook: rb-ad-account-locked
+
+- reporter: sam@acme.test
+  subject: "New laptop setup"
+  body: "It's my first day, need help getting set up on this new mac."
+  expect_runbook: rb-laptop-onboard
