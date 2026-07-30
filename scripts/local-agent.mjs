@@ -1,5 +1,7 @@
 #!/usr/bin/env node
 import os from "node:os";
+import fs from "node:fs";
+import { fileURLToPath } from "node:url";
 import { spawn } from "node:child_process";
 
 const appUrl = process.env.IT_SUPPORT_APP_URL || "http://localhost:3000";
@@ -14,9 +16,35 @@ if (!token) {
 
 const AGENT_HOSTNAME = os.hostname();
 const AGENT_OS = `${os.platform()} ${os.release()} (${os.arch()})`;
-const AGENT_VERSION = "local-agent/0.3.0";
+const AGENT_VERSION = "local-agent/0.4.0";
 const IS_MAC = os.platform() === "darwin";
 const IS_WINDOWS = os.platform() === "win32";
+
+// ---- self-update -----------------------------------------------------------
+// Every SELF_UPDATE_MS, fetch our own source from the app server; if it
+// differs from what's on disk, overwrite and exit(0). The installer's wrapper
+// loop (or a supervisor) relaunches us, now running the new code. Dev-network
+// convenience: updates are trusted because they come from the same private
+// server that hands out jobs — a production agent would verify a signature.
+const SELF_UPDATE_MS = Number(process.env.LOCAL_AGENT_UPDATE_MS || 5 * 60 * 1000);
+const SELF_PATH = fileURLToPath(import.meta.url);
+
+async function checkForUpdate() {
+  try {
+    const res = await fetch(`${appUrl}/local-agent.mjs`, { cache: "no-store" });
+    if (!res.ok) return;
+    const remote = await res.text();
+    if (!remote.includes("LOCAL SANDBOX AGENT")) return; // sanity: don't overwrite with an error page
+    const local = fs.readFileSync(SELF_PATH, "utf8");
+    if (remote !== local) {
+      console.log("[local-agent] update available — swapping code and restarting");
+      fs.writeFileSync(SELF_PATH, remote);
+      process.exit(0);
+    }
+  } catch {
+    // offline or server restarting — try again next cycle
+  }
+}
 
 const ANSI = {
   reset: "\x1b[0m",
@@ -494,3 +522,4 @@ async function runAllowlisted(job) {
 
 await poll();
 setInterval(poll, intervalMs);
+setInterval(checkForUpdate, SELF_UPDATE_MS);
