@@ -31,9 +31,16 @@ Output ONLY a single JSON object with this exact shape (no markdown, no preface)
   "reasoning": "1-2 sentence explanation",
   "response": "Friendly reply to the user from the technician; address by first name",
   "plan": [
-    { "kind": "insforge"|"aside"|"tensorlake"|"slack_reply", "description": "...", "capability": "namespace.action_name", "params": {} }
+    { "kind": "insforge"|"aside"|"tensorlake"|"slack_reply", "description": "...", "capability": "<one capability id from the list below>", "params": {} }
   ]
 }
+
+"capability" MUST be copied verbatim from this list — never invent one, never emit a
+placeholder like "namespace.action_name". If nothing fits, use "slack_reply" with no capability.
+Allowed: ad.lookup_user, ad.unlock_account, ad.reset_password, ad.refresh_kerberos,
+okta.list_groups, okta.add_to_group, okta.send_reset, mdm.push_vpn_config, identity.verify,
+diag.network_probe, diag.system_info, sandbox.read_auth_logs, sandbox.read_kerberos_logs,
+fix.restart_app, fix.clear_app_cache, fix.toggle_wifi
 
 Capability kinds:
 - insforge: policy-gated backend action via customer edge function

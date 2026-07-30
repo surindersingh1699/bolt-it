@@ -9,19 +9,15 @@ import {
   AlertCircle,
   CheckCircle2,
   Circle,
-  FileText,
   FlaskConical,
   Globe2,
-  HardDrive,
   Loader2,
   Lock,
   MessageCircle,
-  Network,
-  SearchCheck,
   Send,
   ShieldCheck,
-  UserCheck,
 } from "lucide-react";
+import { AgentTracePanel } from "./AgentTracePanel";
 
 export function ActiveTicket({
   currentUser,
@@ -120,7 +116,7 @@ function TicketView({
         )}
       </section>
 
-      <EvidencePanel ticket={ticket} />
+      <AgentTracePanel ticket={ticket} />
 
       <section className="px-6 py-5 border-b border-neutral-800">
         <SectionTitle>Action Plan</SectionTitle>
@@ -198,146 +194,6 @@ function TicketView({
       )}
     </div>
   );
-}
-
-function EvidencePanel({ ticket }: { ticket: Ticket }) {
-  const evidence = evidenceForTicket(ticket);
-  if (evidence.length === 0) return null;
-  return (
-    <section className="px-6 py-5 border-b border-neutral-800 bg-neutral-950">
-      <div className="flex items-center justify-between mb-3">
-        <SectionTitle>MSP Evidence Pack</SectionTitle>
-        <span className="text-[10px] uppercase tracking-wider text-emerald-300 bg-emerald-500/10 border border-emerald-500/20 rounded px-2 py-1">
-          ready for technician review
-        </span>
-      </div>
-      <div className="grid grid-cols-1 xl:grid-cols-2 gap-3">
-        {evidence.map((item) => {
-          const Icon = item.icon;
-          return (
-            <div key={item.title} className="bg-neutral-900/50 border border-neutral-800 rounded-md p-3">
-              <div className="flex items-center gap-2 mb-1">
-                <Icon size={14} className={item.accent} />
-                <span className="text-xs font-medium text-neutral-100">{item.title}</span>
-                <span className="ml-auto text-[10px] text-neutral-600">{item.source}</span>
-              </div>
-              <p className="text-[11px] leading-relaxed text-neutral-400">{item.body}</p>
-              {item.detail && (
-                <pre className="mt-2 text-[10px] leading-relaxed text-neutral-500 whitespace-pre-wrap font-mono">
-                  {item.detail}
-                </pre>
-              )}
-            </div>
-          );
-        })}
-      </div>
-    </section>
-  );
-}
-
-function evidenceForTicket(ticket: Ticket): Array<{
-  icon: React.ComponentType<{ size?: number; className?: string }>;
-  title: string;
-  source: string;
-  body: string;
-  detail?: string;
-  accent: string;
-}> {
-  const text = `${ticket.subject} ${ticket.body}`.toLowerCase();
-  const runbookHit = ticket.citations.find((c) => c.source === "nia");
-  const userCtx = ticket.citations.find((c) => c.source === "hyperspell");
-
-  if (text.includes("cfo") || text.includes("board meeting") || text.includes("finance drive")) {
-    return [
-      {
-        icon: UserCheck,
-        title: "Identity and business impact",
-        source: "Hyperspell + directory",
-        body: "Frank is Finance leadership, currently in an urgent board-meeting workflow. Recent context shows NetSuite, Excel, VPN, and Slack activity.",
-        detail: userCtx?.snippet ?? "Recent apps: netsuite, excel, vpn, slack",
-        accent: "text-violet-300",
-      },
-      {
-        icon: Network,
-        title: "VPN diagnostic signal",
-        source: "MDM + network probe",
-        body: "The last known VPN profile points at a retired gateway. Packet probe shows retransmits and MTU mismatch after password change.",
-        detail:
-          "vpn-client.log: AUTH_FAILED after SAML reauth\nmdm-profile: acme-vpn-usw1-v3, pushed 93 days ago\nprobe: gateway=us-west-1.old.acme.test mtu=1280 retransmits=3",
-        accent: "text-cyan-300",
-      },
-      {
-        icon: FileText,
-        title: "Company runbook match",
-        source: "Nia retrieval",
-        body: runbookHit
-          ? `${runbookHit.title}: ${runbookHit.snippet}`
-          : "VPN performance degraded; intermittent drops. Common cause: client config still references a decommissioned gateway.",
-        accent: "text-emerald-300",
-      },
-      {
-        icon: ShieldCheck,
-        title: "Execution boundary",
-        source: "Policy engine",
-        body: "The AI cannot run broad admin commands. The plan is limited to a sandboxed diagnostic, scoped MDM profile push, and Slack reply after technician approval.",
-        detail: "allowed: diag.network_probe, mdm.push_vpn_config, slack.send_message\nblocked: unrestricted shell, standing admin session",
-        accent: "text-amber-300",
-      },
-    ];
-  }
-
-  if (text.includes("vpn") || text.includes("network")) {
-    return [
-      {
-        icon: Network,
-        title: "Network probe",
-        source: "Sandbox diagnostics",
-        body: "Sandboxed probe checks last-known VPN endpoint, MTU, route health, and recent client profile age before action is approved.",
-        detail: "diag.network_probe: isolated VM, no corp network egress, secrets redacted",
-        accent: "text-cyan-300",
-      },
-      {
-        icon: HardDrive,
-        title: "Device context",
-        source: "MDM",
-        body: "MDM can push the refreshed VPN profile to the user's assigned device without exposing global admin credentials to the AI.",
-        accent: "text-emerald-300",
-      },
-    ];
-  }
-
-  if (text.includes("locked") || text.includes("password") || text.includes("login")) {
-    return [
-      {
-        icon: SearchCheck,
-        title: "Auth log review",
-        source: "Read-only sandbox",
-        body: "The plan confirms the failure pattern in auth logs before unlocking or resetting anything.",
-        detail:
-          "audit: USER_LOGIN failed x5\npolicy: unlock requires identity verification\nsandbox: read-only mount, destroyed after inspection",
-        accent: "text-cyan-300",
-      },
-      {
-        icon: ShieldCheck,
-        title: "Identity verification",
-        source: "Hyperspell + AD",
-        body: "Recent user context and directory state are checked before a privileged identity action is executed.",
-        accent: "text-violet-300",
-      },
-    ];
-  }
-
-  return [
-    {
-      icon: FileText,
-      title: "Grounding status",
-      source: "Knowledge base",
-      body: runbookHit
-        ? `${runbookHit.title}: ${runbookHit.snippet}`
-        : "No high-confidence runbook match yet. The agent keeps the action plan conservative and asks for more detail.",
-      accent: "text-neutral-400",
-    },
-  ];
 }
 
 function PlanStepRow({ step, index }: { step: PlanStep; index: number }) {

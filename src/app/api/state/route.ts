@@ -3,6 +3,7 @@ import { deflectionStats, getWorkspace, listRunbooks, listTickets } from "@/lib/
 import { ensureSeeded } from "@/lib/seed";
 import { getCurrentWorkspaceId } from "@/lib/workspace";
 import { niaIndexedSources } from "@/lib/integrations/nia";
+import { getTrace } from "@/lib/trace";
 
 export const dynamic = "force-dynamic";
 
@@ -18,7 +19,7 @@ export async function GET() {
   const envSources = niaIndexedSources();
   const wsSources = workspace?.niaSources ?? [];
   return NextResponse.json({
-    tickets,
+    tickets: tickets.map((t) => ({ ...t, trace: getTrace(t.id) })),
     runbooks,
     stats,
     workspaceId: workspaceId ?? null,

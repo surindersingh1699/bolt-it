@@ -1,5 +1,5 @@
 import { StateGraph, Annotation, START, END, MemorySaver, interrupt, Command } from "@langchain/langgraph";
-import { getTicket, updateTicket, updateStep, getWorkspace, listAgentJobs } from "@/lib/data";
+import { getTicket, updateTicket, updateStep, getWorkspace, listAgentJobs, listDevices } from "@/lib/data";
 import { Citation, PlanStep, Ticket } from "@/lib/types";
 import { getUserContext, queryMemories, MemoryHit } from "@/lib/integrations/hyperspell";
 import { niaDraft, NiaDraftResult } from "@/lib/integrations/nia";
@@ -11,6 +11,8 @@ import { synthesizeSlackReply } from "@/lib/integrations/ai-gateway";
 import { postSlackMessage } from "@/lib/slack";
 import { enqueueAgentJob, isAgentJobCapability } from "@/lib/agent-jobs";
 import { recordCleanExecution } from "@/lib/governance";
+import { appendTrace } from "@/lib/trace";
+import { readHeartbeat, HEARTBEAT_CONNECTED_WINDOW_MS } from "@/lib/agent-heartbeat";
 import {
   buildSlackReplyEvidence,
   humanStepLabel,
@@ -40,7 +42,10 @@ const TicketGraphState = Annotation.Root({
   ticketId: Annotation<string>(),
   userContext: Annotation<Awaited<ReturnType<typeof getUserContext>>>({ reducer: overwrite, default: () => null }),
   memories: Annotation<MemoryHit[]>({ reducer: overwrite, default: () => [] }),
+  deviceContext: Annotation<string | null>({ reducer: overwrite, default: () => null }),
   draft: Annotation<NiaDraftResult | null>({ reducer: overwrite, default: () => null }),
+  citations: Annotation<Citation[]>({ reducer: overwrite, default: () => [] }),
+  classifiedPlan: Annotation<PlanStep[]>({ reducer: overwrite, default: () => [] }),
   pendingStepId: Annotation<string | null>({ reducer: overwrite, default: () => null }),
   justApprovedCapability: Annotation<string | null>({ reducer: overwrite, default: () => null }),
   approver: Annotation<Approver | null>({ reducer: overwrite, default: () => null }),
@@ -48,24 +53,61 @@ const TicketGraphState = Annotation.Root({
 
 type TState = typeof TicketGraphState.State;
 
-// ---- context gathering (unconditional, mirrors today's Promise.all — Hyperspell is
-// always invoked, never gated) ----
+// ---- context gathering: three unconditional parallel branches from START.
+// Hyperspell is always invoked (both nodes), never gated.
 
 async function gatherUserContext(state: TState) {
+  const t0 = Date.now();
   const ticket = await getTicket(state.ticketId);
   if (!ticket) return {};
   const userContext = await getUserContext(ticket.reporterEmail).catch(() => null);
+  appendTrace(
+    state.ticketId,
+    "gatherUserContext",
+    "completed",
+    userContext ? `Hyperspell profile: ${userContext.name} · ${userContext.team} team` : "no profile found",
+    Date.now() - t0,
+  );
   return { userContext };
 }
 
 async function gatherMemories(state: TState) {
+  const t0 = Date.now();
   const ticket = await getTicket(state.ticketId);
   if (!ticket) return {};
   const memories = await queryMemories(`${ticket.subject}\n${ticket.body}`).catch(() => []);
+  appendTrace(
+    state.ticketId,
+    "gatherMemories",
+    "completed",
+    `${memories.length} Hyperspell memory hit(s)`,
+    Date.now() - t0,
+  );
   return { memories };
 }
 
+async function gatherDeviceContext(state: TState) {
+  const t0 = Date.now();
+  const ticket = await getTicket(state.ticketId);
+  if (!ticket) return {};
+  const devices = await listDevices(ticket.workspaceId);
+  const device = devices.find((d) => d.ownerEmail === ticket.reporterEmail);
+  const hb = readHeartbeat();
+  const live =
+    hb &&
+    Date.now() - hb.lastPingAt < HEARTBEAT_CONNECTED_WINDOW_MS &&
+    device &&
+    hb.hostname.toLowerCase() === device.hostname.toLowerCase();
+  const detail = device
+    ? `${device.hostname} (${device.os})${live ? " · agent online now" : ""}`
+    : "no registered device for reporter";
+  appendTrace(state.ticketId, "gatherDeviceContext", "completed", detail, Date.now() - t0);
+  return { deviceContext: device ? detail : null };
+}
+
 async function draftWithNia(state: TState) {
+  const t0 = Date.now();
+  appendTrace(state.ticketId, "draftPlan", "started", "LLM drafting from runbooks + memories");
   const ticket = await getTicket(state.ticketId);
   if (!ticket) return {};
   try {
@@ -82,9 +124,23 @@ async function draftWithNia(state: TState) {
       DRAFT_TIMEOUT_MS,
       "draftPlan",
     );
+    appendTrace(
+      state.ticketId,
+      "draftPlan",
+      "completed",
+      `${draft.plan.length} step(s) via ${draft.source} · confidence ${Math.round(draft.confidence * 100)}%`,
+      Date.now() - t0,
+    );
     return { draft };
   } catch (err) {
     console.warn(`[draftWithNia] ${state.ticketId} failed (${(err as Error).message}); using minimal fallback`);
+    appendTrace(
+      state.ticketId,
+      "draftPlan",
+      "failed",
+      `${(err as Error).message} — using minimal fallback plan`,
+      Date.now() - t0,
+    );
     const firstName = ticket.reporter.split(/\s+/)[0];
     const fallback: NiaDraftResult = {
       citations: [],
@@ -100,16 +156,13 @@ async function draftWithNia(state: TState) {
   }
 }
 
-// Join: waits on both gatherUserContext and draftWithNia. Classifies risk/precedent
-// per step, persists the plan, then goes straight into execution — no hardcoded
-// stop here. This is the core behavioral change vs. today: the plan no longer
-// waits for a single whole-plan approval before anything runs.
-async function classifyAndPersistPlan(state: TState) {
+// Join node: waits on all three context branches + the draft.
+async function classifyRisk(state: TState) {
+  const t0 = Date.now();
   const ticket = await getTicket(state.ticketId);
   if (!ticket || !state.draft) return {};
   const draft = state.draft;
   const userCtx = state.userContext;
-  const memories = state.memories;
 
   const citations: Citation[] = [...draft.citations];
   if (userCtx) {
@@ -120,7 +173,7 @@ async function classifyAndPersistPlan(state: TState) {
       ref: `user:${userCtx.email}`,
     });
   }
-  for (const m of memories) {
+  for (const m of state.memories) {
     citations.push({
       source: "hyperspell",
       title: m.title,
@@ -135,18 +188,38 @@ async function classifyAndPersistPlan(state: TState) {
   }));
   const plan = await classifyPlan(rawPlan, ticket);
 
+  const gated = plan.filter((s) => s.approvalMode === "human").length;
+  const promoted = plan.filter((s) => s.governancePromoted).length;
+  const judged = plan.filter((s) => s.riskSource === "judge").length;
+  appendTrace(
+    state.ticketId,
+    "classifyRisk",
+    "completed",
+    `${plan.length} step(s): ${gated} human-gated, ${plan.length - gated} auto` +
+      (promoted ? `, ${promoted} trust-promoted` : "") +
+      (judged ? ` · ${judged} via LLM judge` : " · allowlist only"),
+    Date.now() - t0,
+  );
+  return { citations, classifiedPlan: plan };
+}
+
+// Persist + notify, then walk straight into execution — no whole-plan stop.
+async function persistPlan(state: TState) {
+  const ticket = await getTicket(state.ticketId);
+  if (!ticket || !state.draft) return {};
   await updateTicket(state.ticketId, {
     status: "executing",
-    citations,
-    confidence: draft.confidence,
-    draftResponse: draft.response,
-    plan,
+    citations: state.citations,
+    confidence: state.draft.confidence,
+    draftResponse: state.draft.response,
+    plan: state.classifiedPlan,
   });
+  appendTrace(state.ticketId, "persistPlan", "completed", "plan saved · entering execute loop");
 
   const updatedForSlack = await getTicket(state.ticketId);
   if (updatedForSlack) {
     const firstName = ticket.reporter.split(/\s+/)[0];
-    const planLines = plan.map((s, i) => `   ${i + 1}. ${humanStepLabel(s)}`).join("\n");
+    const planLines = state.classifiedPlan.map((s, i) => `   ${i + 1}. ${humanStepLabel(s)}`).join("\n");
     await postSlackUpdate(
       updatedForSlack,
       `🔎 Hi ${firstName} — here's my plan:\n${planLines}\n\n_Ticket ${state.ticketId} · saved for future reference_`,
@@ -155,8 +228,7 @@ async function classifyAndPersistPlan(state: TState) {
   return {};
 }
 
-// Shared step dispatcher — identical logic to the old executePlan's per-step try/catch,
-// extracted so runNextStep can call it for every "auto" step.
+// Shared step dispatcher — identical logic to the old executePlan's per-step try/catch.
 async function executeStepAndPersist(ticket: Ticket, step: PlanStep): Promise<{ ok: boolean }> {
   await updateStep(ticket.id, step.id, { status: "running", startedAt: Date.now() });
   if (step.kind !== "slack_reply") {
@@ -234,9 +306,8 @@ async function executeStepAndPersist(ticket: Ticket, step: PlanStep): Promise<{ 
   return { ok };
 }
 
-// Self-looping execute node. Auto steps run immediately, no click. Only a step whose
-// approvalMode is still "human" (i.e. genuinely high-risk and not yet precedent-promoted)
-// routes to the approval interrupt — everything else just runs.
+// Self-looping execute node. Auto steps run immediately; only a step whose
+// approvalMode is still "human" routes to the approval interrupt.
 async function runNextStep(state: TState) {
   const ticket = await getTicket(state.ticketId);
   if (!ticket) return new Command({ goto: END });
@@ -248,7 +319,15 @@ async function runNextStep(state: TState) {
     return new Command({ goto: "markAwaitingApproval", update: { pendingStepId: step.id } });
   }
 
+  const t0 = Date.now();
   const { ok } = await executeStepAndPersist(ticket, step);
+  appendTrace(
+    state.ticketId,
+    `execute:${step.capability ?? step.kind}`,
+    ok ? "completed" : "failed",
+    `${humanStepLabel(step)}${step.governancePromoted ? " · ran on precedent (trusted)" : ""}`,
+    Date.now() - t0,
+  );
 
   if (ok && state.approver && state.justApprovedCapability && state.justApprovedCapability === step.capability) {
     recordCleanExecution(ticket.workspaceId, step.capability!, state.approver);
@@ -256,6 +335,7 @@ async function runNextStep(state: TState) {
 
   if (!ok) {
     await updateTicket(state.ticketId, { status: "escalated" });
+    appendTrace(state.ticketId, "escalate", "completed", "step failed — fail-fast, no retry, escalated to human");
     return new Command({ goto: END });
   }
 
@@ -270,6 +350,14 @@ async function markAwaitingApproval(state: TState) {
   if (!ticket || !state.pendingStepId) return {};
   const step = ticket.plan.find((s) => s.id === state.pendingStepId);
   await updateTicket(state.ticketId, { status: "awaiting_approval" });
+  appendTrace(
+    state.ticketId,
+    "interrupt",
+    "interrupted",
+    step
+      ? `graph paused at ${step.capability ?? step.kind} (${step.risk} risk) — waiting for human decision`
+      : "graph paused — waiting for human decision",
+  );
   if (step) {
     await postSlackUpdate(ticket, `⏸ Waiting on IT approval for: ${humanStepLabel(step)}`);
   }
@@ -285,6 +373,12 @@ async function awaitApproval(state: TState) {
 
   const ticket = await getTicket(state.ticketId);
   const step = ticket?.plan.find((s) => s.id === state.pendingStepId);
+  appendTrace(
+    state.ticketId,
+    "interrupt",
+    "resumed",
+    `approved by ${decision.approver.name} — resuming from paused step, not restarting`,
+  );
   if (ticket && step) {
     await updateStep(state.ticketId, step.id, {
       approvalMode: "auto",
@@ -310,6 +404,12 @@ async function finalizeExecution(state: TState) {
   if (!finishedTicket) return {};
 
   await updateTicket(state.ticketId, { status: "awaiting_confirmation" });
+  appendTrace(
+    state.ticketId,
+    "finalize",
+    "completed",
+    "all steps done · asking the user to confirm the fix worked",
+  );
 
   if (finishedTicket.channel === "slack") {
     const firstName = finishedTicket.reporter.split(/\s+/)[0];
@@ -352,18 +452,23 @@ function buildGraph() {
   return new StateGraph(TicketGraphState)
     .addNode("gatherUserContext", gatherUserContext)
     .addNode("gatherMemories", gatherMemories)
+    .addNode("gatherDeviceContext", gatherDeviceContext)
     .addNode("draftWithNia", draftWithNia)
-    .addNode("classifyAndPersistPlan", classifyAndPersistPlan)
+    .addNode("classifyRisk", classifyRisk)
+    .addNode("persistPlan", persistPlan)
     .addNode("runNextStep", runNextStep, { ends: ["runNextStep", "markAwaitingApproval", "finalizeExecution", END] })
     .addNode("markAwaitingApproval", markAwaitingApproval)
     .addNode("awaitApproval", awaitApproval, { ends: ["runNextStep"] })
     .addNode("finalizeExecution", finalizeExecution)
     .addEdge(START, "gatherUserContext")
     .addEdge(START, "gatherMemories")
+    .addEdge(START, "gatherDeviceContext")
     .addEdge("gatherMemories", "draftWithNia")
-    .addEdge("gatherUserContext", "classifyAndPersistPlan")
-    .addEdge("draftWithNia", "classifyAndPersistPlan")
-    .addEdge("classifyAndPersistPlan", "runNextStep")
+    // Barrier join: classifyRisk must run exactly once, after ALL three
+    // branches. Separate addEdge calls would fire it per-predecessor.
+    .addEdge(["gatherUserContext", "gatherDeviceContext", "draftWithNia"], "classifyRisk")
+    .addEdge("classifyRisk", "persistPlan")
+    .addEdge("persistPlan", "runNextStep")
     .addEdge("markAwaitingApproval", "awaitApproval")
     .addEdge("finalizeExecution", END)
     .compile({ checkpointer });

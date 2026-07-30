@@ -47,7 +47,7 @@ export function AppShell({ currentUser, workspaceName, demoMode = false }: AppSh
           </div>
           <span className="font-semibold tracking-tight">AI-Native IT Support</span>
           <span className="text-xs text-neutral-500 ml-2 hidden sm:inline">
-            for {workspaceName} · Slack-native · zero standing access
+            for {workspaceName} · LangGraph orchestration · per-step risk gating
           </span>
         </div>
         <div className="ml-auto flex items-center gap-3">
@@ -89,7 +89,7 @@ export function AppShell({ currentUser, workspaceName, demoMode = false }: AppSh
           <UserBadge user={currentUser} demoMode={demoMode} />
         </div>
       </header>
-      <DeflectionDashboard stats={stats} />
+      <DeflectionDashboard stats={stats} tickets={tickets} demoMode={demoMode} />
       <main className="flex-1 min-h-0 overflow-hidden">
         {tab === "console" && <Console currentUser={currentUser} demoMode={demoMode} />}
         {tab === "fleet" && currentUser.isITStaff && <FleetTab currentUser={currentUser} />}

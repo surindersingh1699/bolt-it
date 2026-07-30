@@ -117,6 +117,8 @@ export interface Ticket {
   resolvedByAi: boolean;
   runbookSourceId?: string;
   resolutionTimeMs?: number;
+  /** Populated by /api/state from the in-memory trace store (not persisted). */
+  trace?: import("./trace").TraceEvent[];
 }
 
 export interface Runbook {

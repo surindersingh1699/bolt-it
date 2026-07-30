@@ -108,16 +108,17 @@ export default async function Landing() {
           <div className="flex flex-col gap-7">
             <div className="inline-flex w-fit items-center gap-2 rounded-full border border-emerald-400/25 bg-emerald-400/10 px-3 py-1 text-xs text-emerald-200">
               <Sparkles size={13} />
-              Built for MSPs that need to support hundreds of users fast
+              A study in bounded agent autonomy — LangGraph · interrupts · learned trust
             </div>
             <div className="space-y-5">
               <h1 className="max-w-4xl text-5xl font-semibold leading-[1.02] tracking-tight text-white md:text-7xl">
-                Resolve IT tickets in seconds, with human approval.
+                An IT agent with structural human oversight.
               </h1>
               <p className="max-w-2xl text-lg leading-8 text-neutral-300">
-                A private AI platform for MSP technicians. The demo shows how company docs, user
-                context, device logs, and trusted web results become a cited fix plan that a human
-                can approve and run.
+                A LangGraph-orchestrated support agent: parallel context gathering, LLM-drafted
+                plans, per-step risk classification, and a real graph interrupt before any
+                high-risk action — with autonomy that expands only as approval precedent
+                accumulates. Every run is traced node by node, in-product and in LangSmith.
               </p>
             </div>
 
