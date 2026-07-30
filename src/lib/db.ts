@@ -1,4 +1,4 @@
-import { Ticket, Runbook, PlanStep, DeflectionStat, ADUser, ADGroup, ADAccount, Workspace, AgentJob } from "./types";
+import { Ticket, Runbook, PlanStep, DeflectionStat, ADUser, ADGroup, ADAccount, Workspace, AgentJob, CapabilityPrecedent, Device } from "./types";
 
 declare global {
   // eslint-disable-next-line no-var
@@ -13,6 +13,8 @@ class ITDB {
   adGroups: Map<string, ADGroup> = new Map();
   adAccounts: Map<string, ADAccount> = new Map();
   agentJobs: Map<string, AgentJob> = new Map();
+  capabilityPrecedents: Map<string, CapabilityPrecedent> = new Map();
+  devices: Map<string, Device> = new Map();
   subscribers: Set<() => void> = new Set();
 
   insertWorkspace(w: Workspace) {
@@ -178,6 +180,42 @@ class ITDB {
     const existing = this.agentJobs.get(id);
     if (!existing) return;
     this.agentJobs.set(id, { ...existing, ...patch, updatedAt: Date.now() });
+    this.emit();
+  }
+
+  getCapabilityPrecedent(workspaceId: string, capability: string): CapabilityPrecedent | undefined {
+    return this.capabilityPrecedents.get(`${workspaceId}:${capability}`);
+  }
+
+  upsertCapabilityPrecedent(precedent: CapabilityPrecedent) {
+    this.capabilityPrecedents.set(`${precedent.workspaceId}:${precedent.capability}`, precedent);
+    this.emit();
+  }
+
+  insertDevice(d: Device) {
+    this.devices.set(d.id, d);
+    this.emit();
+  }
+
+  getDevice(hostname: string, workspaceId?: string): Device | undefined {
+    if (workspaceId) return this.devices.get(`${workspaceId}:${hostname.toLowerCase()}`);
+    const h = hostname.toLowerCase();
+    for (const d of this.devices.values()) {
+      if (d.hostname.toLowerCase() === h) return d;
+    }
+    return undefined;
+  }
+
+  listDevices(workspaceId?: string): Device[] {
+    const all = Array.from(this.devices.values());
+    const scoped = workspaceId ? all.filter((d) => d.workspaceId === workspaceId) : all;
+    return scoped.sort((a, b) => b.lastSeenAt - a.lastSeenAt);
+  }
+
+  updateDevice(id: string, patch: Partial<Device>) {
+    const existing = this.devices.get(id);
+    if (!existing) return;
+    this.devices.set(id, { ...existing, ...patch });
     this.emit();
   }
 

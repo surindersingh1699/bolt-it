@@ -2,12 +2,15 @@ import {
   insertADAccount,
   insertADGroup,
   insertADUser,
+  insertDevice,
   insertRunbook,
   listADUsers,
+  listDevices,
   listRunbooks,
 } from "./data";
 import { ADAccount, ADGroup, ADUser, Runbook } from "./types";
 import { hashPassword } from "./password";
+import { inferOsFromHostname } from "./fleet";
 import { ACME_WORKSPACE_ID, ensureWorkspace } from "./workspace";
 
 let seeding: Promise<void> | null = null;
@@ -322,6 +325,31 @@ export async function ensureSeeded(): Promise<void> {
       }
       for (const g of SEED_GROUPS) {
         await insertADGroup({ ...g, workspaceId: ACME_WORKSPACE_ID, members: groupMembers.get(g.id) ?? [] });
+      }
+    }
+
+    // Devices are in-memory-only (see data.ts) and therefore always start
+    // empty on a fresh process, even when ADUser/ADAccount data survives via
+    // InsForge — so this is gated on devices existing, independent of the
+    // user-seeding gate above, using RAW_USERS directly rather than whatever
+    // users happened to already exist.
+    const existingDevices = await listDevices(ACME_WORKSPACE_ID);
+    if (existingDevices.length === 0) {
+      const now = Date.now();
+      for (const raw of RAW_USERS) {
+        if (!raw.account.lastLoginHost) continue;
+        const lastSeenAt =
+          raw.account.lastLoginHoursAgo !== undefined ? now - raw.account.lastLoginHoursAgo * HOUR : now;
+        await insertDevice({
+          id: `${ACME_WORKSPACE_ID}:${raw.account.lastLoginHost.toLowerCase()}`,
+          workspaceId: ACME_WORKSPACE_ID,
+          hostname: raw.account.lastLoginHost,
+          os: inferOsFromHostname(raw.account.lastLoginHost),
+          ownerEmail: raw.email,
+          source: "seed",
+          firstSeenAt: lastSeenAt,
+          lastSeenAt,
+        });
       }
     }
   })();

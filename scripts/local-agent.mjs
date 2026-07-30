@@ -14,8 +14,9 @@ if (!token) {
 
 const AGENT_HOSTNAME = os.hostname();
 const AGENT_OS = `${os.platform()} ${os.release()} (${os.arch()})`;
-const AGENT_VERSION = "local-agent/0.2.0";
+const AGENT_VERSION = "local-agent/0.3.0";
 const IS_MAC = os.platform() === "darwin";
+const IS_WINDOWS = os.platform() === "win32";
 
 const ANSI = {
   reset: "\x1b[0m",
@@ -61,7 +62,19 @@ function runShell(cmd, args) {
   });
 }
 
+function runPowerShell(script) {
+  return runShell("powershell", ["-NoProfile", "-NonInteractive", "-Command", script]);
+}
+
+function psEscape(s) {
+  return String(s).replace(/[`"$]/g, "");
+}
+
 async function restartApp(appName) {
+  return IS_WINDOWS ? restartAppWindows(appName) : restartAppMac(appName);
+}
+
+async function restartAppMac(appName) {
   const lines = [];
   lines.push(`requesting quit for "${appName}" via osascript`);
   await runShell("osascript", ["-e", `tell application "${appName}" to quit`]);
@@ -75,7 +88,30 @@ async function restartApp(appName) {
   return { ok: true, output: lines.join("\n") };
 }
 
+async function restartAppWindows(appName) {
+  const lines = [];
+  const safe = psEscape(appName);
+  lines.push(`stopping process "${appName}" via PowerShell`);
+  await runPowerShell(`Stop-Process -Name "${safe}" -Force -ErrorAction SilentlyContinue`);
+  await new Promise((r) => setTimeout(r, 1500));
+  lines.push(`starting "${appName}"`);
+  const start = await runPowerShell(`Start-Process "${safe}"`);
+  if (start.code !== 0) {
+    return {
+      ok: false,
+      output: lines.join("\n"),
+      error: `Start-Process failed: ${start.stderr.trim() || start.code} (app must be on PATH or a registered alias, e.g. "notepad", "calc", or a full .exe path)`,
+    };
+  }
+  lines.push(`"${appName}" restarted successfully`);
+  return { ok: true, output: lines.join("\n") };
+}
+
 async function clearAppCache(appName) {
+  return IS_WINDOWS ? clearAppCacheWindows(appName) : clearAppCacheMac(appName);
+}
+
+async function clearAppCacheMac(appName) {
   const lines = [];
   const safeName = appName.replace(/[^a-zA-Z0-9 _-]/g, "");
   const target = `${os.homedir()}/Library/Caches/${safeName}`;
@@ -90,7 +126,75 @@ async function clearAppCache(appName) {
   return { ok: true, output: lines.join("\n") };
 }
 
+async function clearAppCacheWindows(appName) {
+  const lines = [];
+  const safeName = appName.replace(/[^a-zA-Z0-9 _-]/g, "");
+  const localAppData = process.env.LOCALAPPDATA || `${os.homedir()}\\AppData\\Local`;
+  const target = `${localAppData}\\${safeName}\\Cache`;
+  lines.push(`target cache: ${target}`);
+  const check = await runPowerShell(`Test-Path "${target}"`);
+  if (!check.stdout.trim().toLowerCase().includes("true")) {
+    lines.push(`no cache directory found at ${target} — nothing to clear`);
+    return { ok: true, output: lines.join("\n") };
+  }
+  await runPowerShell(`Remove-Item -Recurse -Force "${target}"`);
+  lines.push(`cleared ${target}`);
+  return { ok: true, output: lines.join("\n") };
+}
+
 async function collectSystemInfo() {
+  return IS_WINDOWS ? collectSystemInfoWindows() : collectSystemInfoMac();
+}
+
+async function collectSystemInfoWindows() {
+  const lines = [];
+  lines.push(`hostname: ${os.hostname()}`);
+
+  const query = `
+$osInfo = Get-CimInstance Win32_OperatingSystem
+$cpu = Get-CimInstance Win32_Processor | Select-Object -First 1
+$cs = Get-CimInstance Win32_ComputerSystem
+[PSCustomObject]@{
+  computer_name = $cs.Name
+  os_caption = $osInfo.Caption
+  os_version = $osInfo.Version
+  os_build = $osInfo.BuildNumber
+  arch = $osInfo.OSArchitecture
+  total_ram_bytes = $cs.TotalPhysicalMemory
+  free_ram_kib = $osInfo.FreePhysicalMemory
+  cpu_name = $cpu.Name
+  cpu_cores = $cpu.NumberOfCores
+  uptime_seconds = [int]((Get-Date) - $osInfo.LastBootUpTime).TotalSeconds
+} | ConvertTo-Json -Compress
+`.trim();
+
+  const res = await runPowerShell(query);
+  if (res.code === 0 && res.stdout.trim()) {
+    try {
+      const info = JSON.parse(res.stdout.trim());
+      lines.push(`computer_name: ${info.computer_name}`);
+      lines.push(`os: ${info.os_caption} ${info.os_version} (build ${info.os_build}, ${info.arch})`);
+      lines.push(`ram_total: ${(info.total_ram_bytes / 1024 ** 3).toFixed(2)} GiB`);
+      lines.push(`ram_free: ${((info.free_ram_kib * 1024) / 1024 ** 3).toFixed(2)} GiB`);
+      lines.push(`cpu: ${info.cpu_name} (${info.cpu_cores} cores)`);
+      const uptimeSec = info.uptime_seconds ?? 0;
+      const days = Math.floor(uptimeSec / 86400);
+      const hours = Math.floor((uptimeSec % 86400) / 3600);
+      const mins = Math.floor((uptimeSec % 3600) / 60);
+      lines.push(`uptime: ${days}d ${hours}h ${mins}m`);
+      return { ok: true, output: lines.join("\n") };
+    } catch (err) {
+      lines.push(`PowerShell system-info query returned unparseable output: ${err.message}`);
+    }
+  } else {
+    lines.push(`PowerShell system-info query failed: ${res.stderr.trim() || res.code}`);
+  }
+  lines.push(`ram_total: ${(os.totalmem() / 1024 ** 3).toFixed(2)} GiB`);
+  lines.push(`ram_free: ${(os.freemem() / 1024 ** 3).toFixed(2)} GiB`);
+  return { ok: true, output: lines.join("\n") };
+}
+
+async function collectSystemInfoMac() {
   const lines = [];
   const cn = await runShell("scutil", ["--get", "ComputerName"]);
   const computerName = cn.code === 0 ? cn.stdout.trim() : os.hostname();
@@ -137,6 +241,10 @@ async function collectSystemInfo() {
 }
 
 async function toggleWifi() {
+  return IS_WINDOWS ? toggleWifiWindows() : toggleWifiMac();
+}
+
+async function toggleWifiMac() {
   const lines = [];
   lines.push(`turning Wi-Fi off (en0)`);
   const off = await runShell("networksetup", ["-setairportpower", "en0", "off"]);
@@ -144,6 +252,25 @@ async function toggleWifi() {
   await new Promise((r) => setTimeout(r, 1500));
   lines.push(`turning Wi-Fi back on`);
   const on = await runShell("networksetup", ["-setairportpower", "en0", "on"]);
+  if (on.code !== 0) return { ok: false, output: lines.join("\n"), error: on.stderr.trim() };
+  lines.push(`Wi-Fi cycled`);
+  return { ok: true, output: lines.join("\n") };
+}
+
+async function toggleWifiWindows() {
+  const lines = [];
+  lines.push(`turning Wi-Fi off (interface "Wi-Fi")`);
+  const off = await runShell("netsh", ["interface", "set", "interface", "Wi-Fi", "admin=disable"]);
+  if (off.code !== 0) {
+    return {
+      ok: false,
+      output: lines.join("\n"),
+      error: off.stderr.trim() || "toggling Wi-Fi off failed — run the agent as Administrator",
+    };
+  }
+  await new Promise((r) => setTimeout(r, 1500));
+  lines.push(`turning Wi-Fi back on`);
+  const on = await runShell("netsh", ["interface", "set", "interface", "Wi-Fi", "admin=enable"]);
   if (on.code !== 0) return { ok: false, output: lines.join("\n"), error: on.stderr.trim() };
   lines.push(`Wi-Fi cycled`);
   return { ok: true, output: lines.join("\n") };
@@ -292,6 +419,7 @@ async function runAllowlisted(job) {
     return {
       ok: true,
       output: [
+        "[sample data — this diagnostic is not yet implemented on this agent]",
         "vpn-client.log: AUTH_FAILED after SAML/password change",
         "vpn-profile: gateway=us-west-1.old.acme.test profile_age_days=93",
         "probe: TLS handshake failed certificate_unknown",
@@ -303,6 +431,7 @@ async function runAllowlisted(job) {
     return {
       ok: true,
       output: [
+        "[sample data — this diagnostic is not yet implemented on this agent]",
         "auth.log: USER_LOGIN failed x5 from known device",
         "auth.log: ACCOUNT_LOCKED threshold=5",
         "recommendation: verify identity, unlock account, reset failed-login counter",
@@ -313,6 +442,7 @@ async function runAllowlisted(job) {
     return {
       ok: true,
       output: [
+        "[sample data — this diagnostic is not yet implemented on this agent]",
         "Windows Event: Kerberos ticket cache empty",
         "KDC: PREAUTH_FAILED then ticket expired",
         "recommendation: klist purge and renew ticket through management agent",
@@ -323,6 +453,7 @@ async function runAllowlisted(job) {
     return {
       ok: true,
       output: [
+        "[sample data — this diagnostic is not yet implemented on this agent]",
         `host: ${os.hostname()}`,
         "app log summary: crash signature found in recent application log",
         "recommendation: collect app version, restart app, and attach crash report to ticket",

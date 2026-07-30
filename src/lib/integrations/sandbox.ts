@@ -65,6 +65,7 @@ export async function sandboxReadLogs(
   if (real) return real;
 
   const log: string[] = [];
+  log.push(`[Sandbox · simulated] No Vercel Sandbox configured — log excerpts below are sample data, not read from a real machine`);
   log.push(`[Sandbox] Cold-starting Vercel Sandbox microVM (Firecracker)`);
   await sleep(180);
   log.push(`[Sandbox] FS mounted READ-ONLY. No network egress to corp prod.`);

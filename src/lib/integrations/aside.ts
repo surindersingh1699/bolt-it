@@ -7,6 +7,7 @@ export interface AsideExecutionResult {
 
 export async function asideExecute(step: PlanStep, userEmail: string): Promise<AsideExecutionResult> {
   const log: string[] = [];
+  log.push(`[Aside · simulated] No live Aside tenant configured — the log below shows the intended flow, no real browser action was taken`);
   log.push(`[Aside] Opening user's authenticated browser session for ${userEmail}`);
   log.push(`[Aside] Capability: ${step.capability}`);
   log.push(`[Aside] Browser session token: <held by user, never by agent>`);

@@ -1,3 +1,5 @@
+export const HEARTBEAT_CONNECTED_WINDOW_MS = 10_000;
+
 export interface AgentCurrentJob {
   id: string;
   command: string;

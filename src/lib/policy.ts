@@ -1,5 +1,6 @@
-import { PlanStep, StepRisk, Ticket, RiskSource } from "./types";
+import { PlanStep, StepRisk, StepApprovalMode, Ticket, RiskSource } from "./types";
 import { extractJsonObject } from "./integrations/json";
+import { NEVER_AUTO_PROMOTE, PROMOTION_THRESHOLD, getPrecedent, isAutoPromoted } from "./governance";
 
 interface ClassifyResult {
   risk: StepRisk;
@@ -126,8 +127,14 @@ function normalizeRisk(r: string | undefined): StepRisk | null {
   return null;
 }
 
-function approvalModeFor(risk: StepRisk): "auto" | "human" {
-  return risk === "high" ? "human" : "auto";
+function resolveApprovalMode(
+  risk: StepRisk,
+  workspaceId: string,
+  capability: string | undefined,
+): StepApprovalMode {
+  if (risk !== "high") return "auto";
+  if (!capability || NEVER_AUTO_PROMOTE.has(capability)) return "human";
+  return isAutoPromoted(workspaceId, capability) ? "auto" : "human";
 }
 
 export async function classifyPlan(plan: PlanStep[], ticket: Ticket): Promise<PlanStep[]> {
@@ -145,14 +152,20 @@ export async function classifyPlan(plan: PlanStep[], ticket: Ticket): Promise<Pl
         source: "fallback",
       };
     }
-    const approvalMode = approvalModeFor(result.risk);
-    const policyLog = `[Policy] step ${step.id}: ${result.risk} (${result.source}) — ${result.reason}`;
+    const approvalMode = resolveApprovalMode(result.risk, ticket.workspaceId, step.capability);
+    const governancePromoted = approvalMode === "auto" && result.risk === "high";
+    const policyLog = governancePromoted
+      ? `[Policy] step ${step.id}: high risk but auto-promoted after ${
+          getPrecedent(ticket.workspaceId, step.capability!)?.cleanExecutions ?? PROMOTION_THRESHOLD
+        } clean approvals of ${step.capability} — running without human gate`
+      : `[Policy] step ${step.id}: ${result.risk} (${result.source}) — ${result.reason}`;
     out.push({
       ...step,
       risk: result.risk,
       approvalMode,
       riskReason: result.reason,
       riskSource: result.source,
+      governancePromoted: governancePromoted || undefined,
       log: [...(step.log ?? []), policyLog],
     });
   }

@@ -10,15 +10,17 @@ import { DeflectionDashboard } from "./DeflectionDashboard";
 import { DemoArcButton } from "./DemoArcButton";
 import { AgentStatusBadge } from "./AgentStatusBadge";
 import { SaveProgressBanner } from "./SaveProgressBanner";
+import { FleetTab } from "./FleetTab";
 import { logoutAction } from "@/app/actions/auth";
 import clsx from "clsx";
-import { LayoutGrid, MessageSquare, BookOpen, LogOut, Mail, ScrollText, ShieldCheck } from "lucide-react";
+import { LayoutGrid, MessageSquare, BookOpen, LogOut, Mail, ScrollText, ShieldCheck, Users } from "lucide-react";
 import { PublicUser } from "@/lib/types";
 
-type Tab = "console" | "slack" | "logs" | "runbooks";
+type Tab = "console" | "slack" | "logs" | "runbooks" | "fleet";
 
-const TABS: { id: Tab; label: string; icon: React.ReactNode }[] = [
+const ALL_TABS: { id: Tab; label: string; icon: React.ReactNode; itStaffOnly?: boolean }[] = [
   { id: "console", label: "Console", icon: <LayoutGrid size={14} /> },
+  { id: "fleet", label: "Users & Devices", icon: <Users size={14} />, itStaffOnly: true },
   { id: "slack", label: "Slack (demo)", icon: <MessageSquare size={14} /> },
   { id: "logs", label: "Analyze logs", icon: <ScrollText size={14} /> },
   { id: "runbooks", label: "Runbooks", icon: <BookOpen size={14} /> },
@@ -33,6 +35,7 @@ interface AppShellProps {
 export function AppShell({ currentUser, workspaceName, demoMode = false }: AppShellProps) {
   const [tab, setTab] = useState<Tab>(currentUser.isITStaff ? "console" : "slack");
   const { stats, runbooks, tickets } = useAppState();
+  const TABS = ALL_TABS.filter((t) => !t.itStaffOnly || currentUser.isITStaff);
 
   return (
     <div className="h-screen max-h-screen bg-neutral-950 text-neutral-100 flex flex-col overflow-hidden">
@@ -48,16 +51,18 @@ export function AppShell({ currentUser, workspaceName, demoMode = false }: AppSh
           </span>
         </div>
         <div className="ml-auto flex items-center gap-3">
-          <DemoArcButton onSwitchTab={setTab} />
+          {demoMode && <DemoArcButton onSwitchTab={setTab} />}
           <AgentStatusBadge />
-          <a
-            href="mailto:sabysurinder@gmail.com"
-            className="hidden lg:flex items-center gap-1.5 px-2.5 py-1 text-xs rounded-md border border-neutral-800 bg-neutral-900 text-neutral-300 hover:text-neutral-100 hover:bg-neutral-800 transition-colors"
-            title="Contact for a demo"
-          >
-            <Mail size={12} />
-            Contact
-          </a>
+          {demoMode && (
+            <a
+              href="mailto:sabysurinder@gmail.com"
+              className="hidden lg:flex items-center gap-1.5 px-2.5 py-1 text-xs rounded-md border border-neutral-800 bg-neutral-900 text-neutral-300 hover:text-neutral-100 hover:bg-neutral-800 transition-colors"
+              title="Contact for a demo"
+            >
+              <Mail size={12} />
+              Contact
+            </a>
+          )}
           <nav className="flex gap-1">
             {TABS.map((t) => (
               <button
@@ -87,6 +92,7 @@ export function AppShell({ currentUser, workspaceName, demoMode = false }: AppSh
       <DeflectionDashboard stats={stats} />
       <main className="flex-1 min-h-0 overflow-hidden">
         {tab === "console" && <Console currentUser={currentUser} demoMode={demoMode} />}
+        {tab === "fleet" && currentUser.isITStaff && <FleetTab currentUser={currentUser} />}
         {tab === "slack" && <SlackChat currentUser={currentUser} />}
         {tab === "logs" && <LogAnalyzer currentUser={currentUser} />}
         {tab === "runbooks" && <RunbooksTab />}

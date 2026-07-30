@@ -36,6 +36,16 @@ export interface PlanStep {
   approvalMode?: StepApprovalMode;
   riskReason?: string;
   riskSource?: RiskSource;
+  governancePromoted?: boolean;
+}
+
+export interface CapabilityPrecedent {
+  workspaceId: string;
+  capability: string;
+  cleanExecutions: number;
+  lastApprovedAt: number;
+  lastApprovedBy?: string;
+  promotedAt?: number;
 }
 
 export type NiaSourceType = "repository" | "documentation";
@@ -172,6 +182,22 @@ export interface ADAccount {
   lastLoginAt?: number;
   lastLoginHost?: string;
   kerberosTicketAt?: number;
+}
+
+export type DeviceSource = "seed" | "heartbeat" | "manual";
+
+export interface Device {
+  id: string;
+  workspaceId: string;
+  hostname: string;
+  os: string;
+  ownerEmail?: string;
+  source: DeviceSource;
+  firstSeenAt: number;
+  lastSeenAt: number;
+  agentVersion?: string;
+  claimedAt?: number;
+  claimedBy?: string;
 }
 
 export interface Session {

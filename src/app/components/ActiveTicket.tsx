@@ -356,6 +356,7 @@ function PlanStepRow({ step, index }: { step: PlanStep; index: number }) {
             {step.capability && (
               <span className="text-[10px] font-mono text-neutral-600">{step.capability}</span>
             )}
+            <RiskBadge step={step} />
           </div>
           <div className="text-sm text-neutral-200">{step.description}</div>
           {step.log && step.log.length > 0 && (
@@ -366,6 +367,40 @@ function PlanStepRow({ step, index }: { step: PlanStep; index: number }) {
         </div>
       </div>
     </li>
+  );
+}
+
+function RiskBadge({ step }: { step: PlanStep }) {
+  if (!step.risk) return null;
+  if (step.governancePromoted) {
+    return (
+      <span
+        className="text-[10px] px-1.5 py-0.5 rounded bg-violet-500/15 text-violet-300 border border-violet-500/30 flex items-center gap-1"
+        title={step.riskReason ? `${step.risk} risk — ${step.riskReason}` : undefined}
+      >
+        <ShieldCheck size={9} />
+        trusted · auto
+      </span>
+    );
+  }
+  if (step.approvalMode === "human") {
+    return (
+      <span
+        className="text-[10px] px-1.5 py-0.5 rounded bg-amber-500/15 text-amber-300 border border-amber-500/30 flex items-center gap-1"
+        title={step.riskReason}
+      >
+        <Lock size={9} />
+        {step.risk} risk · needs approval
+      </span>
+    );
+  }
+  return (
+    <span
+      className="text-[10px] px-1.5 py-0.5 rounded bg-neutral-800 text-neutral-500 border border-neutral-700"
+      title={step.riskReason}
+    >
+      {step.risk} risk · auto
+    </span>
   );
 }
 

@@ -1,10 +1,10 @@
 import { NextResponse } from "next/server";
 import { z } from "zod";
-import { readHeartbeat, recordHeartbeat } from "@/lib/agent-heartbeat";
+import { HEARTBEAT_CONNECTED_WINDOW_MS, readHeartbeat, recordHeartbeat } from "@/lib/agent-heartbeat";
 
 export const dynamic = "force-dynamic";
 
-const CONNECTED_WINDOW_MS = 10_000;
+const CONNECTED_WINDOW_MS = HEARTBEAT_CONNECTED_WINDOW_MS;
 
 const heartbeatSchema = z.object({
   hostname: z.string().min(1).max(253),

@@ -7,6 +7,22 @@ const COOKIE_NAME = "it_session";
 const SESSION_TTL_MS = 8 * 60 * 60 * 1000;
 const enc = new TextEncoder();
 
+// getCurrentUser() is called on every request (SSR pages, every API route),
+// and the UI polls /api/state every 600ms plus /api/fleet every 2s — without
+// this cache, each tick re-hits the AD backend (InsForge when enabled) for a
+// lookup that almost never changes. A short TTL absorbs that burst without
+// meaningfully delaying role/lockout changes from taking effect.
+const USER_CACHE_TTL_MS = 5_000;
+
+declare global {
+  // eslint-disable-next-line no-var
+  var __USER_CACHE__: Map<string, { user: PublicUser | null; expiresAt: number }> | undefined;
+}
+
+const userCache: Map<string, { user: PublicUser | null; expiresAt: number }> =
+  globalThis.__USER_CACHE__ ?? new Map();
+if (!globalThis.__USER_CACHE__) globalThis.__USER_CACHE__ = userCache;
+
 function getSessionSecret(): string {
   const fromEnv = process.env.SESSION_SECRET;
   if (fromEnv && fromEnv.length >= 16) return fromEnv;
@@ -113,8 +129,21 @@ export async function getCurrentSession(): Promise<Session | null> {
 export async function getCurrentUser(): Promise<PublicUser | null> {
   const session = await getCurrentSession();
   if (!session) return null;
-  const user = await getADUser(session.userEmail, session.workspaceId);
-  return user ? toPublic(user) : null;
+  const cacheKey = `${session.workspaceId}:${session.userEmail}`;
+  const cached = userCache.get(cacheKey);
+  if (cached && cached.expiresAt > Date.now()) return cached.user;
+  try {
+    const user = await getADUser(session.userEmail, session.workspaceId);
+    const publicUser = user ? toPublic(user) : null;
+    userCache.set(cacheKey, { user: publicUser, expiresAt: Date.now() + USER_CACHE_TTL_MS });
+    return publicUser;
+  } catch (err) {
+    // A transient backend error (e.g. InsForge rate-limiting) shouldn't crash
+    // every page — serve a stale cached value if we have one rather than throw.
+    console.warn("[auth] getADUser failed, serving stale cache if available:", (err as Error).message);
+    if (cached) return cached.user;
+    throw err;
+  }
 }
 
 export async function requireITStaff(): Promise<PublicUser> {

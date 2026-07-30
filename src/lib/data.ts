@@ -8,6 +8,7 @@ import {
   AgentJob,
   Citation,
   DeflectionStat,
+  Device,
   PlanStep,
   Runbook,
   Ticket,
@@ -353,7 +354,12 @@ export async function getWorkspace(id: string): Promise<Workspace | undefined> {
       .eq("id", id)
       .maybeSingle();
     ifErr(error, "getWorkspace");
-    return data ? workspaceFromRow(data as DbRow) : undefined;
+    if (data) return workspaceFromRow(data as DbRow);
+    // No row in InsForge — this workspace may only exist in the in-memory
+    // fallback (e.g. its insertWorkspace() call itself fell back due to a
+    // schema mismatch). Check there before giving up, same spirit as
+    // insertWorkspace()'s own fallback.
+    return db.getWorkspace(id);
   }
   return db.getWorkspace(id);
 }
@@ -390,18 +396,20 @@ export async function disconnectSlackOnWorkspace(id: string): Promise<void> {
     slack_connected_at: null,
     updated_at: Date.now(),
   };
-  const ifg = isInsforgeEnabled() ? getInsforge() : null;
-  if (ifg) {
-    const { error } = await ifg.database.from("workspaces").update(row).eq("id", id);
-    ifErr(error, "disconnectSlackOnWorkspace");
-    return;
-  }
-  db.updateWorkspace(id, {
+  const patch: Partial<Workspace> = {
     slackTeamId: undefined,
     slackTeamName: undefined,
     slackAccessToken: undefined,
     slackConnectedAt: undefined,
-  });
+  };
+  const ifg = isInsforgeEnabled() ? getInsforge() : null;
+  if (ifg) {
+    const { error } = await ifg.database.from("workspaces").update(row).eq("id", id);
+    ifErr(error, "disconnectSlackOnWorkspace");
+  }
+  // Mirror into the in-memory store whenever it already has this workspace —
+  // see updateWorkspace() below for why.
+  if (db.getWorkspace(id)) db.updateWorkspace(id, patch);
 }
 
 export async function updateWorkspace(id: string, patch: Partial<Workspace>): Promise<void> {
@@ -418,9 +426,13 @@ export async function updateWorkspace(id: string, patch: Partial<Workspace>): Pr
   if (ifg) {
     const { error } = await ifg.database.from("workspaces").update(row).eq("id", id);
     ifErr(error, "updateWorkspace");
-    return;
   }
-  db.updateWorkspace(id, patch);
+  // InsForge's update() succeeds silently even when zero rows match (e.g. this
+  // workspace's insertWorkspace() call fell back to in-memory due to a schema
+  // mismatch, so InsForge never had a row to update in the first place).
+  // Mirror into the in-memory store whenever it already has this workspace,
+  // so a workspace that lives there doesn't silently lose writes.
+  if (!ifg || db.getWorkspace(id)) db.updateWorkspace(id, patch);
 }
 
 export async function touchWorkspace(id: string): Promise<void> {
@@ -710,6 +722,27 @@ export async function updateADAccount(
     return;
   }
   db.updateADAccount(email, patch, workspaceId);
+}
+
+// Devices — in-memory only for now (no isInsforgeEnabled() branch).
+// TODO(insforge): add an ifg branch once ad_* schema drift (nia_sources
+// column missing) is resolved — no sense adding a new table to a backend
+// that's already failing on an existing one.
+
+export async function insertDevice(d: Device): Promise<void> {
+  db.insertDevice(d);
+}
+
+export async function getDevice(hostname: string, workspaceId?: string): Promise<Device | undefined> {
+  return db.getDevice(hostname, workspaceId);
+}
+
+export async function listDevices(workspaceId?: string): Promise<Device[]> {
+  return db.listDevices(workspaceId);
+}
+
+export async function updateDevice(id: string, patch: Partial<Device>): Promise<void> {
+  db.updateDevice(id, patch);
 }
 
 // Agent jobs

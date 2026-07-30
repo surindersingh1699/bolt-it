@@ -8,6 +8,7 @@ export interface TensorlakeResult {
 
 export async function tensorlakeRun(step: PlanStep, userEmail: string): Promise<TensorlakeResult> {
   const log: string[] = [];
+  log.push(`[Tensorlake · simulated] No live Tensorlake tenant configured — sandbox output below is illustrative`);
   log.push(`[Tensorlake] Cold-starting sandboxed VM (target 150ms)`);
   await sleep(150);
   log.push(`[Tensorlake] Sandbox ready. FS isolated, no network egress to corp systems`);

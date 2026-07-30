@@ -16,6 +16,7 @@ export async function insforgeInvoke(step: PlanStep, userEmail: string): Promise
   await sleep(200);
 
   if (step.capability === "okta.list_groups") {
+    log.push(`[InsForge · simulated] No live Okta tenant — group data below is sample data`);
     log.push(`[InsForge] Querying Okta API via scoped service account`);
     await sleep(500);
     const groups = ["everyone", "engineering"];
@@ -25,6 +26,7 @@ export async function insforgeInvoke(step: PlanStep, userEmail: string): Promise
   }
 
   if (step.capability === "mdm.push_vpn_config") {
+    log.push(`[InsForge · simulated] No live MDM tenant — push flow below is illustrative`);
     log.push(`[InsForge] Looking up device serial via MDM API`);
     await sleep(400);
     log.push(`[InsForge] Pushing refreshed VPN profile`);
@@ -34,6 +36,7 @@ export async function insforgeInvoke(step: PlanStep, userEmail: string): Promise
   }
 
   if (step.capability === "identity.verify") {
+    log.push(`[InsForge · simulated] Verification below is illustrative, not a real identity check`);
     log.push(`[InsForge] Cross-referencing Hyperspell user context`);
     await sleep(400);
     log.push(`[InsForge] Recent activity matches reported account; identity verified`);
