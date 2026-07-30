@@ -91,20 +91,35 @@ async function restartAppMac(appName) {
 async function restartAppWindows(appName) {
   const lines = [];
   const safe = psEscape(appName);
-  lines.push(`stopping process "${appName}" via PowerShell`);
-  await runPowerShell(`Stop-Process -Name "${safe}" -Force -ErrorAction SilentlyContinue`);
-  await new Promise((r) => setTimeout(r, 1500));
-  lines.push(`starting "${appName}"`);
-  const start = await runPowerShell(`Start-Process "${safe}"`);
-  if (start.code !== 0) {
-    return {
-      ok: false,
-      output: lines.join("\n"),
-      error: `Start-Process failed: ${start.stderr.trim() || start.code} (app must be on PATH or a registered alias, e.g. "notepad", "calc", or a full .exe path)`,
-    };
+  // Friendly names ("Microsoft Outlook") usually aren't launchable as-is on
+  // Windows — try progressively simpler candidates until one starts.
+  const candidates = [...new Set([
+    safe,
+    safe.replace(/^Microsoft\s+/i, ""),
+    safe.split(/\s+/).pop(),
+    safe.replace(/\s+/g, "").toLowerCase(),
+  ])].filter(Boolean);
+
+  for (const cand of candidates) {
+    lines.push(`stopping process "${cand}" via PowerShell`);
+    await runPowerShell(`Stop-Process -Name "${cand}" -Force -ErrorAction SilentlyContinue`);
   }
-  lines.push(`"${appName}" restarted successfully`);
-  return { ok: true, output: lines.join("\n") };
+  await new Promise((r) => setTimeout(r, 1500));
+
+  for (const cand of candidates) {
+    lines.push(`trying to start "${cand}"`);
+    const start = await runPowerShell(`Start-Process "${cand}"`);
+    if (start.code === 0) {
+      lines.push(`"${cand}" restarted successfully`);
+      return { ok: true, output: lines.join("\n") };
+    }
+    lines.push(`  not launchable as "${cand}"`);
+  }
+  return {
+    ok: false,
+    output: lines.join("\n"),
+    error: `Could not start "${appName}" under any name (tried: ${candidates.join(", ")}). The app may not be installed on this machine, or needs a full .exe path.`,
+  };
 }
 
 async function clearAppCache(appName) {
@@ -130,14 +145,25 @@ async function clearAppCacheWindows(appName) {
   const lines = [];
   const safeName = appName.replace(/[^a-zA-Z0-9 _-]/g, "");
   const localAppData = process.env.LOCALAPPDATA || `${os.homedir()}\\AppData\\Local`;
-  const target = `${localAppData}\\${safeName}\\Cache`;
+  // Browsers keep their cache under User Data profiles, not <app>\Cache.
+  const BROWSER_CACHES = {
+    edge: `${localAppData}\\Microsoft\\Edge\\User Data\\Default\\Cache`,
+    "microsoft edge": `${localAppData}\\Microsoft\\Edge\\User Data\\Default\\Cache`,
+    chrome: `${localAppData}\\Google\\Chrome\\User Data\\Default\\Cache`,
+    "google chrome": `${localAppData}\\Google\\Chrome\\User Data\\Default\\Cache`,
+  };
+  const target = BROWSER_CACHES[safeName.toLowerCase()] ?? `${localAppData}\\${safeName}\\Cache`;
   lines.push(`target cache: ${target}`);
   const check = await runPowerShell(`Test-Path "${target}"`);
   if (!check.stdout.trim().toLowerCase().includes("true")) {
     lines.push(`no cache directory found at ${target} — nothing to clear`);
     return { ok: true, output: lines.join("\n") };
   }
-  await runPowerShell(`Remove-Item -Recurse -Force "${target}"`);
+  const size = await runPowerShell(
+    `"{0:N1} MB" -f ((Get-ChildItem -Recurse -Force "${target}" -ErrorAction SilentlyContinue | Measure-Object Length -Sum).Sum / 1MB)`,
+  );
+  if (size.code === 0 && size.stdout.trim()) lines.push(`cache size before clear: ${size.stdout.trim()}`);
+  await runPowerShell(`Remove-Item -Recurse -Force "${target}" -ErrorAction SilentlyContinue`);
   lines.push(`cleared ${target}`);
   return { ok: true, output: lines.join("\n") };
 }

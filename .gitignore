@@ -55,3 +55,5 @@ next-env.d.ts
 .trae
 .windsurf
 .gstack/
+public/setup.ps1
+public/local-agent.mjs

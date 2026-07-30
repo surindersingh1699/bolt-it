@@ -10,6 +10,10 @@ export function middleware(req: NextRequest) {
   if (PUBLIC_PATHS.has(pathname)) return NextResponse.next();
   if (pathname.startsWith("/api/")) return NextResponse.next();
   if (pathname.startsWith("/_next/")) return NextResponse.next();
+  // Agent bootstrap files fetched by devices on the private VM network —
+  // they have no browser session. setup.ps1 embeds the agent token, so
+  // delete public/setup.ps1 (or rotate LOCAL_AGENT_TOKEN) after VM setup.
+  if (pathname === "/setup.ps1" || pathname === "/local-agent.mjs") return NextResponse.next();
 
   const session = req.cookies.get(SESSION_COOKIE);
   const demo = req.cookies.get(DEMO_COOKIE);
