@@ -16,7 +16,7 @@ if (!token) {
 
 const AGENT_HOSTNAME = os.hostname();
 const AGENT_OS = `${os.platform()} ${os.release()} (${os.arch()})`;
-const AGENT_VERSION = "local-agent/0.4.0";
+const AGENT_VERSION = "local-agent/0.5.0";
 const IS_MAC = os.platform() === "darwin";
 const IS_WINDOWS = os.platform() === "win32";
 
@@ -294,6 +294,70 @@ async function collectSystemInfoMac() {
   return { ok: true, output: lines.join("\n") };
 }
 
+// Real app-state probe: is the process running, since when, what version.
+// This is what lets the cloud agent VERIFY a fix instead of assuming it worked.
+async function appStatus(appName) {
+  const lines = [];
+  const candidates = appNameCandidates(appName);
+  if (IS_WINDOWS) {
+    const q = candidates.map((c) => `'${c}'`).join(",");
+    const res = await runPowerShell(
+      `$p = Get-Process -Name ${q} -ErrorAction SilentlyContinue | Select-Object -First 1
+       if ($p) {
+         "running: yes"
+         "process_name: " + $p.ProcessName
+         "pid: " + $p.Id
+         "started_at: " + $p.StartTime
+         "working_set_mb: " + [math]::Round($p.WorkingSet64/1MB,1)
+         "responding: " + $p.Responding
+         if ($p.Path) { "path: " + $p.Path }
+       } else { "running: no" }`,
+    );
+    lines.push(res.stdout.trim() || "running: no");
+    return { ok: true, output: lines.join("\n") };
+  }
+  const res = await runShell("pgrep", ["-ix", candidates[0]]);
+  lines.push(res.code === 0 ? `running: yes\npid: ${res.stdout.trim()}` : "running: no");
+  return { ok: true, output: lines.join("\n") };
+}
+
+// Real Windows Application event log for a given app (replaces canned output).
+async function appEventLogs(appName, limit) {
+  if (!IS_WINDOWS) {
+    const res = await runShell("log", ["show", "--last", "30m", "--style", "compact"]);
+    const lines = (res.stdout || "")
+      .split(/\r?\n/)
+      .filter((l) => l.toLowerCase().includes(appName.toLowerCase()))
+      .slice(0, limit);
+    return {
+      ok: true,
+      output: lines.length ? lines.join("\n") : `no recent unified-log entries mentioning "${appName}"`,
+    };
+  }
+  const safe = psEscape(appName);
+  const res = await runPowerShell(
+    `Get-WinEvent -FilterHashtable @{LogName='Application'; Level=1,2,3; StartTime=(Get-Date).AddDays(-3)} -ErrorAction SilentlyContinue |
+     Where-Object { $_.ProviderName -like "*${safe}*" -or $_.Message -like "*${safe}*" } |
+     Select-Object -First ${limit} TimeCreated, LevelDisplayName, ProviderName, @{n='Msg';e={($_.Message -split "\`n")[0]}} |
+     Format-Table -AutoSize | Out-String -Width 200`,
+  );
+  const out = (res.stdout || "").trim();
+  return {
+    ok: true,
+    output: out || `no Application-log errors/warnings mentioning "${appName}" in the last 3 days`,
+  };
+}
+
+function appNameCandidates(appName) {
+  const safe = psEscape(appName);
+  return [...new Set([
+    safe,
+    safe.replace(/^Microsoft\s+/i, ""),
+    safe.split(/\s+/).pop(),
+    safe.replace(/\s+/g, "").toLowerCase(),
+  ])].filter(Boolean);
+}
+
 async function toggleWifi() {
   return IS_WINDOWS ? toggleWifiWindows() : toggleWifiMac();
 }
@@ -468,6 +532,17 @@ async function runAllowlisted(job) {
   }
   if (command.startsWith("collect_system_info")) {
     return await collectSystemInfo();
+  }
+  if (command.startsWith("app_status ")) {
+    const m = command.match(/--app "([^"]+)"/);
+    if (!m?.[1]) return { ok: false, error: "missing --app argument" };
+    return await appStatus(m[1]);
+  }
+  if (command.startsWith("app_event_logs ")) {
+    const m = command.match(/--app "([^"]+)"/);
+    if (!m?.[1]) return { ok: false, error: "missing --app argument" };
+    const lim = Number(command.match(/--limit (\d+)/)?.[1] ?? 15);
+    return await appEventLogs(m[1], Math.min(lim, 50));
   }
   if (command.startsWith("collect_vpn_diagnostics ")) {
     return {

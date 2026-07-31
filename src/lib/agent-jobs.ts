@@ -10,7 +10,9 @@ export function isAgentJobCapability(capability?: string): boolean {
     capability === "sandbox.read_kerberos_logs" ||
     capability === "fix.restart_app" ||
     capability === "fix.clear_app_cache" ||
-    capability === "fix.toggle_wifi"
+    capability === "fix.toggle_wifi" ||
+    capability === "diag.app_status" ||
+    capability === "diag.app_logs"
   );
 }
 
@@ -48,6 +50,8 @@ export function humanLabelFor(capability: string | undefined): string {
   if (capability === "fix.restart_app") return "Restart the application";
   if (capability === "fix.clear_app_cache") return "Clear application cache";
   if (capability === "fix.toggle_wifi") return "Toggle Wi-Fi";
+  if (capability === "diag.app_status") return "Check whether the app is running";
+  if (capability === "diag.app_logs") return "Read the app's recent error events";
   return "Run sandboxed action";
 }
 
@@ -92,6 +96,14 @@ function commandForCapability(
   }
   if (capability === "fix.toggle_wifi") {
     return `toggle_wifi`;
+  }
+  if (capability === "diag.app_status") {
+    const app = sanitizeAppName(params?.app);
+    return `app_status --app "${app}"`;
+  }
+  if (capability === "diag.app_logs") {
+    const app = sanitizeAppName(params?.app);
+    return `app_event_logs --app "${app}" --limit 15`;
   }
   return `collect_app_logs --user ${user} --redact-secrets`;
 }

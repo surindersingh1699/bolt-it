@@ -71,6 +71,8 @@ function ticketToRow(t: Ticket): DbRow {
     resolved_by_ai: t.resolvedByAi,
     runbook_source_id: t.runbookSourceId ?? null,
     resolution_time_ms: t.resolutionTimeMs ?? null,
+    troubleshooting_summary: t.troubleshootingSummary ?? null,
+    attempts: t.attempts ?? null,
   };
 }
 
@@ -95,6 +97,8 @@ function ticketFromRow(r: DbRow): Ticket {
     resolvedByAi: Boolean(r.resolved_by_ai),
     runbookSourceId: (r.runbook_source_id as string | null) ?? undefined,
     resolutionTimeMs: r.resolution_time_ms == null ? undefined : Number(r.resolution_time_ms),
+    troubleshootingSummary: (r.troubleshooting_summary as string) ?? undefined,
+    attempts: r.attempts == null ? undefined : Number(r.attempts),
   };
 }
 
@@ -108,6 +112,8 @@ function ticketPatchToRow(patch: Partial<Ticket>): DbRow {
   if (patch.resolvedByAi !== undefined) out.resolved_by_ai = patch.resolvedByAi;
   if (patch.resolvedAt !== undefined) out.resolved_at = patch.resolvedAt;
   if (patch.resolutionTimeMs !== undefined) out.resolution_time_ms = patch.resolutionTimeMs;
+  if (patch.troubleshootingSummary !== undefined) out.troubleshooting_summary = patch.troubleshootingSummary;
+  if (patch.attempts !== undefined) out.attempts = patch.attempts;
   if (patch.runbookSourceId !== undefined) out.runbook_source_id = patch.runbookSourceId;
   out.updated_at = Date.now();
   return out;

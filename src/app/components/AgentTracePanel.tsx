@@ -13,6 +13,8 @@ import {
   Monitor,
   PauseCircle,
   PlayCircle,
+  RotateCw,
+  SearchCheck,
   ShieldCheck,
   UserSearch,
   Wrench,
@@ -27,6 +29,9 @@ const NODE_META: Record<string, { label: string; icon: React.ComponentType<{ siz
   classifyRisk: { label: "Classify risk per step", icon: ShieldCheck },
   persistPlan: { label: "Persist plan", icon: Database },
   interrupt: { label: "Human approval gate", icon: PauseCircle },
+  verifyOutcome: { label: "Verify: did it actually work?", icon: SearchCheck },
+  replan: { label: "Re-plan next attempt", icon: RotateCw },
+  exhausted: { label: "Attempts exhausted", icon: CircleX },
   escalate: { label: "Escalate", icon: CircleX },
   finalize: { label: "Finalize & confirm", icon: CircleCheck },
 };

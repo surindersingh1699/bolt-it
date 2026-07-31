@@ -7,7 +7,7 @@ import { classifyPlan } from "@/lib/policy";
 import { insforgeInvoke } from "@/lib/integrations/insforge";
 import { asideExecute } from "@/lib/integrations/aside";
 import { tensorlakeRun } from "@/lib/integrations/tensorlake";
-import { synthesizeSlackReply } from "@/lib/integrations/ai-gateway";
+import { synthesizeSlackReply, verifyAndReplan } from "@/lib/integrations/ai-gateway";
 import { postSlackMessage } from "@/lib/slack";
 import { enqueueAgentJob, isAgentJobCapability } from "@/lib/agent-jobs";
 import { recordCleanExecution } from "@/lib/governance";
@@ -46,6 +46,8 @@ const TicketGraphState = Annotation.Root({
   draft: Annotation<NiaDraftResult | null>({ reducer: overwrite, default: () => null }),
   citations: Annotation<Citation[]>({ reducer: overwrite, default: () => [] }),
   classifiedPlan: Annotation<PlanStep[]>({ reducer: overwrite, default: () => [] }),
+  attempt: Annotation<number>({ reducer: overwrite, default: () => 1 }),
+  findings: Annotation<string[]>({ reducer: (cur, upd) => cur.concat(upd), default: () => [] }),
   pendingStepId: Annotation<string | null>({ reducer: overwrite, default: () => null }),
   justApprovedCapability: Annotation<string | null>({ reducer: overwrite, default: () => null }),
   approver: Annotation<Approver | null>({ reducer: overwrite, default: () => null }),
@@ -313,7 +315,7 @@ async function runNextStep(state: TState) {
   if (!ticket) return new Command({ goto: END });
 
   const step = ticket.plan.find((s) => s.status === "pending");
-  if (!step) return new Command({ goto: "finalizeExecution" });
+  if (!step) return new Command({ goto: "verifyOutcome" });
 
   if (step.approvalMode === "human") {
     return new Command({ goto: "markAwaitingApproval", update: { pendingStepId: step.id } });
@@ -399,16 +401,123 @@ async function awaitApproval(state: TState) {
   });
 }
 
+const MAX_ATTEMPTS = 3;
+
+// The troubleshooting loop: after every round of steps, look at what the
+// machine actually reported and decide — resolved, or try the next thing?
+// This is what separates "ran a plan" from "troubleshot the problem".
+async function verifyOutcome(state: TState) {
+  const t0 = Date.now();
+  const ticket = await getTicket(state.ticketId);
+  if (!ticket) return new Command({ goto: END });
+
+  // Let any queued local-agent jobs land so we judge on real output.
+  await waitForAgentJobs(state.ticketId, 20_000);
+  const fresh = await getTicket(state.ticketId);
+  const allJobs = await listAgentJobs(ticket.workspaceId);
+  const jobsForTicket = allJobs.filter((j) => j.ticketId === state.ticketId);
+  const evidence = buildSlackReplyEvidence(fresh?.plan ?? [], jobsForTicket);
+
+  const verdict = await verifyAndReplan({
+    subject: ticket.subject,
+    body: ticket.body,
+    attempt: state.attempt,
+    maxAttempts: MAX_ATTEMPTS,
+    evidence,
+    priorFindings: state.findings,
+  }).catch(() => null);
+
+  if (!verdict) {
+    appendTrace(state.ticketId, "verifyOutcome", "completed", "verifier unavailable — accepting current result", Date.now() - t0);
+    return new Command({ goto: "finalizeExecution" });
+  }
+
+  const finding = `${verdict.hypothesis || verdict.reasoning}`;
+  appendTrace(
+    state.ticketId,
+    "verifyOutcome",
+    "completed",
+    `attempt ${state.attempt}/${MAX_ATTEMPTS} — ${verdict.resolved ? "believes RESOLVED" : "NOT resolved"} (${Math.round(
+      verdict.confidence * 100,
+    )}%): ${verdict.reasoning}`,
+    Date.now() - t0,
+  );
+
+  if (verdict.resolved || verdict.nextSteps.length === 0 || state.attempt >= MAX_ATTEMPTS) {
+    if (!verdict.resolved) {
+      appendTrace(
+        state.ticketId,
+        "exhausted",
+        "completed",
+        `no fix after ${state.attempt} attempt(s) — handing to a human with findings`,
+      );
+    }
+    return new Command({ goto: "finalizeExecution", update: { findings: [finding] } });
+  }
+
+  return new Command({ goto: "replan", update: { findings: [finding], classifiedPlan: verdict.nextSteps } });
+}
+
+// Classify the newly proposed steps (same risk gate as round one — a follow-up
+// fix gets no free pass) and append them to the ticket's plan.
+async function replan(state: TState) {
+  const t0 = Date.now();
+  const ticket = await getTicket(state.ticketId);
+  if (!ticket) return new Command({ goto: END });
+
+  const nextAttempt = state.attempt + 1;
+  const withParams = state.classifiedPlan.map((s) => ({
+    ...s,
+    params: substituteParams(s.params, ticket.reporterEmail),
+  }));
+  const classified = await classifyPlan(withParams, ticket);
+
+  await updateTicket(state.ticketId, {
+    status: "executing",
+    plan: [...ticket.plan, ...classified],
+  });
+
+  appendTrace(
+    state.ticketId,
+    "replan",
+    "completed",
+    `attempt ${nextAttempt}: trying ${classified.length} new step(s) — ${classified
+      .map((s) => s.capability ?? s.kind)
+      .join(", ")}`,
+    Date.now() - t0,
+  );
+
+  const firstName = ticket.reporter.split(/\s+/)[0];
+  await postSlackUpdate(
+    ticket,
+    `🔁 Hi ${firstName} — first approach didn't resolve it. Trying attempt ${nextAttempt}: ${classified
+      .map((s) => humanStepLabel(s))
+      .join(", ")}`,
+  );
+
+  return new Command({ goto: "runNextStep", update: { attempt: nextAttempt } });
+}
+
 async function finalizeExecution(state: TState) {
   const finishedTicket = await getTicket(state.ticketId);
   if (!finishedTicket) return {};
 
-  await updateTicket(state.ticketId, { status: "awaiting_confirmation" });
+  // Always leave a troubleshooting record on the ticket — even when unresolved,
+  // a technician picking this up should see what was tried and what was found.
+  const summary =
+    state.findings.length > 0
+      ? state.findings.map((f, i) => `Attempt ${i + 1}: ${f}`).join("\n")
+      : "Single-pass resolution — no follow-up attempts needed.";
+  await updateTicket(state.ticketId, {
+    status: "awaiting_confirmation",
+    troubleshootingSummary: summary,
+    attempts: state.attempt,
+  });
   appendTrace(
     state.ticketId,
     "finalize",
     "completed",
-    "all steps done · asking the user to confirm the fix worked",
+    `${state.attempt} attempt(s) · asking the user to confirm the fix worked`,
   );
 
   if (finishedTicket.channel === "slack") {
@@ -456,7 +565,9 @@ function buildGraph() {
     .addNode("draftWithNia", draftWithNia)
     .addNode("classifyRisk", classifyRisk)
     .addNode("persistPlan", persistPlan)
-    .addNode("runNextStep", runNextStep, { ends: ["runNextStep", "markAwaitingApproval", "finalizeExecution", END] })
+    .addNode("runNextStep", runNextStep, { ends: ["runNextStep", "markAwaitingApproval", "verifyOutcome", END] })
+    .addNode("verifyOutcome", verifyOutcome, { ends: ["replan", "finalizeExecution", END] })
+    .addNode("replan", replan, { ends: ["runNextStep", END] })
     .addNode("markAwaitingApproval", markAwaitingApproval)
     .addNode("awaitApproval", awaitApproval, { ends: ["runNextStep"] })
     .addNode("finalizeExecution", finalizeExecution)

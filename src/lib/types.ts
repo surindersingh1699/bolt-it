@@ -117,6 +117,9 @@ export interface Ticket {
   resolvedByAi: boolean;
   runbookSourceId?: string;
   resolutionTimeMs?: number;
+  /** What the agent tried and concluded across troubleshooting attempts. */
+  troubleshootingSummary?: string;
+  attempts?: number;
   /** Populated by /api/state from the in-memory trace store (not persisted). */
   trace?: import("./trace").TraceEvent[];
 }

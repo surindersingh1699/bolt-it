@@ -116,6 +116,17 @@ function TicketView({
         )}
       </section>
 
+      {ticket.troubleshootingSummary && (
+        <section className="px-6 py-5 border-b border-neutral-800">
+          <SectionTitle>
+            Troubleshooting record{ticket.attempts ? ` · ${ticket.attempts} attempt${ticket.attempts > 1 ? "s" : ""}` : ""}
+          </SectionTitle>
+          <pre className="text-[11px] text-neutral-400 leading-relaxed whitespace-pre-wrap font-sans">
+            {ticket.troubleshootingSummary}
+          </pre>
+        </section>
+      )}
+
       <AgentTracePanel ticket={ticket} />
 
       <section className="px-6 py-5 border-b border-neutral-800">

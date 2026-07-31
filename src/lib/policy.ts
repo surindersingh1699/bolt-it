@@ -17,6 +17,8 @@ const ALLOWLIST_LOW = new Set([
   "diag.system_info",
   "sandbox.read_auth_logs",
   "sandbox.read_kerberos_logs",
+  "diag.app_status",
+  "diag.app_logs",
 ]);
 
 const ALLOWLIST_HIGH = new Set([
