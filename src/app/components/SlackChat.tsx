@@ -2,7 +2,7 @@
 
 import { useState, useTransition, useRef, useEffect } from "react";
 import { useAppState } from "./StateProvider";
-import { createTicket, confirmTicketResolved, escalateAfterUserDenied } from "@/app/actions/tickets";
+import { createTicket, confirmTicketResolved, escalateAfterUserDenied, chatWithAgent } from "@/app/actions/tickets";
 import { classifyConfirmation } from "@/lib/chat";
 import { Bot, Hash, Send } from "lucide-react";
 import { PublicUser, Ticket } from "@/lib/types";
@@ -62,7 +62,7 @@ export function SlackChat({ currentUser }: { currentUser: PublicUser }) {
     scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: "smooth" });
   }, [lines.length, tickets.length]);
 
-  const submit = (subject: string, body: string) => {
+  const submit = (subject: string, body: string, opts?: { directTicket?: boolean }) => {
     const line: ChatLine = {
       id: `line-${Math.random().toString(36).slice(2)}`,
       user: currentUser,
@@ -87,7 +87,20 @@ export function SlackChat({ currentUser }: { currentUser: PublicUser }) {
       }
     }
 
+    // Free-form message while a recent ticket exists: converse about it via
+    // the LLM; it files a new ticket itself if the message is a new issue.
+    // Quick prompts are always distinct issues, so they skip the chat route.
+    const recent = opts?.directTicket
+      ? undefined
+      : tickets
+          .filter((t) => t.reporterEmail === currentUser.email && Date.now() - t.updatedAt < 30 * 60 * 1000)
+          .sort((a, b) => b.updatedAt - a.updatedAt)[0];
+
     startTransition(async () => {
+      if (recent) {
+        const routed = await chatWithAgent(recent.id, body);
+        if (routed === "chat") return;
+      }
       await createTicket({
         reporter: currentUser.name,
         reporterEmail: currentUser.email,
@@ -106,13 +119,21 @@ export function SlackChat({ currentUser }: { currentUser: PublicUser }) {
     submit(subject, body);
   };
 
-  const ticketsByLine = new Map(tickets.map((t) => [`${t.reporterEmail}|${t.body}`, t]));
+  // Every user-authored text already persisted server-side (ticket bodies and
+  // thread follow-ups), so optimistic lines drop out once the poll catches up.
+  const persistedUserTexts = new Set<string>();
+  for (const t of tickets) {
+    persistedUserTexts.add(`${t.reporterEmail}|${t.body}`);
+    for (const m of t.chat ?? []) {
+      if (m.from === "user") persistedUserTexts.add(`${t.reporterEmail}|${m.text}`);
+    }
+  }
   const ticketLines = tickets
     .filter((t) => t.channel === "slack")
     .flatMap(ticketToChannelLines)
     .sort((a, b) => a.ts - b.ts);
   const optimisticLines: ChannelLine[] = lines
-    .filter((line) => !ticketsByLine.has(`${line.user.email}|${line.text}`))
+    .filter((line) => !persistedUserTexts.has(`${line.user.email}|${line.text}`))
     .map((line) => ({
       id: line.id,
       kind: "user" as const,
@@ -150,7 +171,7 @@ export function SlackChat({ currentUser }: { currentUser: PublicUser }) {
           {QUICK_PROMPTS.map((q, i) => (
             <li key={i}>
               <button
-                onClick={() => submit(q.subject, q.body)}
+                onClick={() => submit(q.subject, q.body, { directTicket: true })}
                 disabled={pending}
                 className="w-full text-left px-2 py-1.5 rounded text-xs text-neutral-300 bg-neutral-900 hover:bg-neutral-800 transition-colors disabled:opacity-50"
               >
@@ -230,17 +251,29 @@ function ticketToChannelLines(ticket: Ticket): ChannelLine[] {
     },
   ];
 
-  // Full conversation: every message the agent posted for this ticket
-  // (ack, plan, step updates, re-plan notices, findings, confirmation ask).
+  // Full conversation: agent posts (ack, plan, step updates, findings,
+  // confirmation ask) plus the user's own follow-up replies in the thread.
   const chat = ticket.chat ?? [];
   chat.forEach((m, i) => {
-    lines.push({
-      id: `${ticket.id}-chat-${i}`,
-      kind: "agent",
-      text: m.text,
-      ts: m.at,
-      ticket,
-    });
+    if (m.from === "user") {
+      lines.push({
+        id: `${ticket.id}-chat-${i}`,
+        kind: "user",
+        name: ticket.reporter,
+        email: ticket.reporterEmail,
+        text: m.text,
+        ts: m.at,
+        ticket,
+      });
+    } else {
+      lines.push({
+        id: `${ticket.id}-chat-${i}`,
+        kind: "agent",
+        text: m.text,
+        ts: m.at,
+        ticket,
+      });
+    }
   });
 
   if (chat.length === 0) {

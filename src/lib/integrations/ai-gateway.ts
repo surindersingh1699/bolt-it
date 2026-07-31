@@ -5,6 +5,9 @@ import { extractJsonObject } from "./json";
 
 const AI_GATEWAY_URL = process.env.AI_GATEWAY_URL || "https://ai-gateway.vercel.sh/v1";
 const AI_GATEWAY_MODEL = process.env.AI_GATEWAY_MODEL || "anthropic/claude-haiku-4-5";
+// Conversational replies in the Slack thread use ChatGPT (via the same gateway),
+// separate from the planning/verdict model above.
+const AI_GATEWAY_CHAT_MODEL = process.env.AI_GATEWAY_CHAT_MODEL || "openai/gpt-4o-mini";
 
 export async function aiGatewayDraft(input: NiaDraftInput): Promise<NiaDraftResult | null> {
   if (!process.env.AI_GATEWAY_API_KEY) return null;
@@ -468,4 +471,48 @@ Write the Slack reply.`;
   const text = data?.choices?.[0]?.message?.content?.trim();
   if (!text) return null;
   return text.slice(0, 1800);
+}
+
+/**
+ * Free-form conversational reply in the ticket thread. Grounded strictly in
+ * the ticket record; returns newIssue=true when the message is really a
+ * fresh problem deserving its own ticket.
+ */
+export async function conversationalReply(args: {
+  userMessage: string;
+  firstName: string;
+  ticketSummary: string;
+}): Promise<{ reply: string; newIssue: boolean } | null> {
+  if (!process.env.AI_GATEWAY_API_KEY) return null;
+  try {
+    const res = await fetch(`${AI_GATEWAY_URL}/chat/completions`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${process.env.AI_GATEWAY_API_KEY}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        model: AI_GATEWAY_CHAT_MODEL,
+        temperature: 0.3,
+        messages: [
+          {
+            role: "system",
+            content: `You are an in-house IT support agent chatting with an employee in Slack about their ticket. Warm, concise (1-4 sentences), plain text. Answer ONLY from the ticket record — what ran, what was found, current status. Never invent results. If you lack the data, say so and offer to escalate. If their message is actually a NEW unrelated IT problem, set new_issue=true and leave reply empty. Return ONLY JSON: {"reply":"...","new_issue":false}`,
+          },
+          {
+            role: "user",
+            content: `Employee first name: ${args.firstName}\n\nTicket record:\n${args.ticketSummary}\n\nEmployee's message: ${args.userMessage}`,
+          },
+        ],
+      }),
+    });
+    if (!res.ok) return null;
+    const data = (await res.json()) as { choices?: Array<{ message?: { content?: string } }> };
+    const jsonStr = extractJsonObject(data.choices?.[0]?.message?.content ?? "");
+    if (!jsonStr) return null;
+    const parsed = JSON.parse(jsonStr) as { reply?: string; new_issue?: boolean };
+    return { reply: parsed.reply ?? "", newIssue: Boolean(parsed.new_issue) };
+  } catch {
+    return null;
+  }
 }

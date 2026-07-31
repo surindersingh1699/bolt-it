@@ -3,7 +3,7 @@
 // the complete conversation even when no real Slack channel is wired.
 
 export interface ChatMsg {
-  from: "agent";
+  from: "agent" | "user";
   text: string;
   at: number;
 }
@@ -19,6 +19,12 @@ if (!globalThis.__TICKET_CHAT__) globalThis.__TICKET_CHAT__ = store;
 export function appendChat(ticketId: string, text: string): void {
   const list = store.get(ticketId) ?? [];
   list.push({ from: "agent", text, at: Date.now() });
+  store.set(ticketId, list);
+}
+
+export function appendUserChat(ticketId: string, text: string): void {
+  const list = store.get(ticketId) ?? [];
+  list.push({ from: "user", text, at: Date.now() });
   store.set(ticketId, list);
 }
 

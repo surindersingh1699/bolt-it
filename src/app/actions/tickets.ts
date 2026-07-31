@@ -211,3 +211,23 @@ export async function escalateTicket(ticketId: string): Promise<void> {
   await updateTicket(ticketId, { status: "escalated" });
   safeRevalidate("/");
 }
+
+export async function chatWithAgent(ticketId: string, message: string): Promise<"chat" | "new_ticket"> {
+  const ticket = await getTicket(ticketId);
+  if (!ticket) return "new_ticket";
+  const firstName = ticket.reporter.split(/\s+/)[0];
+  const planLines = ticket.plan
+    .map((s) => `- [${s.status}] ${s.description}${s.log?.length ? ` | ${s.log.slice(-2).join(" | ").slice(0, 200)}` : ""}`)
+    .join("\n");
+  const summary = `Subject: ${ticket.subject}\nStatus: ${ticket.status}\nAttempts: ${ticket.attempts ?? 1}\nSteps:\n${planLines}\nTroubleshooting findings:\n${ticket.troubleshootingSummary ?? "(none)"}`;
+  const { conversationalReply } = await import("@/lib/integrations/ai-gateway");
+  const result = await conversationalReply({ userMessage: message, firstName, ticketSummary: summary });
+  if (!result || result.newIssue || !result.reply) return "new_ticket";
+  // Record the user's message only once we know it belongs to this thread —
+  // on the new_ticket path it becomes the new ticket's body instead.
+  const { appendUserChat } = await import("@/lib/chat");
+  appendUserChat(ticketId, message);
+  await postSlackUpdate(ticket, result.reply);
+  safeRevalidate("/");
+  return "chat";
+}
