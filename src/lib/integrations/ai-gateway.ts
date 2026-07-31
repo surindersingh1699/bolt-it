@@ -236,8 +236,22 @@ export async function verifyAndReplan(args: {
   maxAttempts: number;
   evidence: SlackReplyEvidence[];
   priorFindings: string[];
+  /** Company knowledge: Hyperspell profile line, device line, memory hits. */
+  userContext?: string;
+  deviceContext?: string;
+  memories?: Array<{ title: string; summary: string }>;
 }): Promise<VerdictResult | null> {
   if (!process.env.AI_GATEWAY_API_KEY) return null;
+
+  // Same institutional knowledge the initial draft gets — the retry loop
+  // should reason from company runbooks first, general IT knowledge second.
+  const runbooks = await listRunbooks();
+  const runbookContext =
+    runbooks.length > 0
+      ? runbooks
+          .map((rb) => `### ${rb.id}: ${rb.title} (worked ${rb.successCount}x)\nTags: ${rb.tags.join(", ")}\n${rb.body.slice(0, 600)}`)
+          .join("\n\n")
+      : "(no runbooks yet)";
 
   const evidenceText = args.evidence
     .map((e, i) => {
@@ -255,6 +269,8 @@ You are given: the user's original problem, what has been executed so far, and t
 Decide:
 1. Is the problem actually RESOLVED based on the EVIDENCE? Be strict — a fix step "succeeding" does not mean the problem is gone. Prefer evidence that verifies end state (e.g. "running: yes" from an app status check) over evidence that an action was merely attempted.
 2. If NOT resolved, what is the next best round of steps? Think like a technician: verify the current state, read the app's own error logs, check related files/config, then apply the next most likely fix. Don't repeat a step that already ran unless you now have a reason to expect a different outcome.
+
+Ground your reasoning in COMPANY KNOWLEDGE first: if a runbook below matches this class of problem, follow its resolution sequence and name the runbook id in your reasoning. Use the user's profile/device context to tailor steps (right app names, right machine). Where company knowledge is silent, fall back to your own general IT knowledge — say so explicitly in the reasoning (e.g. "no runbook covers this; based on general knowledge...").
 
 Attempt ${args.attempt} of ${args.maxAttempts}. If this is the final attempt, set resolved=false and return an empty nextSteps array — the agent will hand off to a human with your findings.
 
@@ -282,8 +298,22 @@ Use kind "tensorlake" for any diag.*/fix.*/sandbox.* capability (these run on th
 Use params {"app":"<AppName>"} for app-scoped capabilities.
 Return at most 3 nextSteps. Never include a slack_reply step — the agent writes the reply itself.`;
 
+  const memoryContext =
+    args.memories && args.memories.length > 0
+      ? args.memories.map((m) => `- ${m.title}: ${m.summary.slice(0, 200)}`).join("\n")
+      : "(none)";
+
   const userPrompt = `Original problem: ${args.subject}
 Details: ${args.body}
+
+## Company knowledge
+Runbook library:
+${runbookContext}
+
+User profile: ${args.userContext ?? "(unknown)"}
+User's device: ${args.deviceContext ?? "(no registered device)"}
+Memory hits (Hyperspell):
+${memoryContext}
 
 Findings from earlier attempts:
 ${args.priorFindings.length ? args.priorFindings.map((f, i) => `- attempt ${i + 1}: ${f}`).join("\n") : "(none — this is the first attempt)"}

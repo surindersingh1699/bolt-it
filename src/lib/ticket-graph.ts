@@ -425,6 +425,11 @@ async function verifyOutcome(state: TState) {
     maxAttempts: MAX_ATTEMPTS,
     evidence,
     priorFindings: state.findings,
+    userContext: state.userContext
+      ? `${state.userContext.name} · ${state.userContext.team} team · recent apps: ${state.userContext.recentApps.join(", ")}`
+      : undefined,
+    deviceContext: state.deviceContext ?? undefined,
+    memories: state.memories.map((m) => ({ title: m.title, summary: m.summary })),
   }).catch(() => null);
 
   if (!verdict) {
