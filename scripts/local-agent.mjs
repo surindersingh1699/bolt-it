@@ -336,7 +336,7 @@ async function appEventLogs(appName, limit) {
   }
   const safe = psEscape(appName);
   const res = await runPowerShell(
-    `Get-WinEvent -FilterHashtable @{LogName='Application'; Level=1,2,3; StartTime=(Get-Date).AddDays(-3)} -ErrorAction SilentlyContinue |
+    `Get-WinEvent -FilterHashtable @{LogName='Application'; Level=1,2,3; StartTime=(Get-Date).AddDays(-1)} -MaxEvents 200 -ErrorAction SilentlyContinue |
      Where-Object { $_.ProviderName -like "*${safe}*" -or $_.Message -like "*${safe}*" } |
      Select-Object -First ${limit} TimeCreated, LevelDisplayName, ProviderName, @{n='Msg';e={($_.Message -split "\`n")[0]}} |
      Format-Table -AutoSize | Out-String -Width 200`,

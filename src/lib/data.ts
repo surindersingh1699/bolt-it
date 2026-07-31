@@ -29,8 +29,8 @@ function cacheGet<T>(key: string): T | undefined {
   const hit = readCache.get(key);
   return hit && hit.expiresAt > Date.now() ? (hit.value as T) : undefined;
 }
-function cacheSet(key: string, value: unknown): void {
-  readCache.set(key, { value, expiresAt: Date.now() + READ_CACHE_TTL_MS });
+function cacheSet(key: string, value: unknown, ttlMs: number = READ_CACHE_TTL_MS): void {
+  readCache.set(key, { value, expiresAt: Date.now() + ttlMs });
 }
 function cacheStale<T>(key: string): T | undefined {
   return readCache.get(key)?.value as T | undefined;
@@ -375,12 +375,19 @@ export async function insertWorkspace(w: Workspace): Promise<void> {
 export async function getWorkspace(id: string): Promise<Workspace | undefined> {
   const ifg = isInsforgeEnabled() ? getInsforge() : null;
   if (ifg) {
-    const { data, error } = await ifg.database
-      .from("workspaces")
-      .select()
-      .eq("id", id)
-      .maybeSingle();
-    ifErr(error, "getWorkspace");
+    const key = `workspace:${id}`;
+    const cached = cacheGet<Workspace | null>(key);
+    if (cached !== undefined) return cached ?? db.getWorkspace(id);
+    let data: unknown, error: unknown;
+    try {
+      ({ data, error } = await ifg.database.from("workspaces").select().eq("id", id).maybeSingle());
+      ifErr(error, "getWorkspace");
+    } catch (err) {
+      const stale = cacheStale<Workspace | null>(key);
+      if (stale !== undefined) return stale ?? db.getWorkspace(id);
+      throw err;
+    }
+    cacheSet(key, data ? workspaceFromRow(data as DbRow) : null, 10_000);
     if (data) return workspaceFromRow(data as DbRow);
     // No row in InsForge — this workspace may only exist in the in-memory
     // fallback (e.g. its insertWorkspace() call itself fell back due to a
@@ -433,6 +440,7 @@ export async function disconnectSlackOnWorkspace(id: string): Promise<void> {
   if (ifg) {
     const { error } = await ifg.database.from("workspaces").update(row).eq("id", id);
     ifErr(error, "disconnectSlackOnWorkspace");
+    cacheInvalidate("workspace:");
   }
   // Mirror into the in-memory store whenever it already has this workspace —
   // see updateWorkspace() below for why.
@@ -453,6 +461,7 @@ export async function updateWorkspace(id: string, patch: Partial<Workspace>): Pr
   if (ifg) {
     const { error } = await ifg.database.from("workspaces").update(row).eq("id", id);
     ifErr(error, "updateWorkspace");
+    cacheInvalidate("workspace:");
   }
   // InsForge's update() succeeds silently even when zero rows match (e.g. this
   // workspace's insertWorkspace() call fell back to in-memory due to a schema
@@ -660,6 +669,7 @@ export async function insertADUser(u: ADUser): Promise<void> {
   if (ifg) {
     const { error } = await ifg.database.from("ad_users").insert([adUserToRow(u)]);
     ifErr(error, "insertADUser");
+    cacheInvalidate("ad_users:");
     return;
   }
   db.insertADUser(u);
@@ -680,11 +690,22 @@ export async function getADUser(email: string, workspaceId?: string): Promise<AD
 export async function listADUsers(workspaceId?: string): Promise<ADUser[]> {
   const ifg = isInsforgeEnabled() ? getInsforge() : null;
   if (ifg) {
-    let q = ifg.database.from("ad_users").select();
-    if (workspaceId) q = q.eq("workspace_id", workspaceId);
-    const { data, error } = await q;
-    ifErr(error, "listADUsers");
-    return ((data as DbRow[]) ?? []).map(adUserFromRow);
+    const key = `ad_users:${workspaceId ?? "*"}`;
+    const cached = cacheGet<ADUser[]>(key);
+    if (cached) return cached;
+    try {
+      let q = ifg.database.from("ad_users").select();
+      if (workspaceId) q = q.eq("workspace_id", workspaceId);
+      const { data, error } = await q;
+      ifErr(error, "listADUsers");
+      const out = ((data as DbRow[]) ?? []).map(adUserFromRow);
+      cacheSet(key, out, 5_000);
+      return out;
+    } catch (err) {
+      const stale = cacheStale<ADUser[]>(key);
+      if (stale) return stale;
+      throw err;
+    }
   }
   return db.listADUsers(workspaceId);
 }
@@ -702,6 +723,7 @@ export async function updateADUser(
     if (workspaceId) q = q.eq("workspace_id", workspaceId);
     const { error } = await q;
     ifErr(error, "updateADUser");
+    cacheInvalidate("ad_users:");
     return;
   }
   db.updateADUser(email, patch, workspaceId);
@@ -734,6 +756,7 @@ export async function insertADAccount(a: ADAccount): Promise<void> {
   if (ifg) {
     const { error } = await ifg.database.from("ad_accounts").insert([adAccountToRow(a)]);
     ifErr(error, "insertADAccount");
+    cacheInvalidate("ad_accounts:");
     return;
   }
   db.insertADAccount(a);
@@ -757,11 +780,22 @@ export async function getADAccount(
 export async function listADAccounts(workspaceId?: string): Promise<ADAccount[]> {
   const ifg = isInsforgeEnabled() ? getInsforge() : null;
   if (ifg) {
-    let q = ifg.database.from("ad_accounts").select();
-    if (workspaceId) q = q.eq("workspace_id", workspaceId);
-    const { data, error } = await q;
-    ifErr(error, "listADAccounts");
-    return ((data as DbRow[]) ?? []).map(adAccountFromRow);
+    const key = `ad_accounts:${workspaceId ?? "*"}`;
+    const cached = cacheGet<ADAccount[]>(key);
+    if (cached) return cached;
+    try {
+      let q = ifg.database.from("ad_accounts").select();
+      if (workspaceId) q = q.eq("workspace_id", workspaceId);
+      const { data, error } = await q;
+      ifErr(error, "listADAccounts");
+      const out = ((data as DbRow[]) ?? []).map(adAccountFromRow);
+      cacheSet(key, out, 5_000);
+      return out;
+    } catch (err) {
+      const stale = cacheStale<ADAccount[]>(key);
+      if (stale) return stale;
+      throw err;
+    }
   }
   return db.listADAccounts(workspaceId);
 }
@@ -779,6 +813,7 @@ export async function updateADAccount(
     if (workspaceId) q = q.eq("workspace_id", workspaceId);
     const { error } = await q;
     ifErr(error, "updateADAccount");
+    cacheInvalidate("ad_accounts:");
     return;
   }
   db.updateADAccount(email, patch, workspaceId);
@@ -818,6 +853,7 @@ export async function insertAgentJob(job: AgentJob): Promise<void> {
       console.warn("[InsForge] insertAgentJob threw — falling back to in-memory queue:", (err as Error).message);
     }
   }
+  cacheInvalidate("agentjobs:");
   db.insertAgentJob(job);
 }
 
@@ -844,6 +880,9 @@ export async function listAgentJobs(
 ): Promise<AgentJob[]> {
   const ifg = isInsforgeEnabled() ? getInsforge() : null;
   if (ifg) {
+    const key = `agentjobs:${workspaceId ?? "*"}:${status ?? "*"}`;
+    const cached = cacheGet<AgentJob[]>(key);
+    if (cached && cached.length > 0) return cached;
     try {
       let q = ifg.database.from("agent_jobs").select();
       if (workspaceId) q = q.eq("workspace_id", workspaceId);
@@ -851,6 +890,7 @@ export async function listAgentJobs(
       const { data, error } = await q.order("created_at", { ascending: true });
       if (!error) {
         const remote = ((data as DbRow[]) ?? []).map(agentJobFromRow);
+        cacheSet(key, remote, 1_500);
         if (remote.length > 0) return remote;
       }
     } catch {
