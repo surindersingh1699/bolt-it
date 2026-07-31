@@ -18,6 +18,7 @@ import {
   ShieldCheck,
 } from "lucide-react";
 import { AgentTracePanel } from "./AgentTracePanel";
+import { AgentGraphView } from "./AgentGraphView";
 
 export function ActiveTicket({
   currentUser,
@@ -91,6 +92,8 @@ function TicketView({
         <h2 className="text-lg font-semibold text-neutral-100 mb-1">{ticket.subject}</h2>
         <p className="text-sm text-neutral-400 leading-relaxed">{ticket.body}</p>
       </div>
+
+      <AgentGraphView ticket={ticket} />
 
       <section className="px-6 py-5 border-b border-neutral-800">
         <SectionTitle>AI Draft Response</SectionTitle>

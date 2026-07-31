@@ -18,6 +18,27 @@ import {
 
 type DbRow = Record<string, unknown>;
 
+// Short-TTL read cache for hot InsForge list queries. /api/state polls every
+// 600ms and was issuing 3+ InsForge queries per tick — enough to trip their
+// per-IP rate limit. 2s of staleness is invisible at UI polling cadence;
+// writes invalidate immediately. On backend errors we serve the last good
+// value instead of 500ing every page (same spirit as the auth cache).
+const READ_CACHE_TTL_MS = 2_000;
+const readCache = new Map<string, { value: unknown; expiresAt: number }>();
+function cacheGet<T>(key: string): T | undefined {
+  const hit = readCache.get(key);
+  return hit && hit.expiresAt > Date.now() ? (hit.value as T) : undefined;
+}
+function cacheSet(key: string, value: unknown): void {
+  readCache.set(key, { value, expiresAt: Date.now() + READ_CACHE_TTL_MS });
+}
+function cacheStale<T>(key: string): T | undefined {
+  return readCache.get(key)?.value as T | undefined;
+}
+function cacheInvalidate(prefix: string): void {
+  for (const k of readCache.keys()) if (k.startsWith(prefix)) readCache.delete(k);
+}
+
 function workspaceToRow(w: Workspace): DbRow {
   return {
     id: w.id,
@@ -502,6 +523,7 @@ export async function insertTicket(t: Ticket): Promise<void> {
   if (ifg) {
     const { error } = await ifg.database.from("tickets").insert([ticketToRow(t)]);
     ifErr(error, "insertTicket");
+    cacheInvalidate("tickets:");
     return;
   }
   db.insertTicket(t);
@@ -514,6 +536,7 @@ export async function updateTicket(id: string, patch: Partial<Ticket>): Promise<
     if (Object.keys(row).length === 0) return;
     const { error } = await ifg.database.from("tickets").update(row).eq("id", id);
     ifErr(error, "updateTicket");
+    cacheInvalidate("tickets:");
     return;
   }
   db.updateTicket(id, patch);
@@ -534,6 +557,7 @@ export async function updateStep(
       .update({ plan: newPlan, updated_at: Date.now() })
       .eq("id", ticketId);
     ifErr(error, "updateStep");
+    cacheInvalidate("tickets:");
     return;
   }
   db.updateStep(ticketId, stepId, patch);
@@ -542,11 +566,25 @@ export async function updateStep(
 export async function listTickets(workspaceId?: string): Promise<Ticket[]> {
   const ifg = isInsforgeEnabled() ? getInsforge() : null;
   if (ifg) {
-    let q = ifg.database.from("tickets").select();
-    if (workspaceId) q = q.eq("workspace_id", workspaceId);
-    const { data, error } = await q.order("created_at", { ascending: false });
-    ifErr(error, "listTickets");
-    return ((data as DbRow[]) ?? []).map(ticketFromRow);
+    const key = `tickets:${workspaceId ?? "*"}`;
+    const cached = cacheGet<Ticket[]>(key);
+    if (cached) return cached;
+    try {
+      let q = ifg.database.from("tickets").select();
+      if (workspaceId) q = q.eq("workspace_id", workspaceId);
+      const { data, error } = await q.order("created_at", { ascending: false });
+      ifErr(error, "listTickets");
+      const out = ((data as DbRow[]) ?? []).map(ticketFromRow);
+      cacheSet(key, out);
+      return out;
+    } catch (err) {
+      const stale = cacheStale<Ticket[]>(key);
+      if (stale) {
+        console.warn("[data] listTickets failed, serving stale cache:", (err as Error).message);
+        return stale;
+      }
+      throw err;
+    }
   }
   return db.listTickets(workspaceId);
 }
@@ -570,6 +608,7 @@ export async function insertRunbook(r: Runbook): Promise<void> {
   if (ifg) {
     const { error } = await ifg.database.from("runbooks").insert([runbookToRow(r)]);
     ifErr(error, "insertRunbook");
+    cacheInvalidate("runbooks:");
     return;
   }
   db.insertRunbook(r);
@@ -582,6 +621,7 @@ export async function updateRunbook(id: string, patch: Partial<Runbook>): Promis
     if (Object.keys(row).length === 0) return;
     const { error } = await ifg.database.from("runbooks").update(row).eq("id", id);
     ifErr(error, "updateRunbook");
+    cacheInvalidate("runbooks:");
     return;
   }
   db.updateRunbook(id, patch);
@@ -590,11 +630,25 @@ export async function updateRunbook(id: string, patch: Partial<Runbook>): Promis
 export async function listRunbooks(workspaceId?: string): Promise<Runbook[]> {
   const ifg = isInsforgeEnabled() ? getInsforge() : null;
   if (ifg) {
-    let q = ifg.database.from("runbooks").select();
-    if (workspaceId) q = q.eq("workspace_id", workspaceId);
-    const { data, error } = await q.order("updated_at", { ascending: false });
-    ifErr(error, "listRunbooks");
-    return ((data as DbRow[]) ?? []).map(runbookFromRow);
+    const key = `runbooks:${workspaceId ?? "*"}`;
+    const cached = cacheGet<Runbook[]>(key);
+    if (cached) return cached;
+    try {
+      let q = ifg.database.from("runbooks").select();
+      if (workspaceId) q = q.eq("workspace_id", workspaceId);
+      const { data, error } = await q.order("updated_at", { ascending: false });
+      ifErr(error, "listRunbooks");
+      const out = ((data as DbRow[]) ?? []).map(runbookFromRow);
+      cacheSet(key, out);
+      return out;
+    } catch (err) {
+      const stale = cacheStale<Runbook[]>(key);
+      if (stale) {
+        console.warn("[data] listRunbooks failed, serving stale cache:", (err as Error).message);
+        return stale;
+      }
+      throw err;
+    }
   }
   return db.listRunbooks(workspaceId);
 }
