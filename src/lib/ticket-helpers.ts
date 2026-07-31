@@ -3,8 +3,12 @@ import { AgentJob, PlanStep, Ticket } from "@/lib/types";
 import { humanLabelFor } from "@/lib/agent-jobs";
 import { postSlackMessage } from "@/lib/slack";
 import { SlackReplyEvidence } from "@/lib/integrations/ai-gateway";
+import { appendChat } from "@/lib/chat";
 
 export async function postSlackUpdate(ticket: Ticket, text: string): Promise<void> {
+  // Always record in the in-app conversation transcript (the demo Slack tab
+  // shows the full thread even with no real Slack wired).
+  appendChat(ticket.id, text);
   const ws = await getWorkspace(ticket.workspaceId);
   const ctx = slackContextFromTicket(ticket);
   if (!ws?.slackAccessToken || !ctx.channel) return;

@@ -2,7 +2,8 @@
 
 import { useState, useTransition, useRef, useEffect } from "react";
 import { useAppState } from "./StateProvider";
-import { createTicket } from "@/app/actions/tickets";
+import { createTicket, confirmTicketResolved, escalateAfterUserDenied } from "@/app/actions/tickets";
+import { classifyConfirmation } from "@/lib/chat";
 import { Bot, Hash, Send } from "lucide-react";
 import { PublicUser, Ticket } from "@/lib/types";
 
@@ -69,6 +70,23 @@ export function SlackChat({ currentUser }: { currentUser: PublicUser }) {
       ts: Date.now(),
     };
     setLines((prev) => [...prev, line]);
+
+    // If the agent is waiting on this user to confirm a fix, treat a yes/no
+    // as the thread reply — like a real conversation — instead of a new ticket.
+    const awaiting = tickets
+      .filter((t) => t.reporterEmail === currentUser.email && t.status === "awaiting_confirmation")
+      .sort((a, b) => b.updatedAt - a.updatedAt)[0];
+    if (awaiting) {
+      const verdict = classifyConfirmation(body);
+      if (verdict !== "ambiguous") {
+        startTransition(async () => {
+          if (verdict === "yes") await confirmTicketResolved(awaiting.id);
+          else await escalateAfterUserDenied(awaiting.id);
+        });
+        return;
+      }
+    }
+
     startTransition(async () => {
       await createTicket({
         reporter: currentUser.name,
@@ -212,23 +230,44 @@ function ticketToChannelLines(ticket: Ticket): ChannelLine[] {
     },
   ];
 
-  if (ticket.status === "drafting" || ticket.status === "new") {
+  // Full conversation: every message the agent posted for this ticket
+  // (ack, plan, step updates, re-plan notices, findings, confirmation ask).
+  const chat = ticket.chat ?? [];
+  chat.forEach((m, i) => {
+    lines.push({
+      id: `${ticket.id}-chat-${i}`,
+      kind: "agent",
+      text: m.text,
+      ts: m.at,
+      ticket,
+    });
+  });
+
+  if (chat.length === 0) {
+    // Fallback for tickets created before the transcript existed.
+    if (ticket.status === "drafting" || ticket.status === "new") {
+      lines.push({
+        id: `${ticket.id}-agent-working`,
+        kind: "agent",
+        text: "Got it. I am checking the company runbooks and user context now.",
+        ts: ticket.updatedAt,
+        ticket,
+      });
+    } else if (ticket.draftResponse) {
+      lines.push({
+        id: `${ticket.id}-agent-reply`,
+        kind: "agent",
+        text: ticket.draftResponse,
+        ts: ticket.resolvedAt ?? ticket.updatedAt,
+        ticket,
+      });
+    }
+  } else if (ticket.status === "drafting" || ticket.status === "new") {
     lines.push({
       id: `${ticket.id}-agent-working`,
       kind: "agent",
       text: "Got it. I am checking the company runbooks and user context now.",
       ts: ticket.updatedAt,
-      ticket,
-    });
-    return lines;
-  }
-
-  if (ticket.draftResponse) {
-    lines.push({
-      id: `${ticket.id}-agent-reply`,
-      kind: "agent",
-      text: ticket.draftResponse,
-      ts: ticket.resolvedAt ?? ticket.updatedAt,
       ticket,
     });
   }

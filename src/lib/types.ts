@@ -122,6 +122,8 @@ export interface Ticket {
   attempts?: number;
   /** Populated by /api/state from the in-memory trace store (not persisted). */
   trace?: import("./trace").TraceEvent[];
+  /** Populated by /api/state from the in-memory chat transcript (not persisted). */
+  chat?: import("./chat").ChatMsg[];
 }
 
 export interface Runbook {

@@ -4,6 +4,7 @@ import { ensureSeeded } from "@/lib/seed";
 import { getCurrentWorkspaceId } from "@/lib/workspace";
 import { niaIndexedSources } from "@/lib/integrations/nia";
 import { getTrace } from "@/lib/trace";
+import { getChat } from "@/lib/chat";
 
 export const dynamic = "force-dynamic";
 
@@ -19,7 +20,7 @@ export async function GET() {
   const envSources = niaIndexedSources();
   const wsSources = workspace?.niaSources ?? [];
   return NextResponse.json({
-    tickets: tickets.map((t) => ({ ...t, trace: getTrace(t.id) })),
+    tickets: tickets.map((t) => ({ ...t, trace: getTrace(t.id), chat: getChat(t.id) })),
     runbooks,
     stats,
     workspaceId: workspaceId ?? null,
