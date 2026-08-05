@@ -9,14 +9,17 @@ export type TicketStatus =
 
 export type ActionStatus = "pending" | "running" | "succeeded" | "failed" | "skipped";
 
-export type ActionKind = "insforge" | "aside" | "tensorlake" | "slack_reply";
+// device = runs on the user's machine via the local agent.
+// backend = directory/account action in our own store.
+// reply = message to the user.
+export type ActionKind = "device" | "backend" | "reply";
 
 export type StepRisk = "low" | "medium" | "high";
 export type StepApprovalMode = "auto" | "human";
 export type RiskSource = "allowlist" | "judge" | "fallback";
 
 export interface Citation {
-  source: "runbook" | "hyperspell";
+  source: "runbook" | "memory";
   title: string;
   snippet: string;
   ref: string;
@@ -37,12 +40,6 @@ export interface PlanStep {
   riskReason?: string;
   riskSource?: RiskSource;
   governancePromoted?: boolean;
-  /**
-   * True when the step's "work" was illustrative only — a canned integration
-   * branch or a device job the agent cannot really perform. A simulated step
-   * must never be described to the user as something that was actually done.
-   */
-  simulated?: boolean;
 }
 
 export interface CapabilityPrecedent {
@@ -57,14 +54,8 @@ export interface CapabilityPrecedent {
 export interface Workspace {
   id: string;
   displayName: string;
-  isDemo: boolean;
-  slackTeamId?: string;
-  slackTeamName?: string;
-  slackAccessToken?: string;
-  slackConnectedAt?: number;
   createdAt: number;
   updatedAt: number;
-  lastUsedAt?: number;
 }
 
 export type AgentJobStatus =
@@ -73,8 +64,6 @@ export type AgentJobStatus =
   | "succeeded"
   /** Ran cleanly, but the device's own state never moved — not a fix. */
   | "no_effect"
-  /** The device agent has no real implementation for this command. */
-  | "simulated"
   | "failed";
 
 /** One `Get-*`/`pgrep` style read of device state, taken around an action. */
@@ -120,8 +109,6 @@ export interface ExecutionEnvelope {
   durationMs: number;
   /** Whether this command is a fix (must change state) or a read-only probe. */
   expectsChange: boolean;
-  /** True when the agent has no real implementation and produced canned text. */
-  simulated?: boolean;
   probes: DeviceProbe[];
   commands: DeviceCommand[];
   effect: { changed: boolean; diff: EffectDiff[]; summary: string };

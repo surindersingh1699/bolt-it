@@ -4,7 +4,7 @@ import { useAppState } from "./StateProvider";
 import { PlanStep, PublicUser, Ticket } from "@/lib/types";
 import { useState, useTransition } from "react";
 import clsx from "clsx";
-import { approveAndExecute, demoApproveAndExecute, escalateTicket } from "@/app/actions/tickets";
+import { approveAndExecute, escalateTicket } from "@/app/actions/tickets";
 import {
   AlertCircle,
   CheckCircle2,
@@ -22,10 +22,8 @@ import { AgentGraphView } from "./AgentGraphView";
 
 export function ActiveTicket({
   currentUser,
-  demoMode = false,
 }: {
   currentUser: PublicUser;
-  demoMode?: boolean;
 }) {
   const { tickets, selectedTicketId } = useAppState();
   const ticket = tickets.find((t) => t.id === selectedTicketId);
@@ -36,17 +34,15 @@ export function ActiveTicket({
       </div>
     );
   }
-  return <TicketView ticket={ticket} currentUser={currentUser} demoMode={demoMode} />;
+  return <TicketView ticket={ticket} currentUser={currentUser} />;
 }
 
 function TicketView({
   ticket,
   currentUser,
-  demoMode,
 }: {
   ticket: Ticket;
   currentUser: PublicUser;
-  demoMode: boolean;
 }) {
   const [pending, startTransition] = useTransition();
   const [actionError, setActionError] = useState<string | null>(null);
@@ -56,11 +52,7 @@ function TicketView({
     setActionError(null);
     startTransition(async () => {
       try {
-        if (demoMode) {
-          await demoApproveAndExecute(ticket.id);
-        } else {
-          await approveAndExecute(ticket.id);
-        }
+        await approveAndExecute(ticket.id);
       } catch (err) {
         setActionError((err as Error).message || "Approval failed.");
       }
@@ -167,7 +159,7 @@ function TicketView({
               </button>
               <span className="text-xs text-neutral-500 ml-auto">
                 Approving as <span className="text-neutral-300">{currentUser.name}</span> ·
-                {demoMode ? " demo IT staff" : " IT staff"}
+                 IT staff
               </span>
               {actionError && (
                 <div className="basis-full text-xs text-rose-300 flex items-center gap-1.5 pt-1">
@@ -227,14 +219,6 @@ function PlanStepRow({ step, index }: { step: PlanStep; index: number }) {
               <span className="text-[10px] font-mono text-neutral-600">{step.capability}</span>
             )}
             <RiskBadge step={step} />
-            {step.simulated && (
-              <span
-                className="text-[10px] px-1.5 py-0.5 rounded bg-amber-500/15 text-amber-300 border border-amber-500/30"
-                title="Illustrative only — nothing was executed on the user's machine"
-              >
-                simulated · no device effect
-              </span>
-            )}
           </div>
           <div className="text-sm text-neutral-200">{step.description}</div>
           {step.log && step.log.length > 0 && (
@@ -292,20 +276,18 @@ function RiskBadge({ step }: { step: PlanStep }) {
 // amber when it demonstrably did not.
 function proofLineClass(line: string): string {
   if (line.startsWith("[Proof] EFFECT:")) return "text-emerald-400";
-  if (line.startsWith("[Proof] NO EFFECT") || line.startsWith("[Proof] SIMULATED")) return "text-amber-300";
+  if (line.startsWith("[Proof] NO EFFECT")) return "text-amber-300";
   if (line.startsWith("[Proof]")) return "text-neutral-400";
   return "text-neutral-500";
 }
 
 function stepIcon(step: PlanStep) {
   switch (step.kind) {
-    case "insforge":
+    case "backend":
       return ShieldCheck;
-    case "aside":
-      return Globe2;
-    case "tensorlake":
+    case "device":
       return FlaskConical;
-    case "slack_reply":
+    case "reply":
       return MessageCircle;
     default:
       return Send;

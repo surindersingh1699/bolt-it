@@ -8,8 +8,8 @@ A LangGraph-orchestrated IT support agent that doesn't just run a plan — it **
 ## The agent graph
 
 ```
-            ┌─ gatherUserContext (Hyperspell profile) ─┐
-START ──────┼─ gatherMemories   (Hyperspell search)  ──┤            (barrier join)
+            ┌─ gatherProfile (directory record) ───────┐
+START ──────┼─ gatherMemory  (facts + past tickets) ───┤            (barrier join)
             └─ gatherDeviceContext (fleet + live agent)┴─► classifyRisk ─► persistPlan
                         └─► draftPlan (LLM) ────────────────┘                  │
                                                                                ▼
@@ -20,15 +20,18 @@ START ──────┼─ gatherMemories   (Hyperspell search)  ──┤  
    verifyOutcome (LLM verdict from REAL machine output + company runbooks)
         │  not resolved & attempts < 3 ──► replan (new steps, same risk gate) ─► runNextStep
         ▼
-   finalize ── troubleshooting record written to ticket ── user confirms in Slack
+   finalize ── troubleshooting record + memory written ── user confirms in chat
 ```
 
 Key properties, all verified live:
 
 - **Structural human oversight** — the approval gate is a LangGraph `interrupt()`; execution resumes from the paused step via `Command({resume})`, never restarts. Low/medium-risk steps run with zero clicks.
 - **Learned trust (governance)** — every clean human approval of a capability accumulates precedent; after 3, that capability is auto-promoted out of the human gate (`src/lib/governance.ts`), with a hard `NEVER_AUTO_PROMOTE` floor. Promoted steps run with a visible "trusted · auto" badge.
-- **Evidence-based verification** — a fix step "succeeding" is not resolution. The verifier reads real machine output (`diag.app_status`, event logs) plus the company runbook library, Hyperspell memories, and device context, and must cite which it used. Output labeled *simulated* can never justify "resolved."
-- **Honest by construction** — adapters without a real backend (Okta/MDM writes, Aside browser actions, Tensorlake sandbox) label their logs `· simulated`. Every trace line in the UI is real.
+- **Proof of effect on the device** — every device job is probe → act → probe. The agent reads machine state before and after, diffs it, and the diff is the verdict: identical state means the job is recorded `no_effect`, the step fails, and nothing is reported as fixed. A command the agent cannot really perform is recorded `simulated` instead of returning canned text as success.
+- **A record on the machine itself** — each envelope (argv, exit codes, stdout/stderr, both probes, the diff) is appended to `C:\ProgramData\BoltIt\journal\*.jsonl` (Windows) or `~/.bolt-it/journal/*.jsonl` before it is uploaded, so the trail survives the network, the server, and the demo.
+- **Evidence-based verification** — a fix step "succeeding" is not resolution. The verifier reads the device effect line (`VERIFIED CHANGE` / `NO EFFECT`) plus real machine output, the runbook library, the user's memory, and device context, and must cite which it used. `NO EFFECT` can never justify "resolved."
+- **Honest by construction** — there is no adapter without a real backend. Every capability the planner can choose is really implemented; the ones that only narrated work (Okta, MDM, browser automation, sandbox diagnostics) were deleted rather than labelled.
+- **Memory that persists** — keyed facts about a person (nickname, office, device, preferences) plus one line of history per ticket, extracted by the LLM when a ticket finishes and read back at planning time.
 - **Full observability** — a per-ticket, node-level Agent Trace panel in-product, and per-ticket LangSmith runs (`ticket:<id>`).
 
 ## What's real vs simulated
@@ -37,10 +40,11 @@ Key properties, all verified live:
 |---|---|
 | LangGraph orchestration, interrupts, governance, troubleshooting loop | Real |
 | LLM drafting + risk judge + verifier (OpenAI-compatible endpoint) | Real |
-| Local device agent — restart app, clear cache (incl. Edge/Chrome), app status, app event logs, system info, Wi-Fi toggle (macOS + Windows) | Real execution |
+| Local device agent — restart app, clear cache (incl. Edge/Chrome), app status, app event logs, system info, adapter cycle (macOS + Windows) | Real execution, with before/after proof |
+| VPN diagnostics, auth-log and Kerberos-log collection on the device | Not implemented — reported as `simulated`, never as done |
 | AD account state (lock/unlock/reset/kerberos) + fleet health | Real state, seeded demo data |
-| Hyperspell memory query/write, Slack outbound, LangSmith | Real APIs |
-| Okta/MDM writes, Aside browser actions, Tensorlake/Vercel sandbox | Simulated, labeled as such in logs |
+| User memory (facts + episodes), LangSmith tracing | Real, in our own database |
+
 
 ## Quickstart
 
@@ -49,7 +53,7 @@ pnpm install
 pnpm dev                     # http://localhost:3000
 ```
 
-Env (`.env.local`): `AI_GATEWAY_API_KEY` + `AI_GATEWAY_URL` + `AI_GATEWAY_MODEL` (any OpenAI-compatible endpoint), `HYPERSPELL_API_KEY`, `LANGSMITH_TRACING/API_KEY/PROJECT`, `LOCAL_AGENT_TOKEN`, InsForge + Slack keys optional.
+Env (`.env.local`): `AI_GATEWAY_API_KEY` + `AI_GATEWAY_URL` + `AI_GATEWAY_MODEL` (any OpenAI-compatible endpoint), `LANGSMITH_TRACING/API_KEY/PROJECT`, `LOCAL_AGENT_TOKEN`, InsForge keys.
 
 Sign in at `/login` — seeded IT staff: `morgan@acme.test` / `demo-pass-it`. Seeded broken states ready to fix: `bob` (locked account), `frank` (expired password), `eve` (stale Kerberos).
 
@@ -66,13 +70,13 @@ For a Windows VM: one-time installer (auto-start at logon, crash recovery, self-
 Ten rehearsed scenarios with exact trigger phrases, tiered by realness, in [DEMO_SCENARIOS.md](DEMO_SCENARIOS.md). The two most telling runs:
 
 1. **Troubleshooting loop:** file "Notepad keeps crashing when I open a file" → watch the Agent Trace run diagnose → fix → verify → re-plan across attempts, ending either in a verified fix or an honest findings handoff.
-2. **Governance arc:** file the CFO-VPN ticket 3×, approving the high-risk MDM push each time → the 4th run executes it automatically with the "trusted · auto" badge.
+2. **Governance arc:** file a lockout ticket 3×, approving `ad.unlock_account` each time → the 4th run executes it automatically with the "trusted · auto" badge.
 
 ## Known limitations (deliberate scope)
 
 - In-memory graph checkpointer, trace store, and fleet — a process restart drops in-flight interrupts (tickets persist via InsForge). Production would use a Postgres checkpointer.
 - Single global device-agent heartbeat — one live agent at a time; jobs are not routed per-device yet.
-- Inbound Slack (message → ticket) needs a public URL (tunnel); outbound Slack works locally.
-- Device-agent self-update is unsigned (trusted private dev network only).
+- No Slack integration. The Chat tab is the conversation surface.
+- The device agent is copied to the machine by hand — no self-update channel.
 
 MIT

@@ -5,11 +5,9 @@ import { DeflectionStat, Ticket } from "@/lib/types";
 export function DeflectionDashboard({
   stats,
   tickets,
-  demoMode = false,
 }: {
   stats: DeflectionStat;
   tickets?: Ticket[];
-  demoMode?: boolean;
 }) {
   const ratePct = Math.round(stats.rate * 100);
   const avgSec = stats.avgResolutionMs > 0 ? Math.round(stats.avgResolutionMs / 1000) : 0;
@@ -17,7 +15,7 @@ export function DeflectionDashboard({
 
   // Research framing: autonomy/oversight metrics computed from the actual
   // plans, instead of business KPIs. Demo mode keeps the sales-style bar.
-  if (!demoMode && tickets) {
+  if (tickets) {
     const steps = tickets.flatMap((t) => t.plan);
     const executed = steps.filter((s) => s.status === "succeeded" || s.status === "failed");
     const autoRun = executed.filter((s) => s.approvalMode === "auto" && !s.governancePromoted).length;

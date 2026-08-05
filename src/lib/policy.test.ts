@@ -30,7 +30,7 @@ const ticketIn = (workspaceId: string): Ticket =>
     resolvedByAi: false,
   }) as Ticket;
 
-const step = (capability?: string, kind: PlanStep["kind"] = "insforge"): PlanStep => ({
+const step = (capability?: string, kind: PlanStep["kind"] = "backend"): PlanStep => ({
   id: "step-0",
   kind,
   description: "test step",
@@ -53,7 +53,7 @@ describe("risk classification", () => {
   });
 
   it("treats slack_reply as low regardless of capability", async () => {
-    const [out] = await classifyPlan([step(undefined, "slack_reply")], ticketIn(`ws-${++n}`));
+    const [out] = await classifyPlan([step(undefined, "reply")], ticketIn(`ws-${++n}`));
     expect(out.risk).toBe("low");
     expect(out.approvalMode).toBe("auto");
   });

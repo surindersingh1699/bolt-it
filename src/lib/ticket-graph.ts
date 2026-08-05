@@ -1,25 +1,31 @@
 import { StateGraph, Annotation, START, END, MemorySaver, interrupt, Command } from "@langchain/langgraph";
-import { getTicket, updateTicket, updateStep, getWorkspace, listAgentJobs, listDevices } from "@/lib/data";
+import {
+  getTicket,
+  updateTicket,
+  updateStep,
+  listAgentJobs,
+  listDevices,
+  getADUser,
+  getUserMemory,
+  rememberUserFact,
+  rememberUserEpisode,
+} from "@/lib/data";
 import { Citation, PlanStep, Ticket } from "@/lib/types";
-import { getUserContext, queryMemories, MemoryHit } from "@/lib/integrations/hyperspell";
+import { UserMemory, EMPTY_MEMORY, preferredName } from "@/lib/memory";
 import { DraftResult } from "@/lib/integrations/draft";
 import { classifyPlan } from "@/lib/policy";
-import { insforgeInvoke } from "@/lib/integrations/insforge";
-import { asideExecute } from "@/lib/integrations/aside";
-import { tensorlakeRun } from "@/lib/integrations/tensorlake";
-import { aiGatewayDraft, synthesizeSlackReply, verifyAndReplan } from "@/lib/integrations/ai-gateway";
-import { postSlackMessage } from "@/lib/slack";
+import { directoryInvoke } from "@/lib/integrations/directory";
+import { aiGatewayDraft, synthesizeReply, verifyAndReplan, extractUserMemory } from "@/lib/integrations/ai-gateway";
 import { enqueueAgentJob, isAgentJobCapability } from "@/lib/agent-jobs";
 import { formatProofLines, isRealSuccess } from "@/lib/evidence";
 import { recordCleanExecution } from "@/lib/governance";
 import { appendTrace } from "@/lib/trace";
 import { readHeartbeat, HEARTBEAT_CONNECTED_WINDOW_MS } from "@/lib/agent-heartbeat";
 import {
-  buildSlackReplyEvidence,
+  buildReplyEvidence,
   firstNameOf,
   humanStepLabel,
-  postSlackUpdate,
-  slackContextFromTicket,
+  postUpdate,
   substituteParams,
   waitForAgentJobs,
   waitForJob,
@@ -47,8 +53,8 @@ const overwrite = <T,>(_current: T, update: T) => update;
 
 const TicketGraphState = Annotation.Root({
   ticketId: Annotation<string>(),
-  userContext: Annotation<Awaited<ReturnType<typeof getUserContext>>>({ reducer: overwrite, default: () => null }),
-  memories: Annotation<MemoryHit[]>({ reducer: overwrite, default: () => [] }),
+  profile: Annotation<string | null>({ reducer: overwrite, default: () => null }),
+  memory: Annotation<UserMemory>({ reducer: overwrite, default: () => EMPTY_MEMORY }),
   deviceContext: Annotation<string | null>({ reducer: overwrite, default: () => null }),
   draft: Annotation<DraftResult | null>({ reducer: overwrite, default: () => null }),
   citations: Annotation<Citation[]>({ reducer: overwrite, default: () => [] }),
@@ -63,36 +69,32 @@ const TicketGraphState = Annotation.Root({
 type TState = typeof TicketGraphState.State;
 
 // ---- context gathering: three unconditional parallel branches from START.
-// Hyperspell is always invoked (both nodes), never gated.
 
-async function gatherUserContext(state: TState) {
+// Who is this person, per the directory we own.
+async function gatherProfile(state: TState) {
   const t0 = Date.now();
   const ticket = await getTicket(state.ticketId);
   if (!ticket) return {};
-  const userContext = await getUserContext(ticket.reporterEmail).catch(() => null);
-  appendTrace(
-    state.ticketId,
-    "gatherUserContext",
-    "completed",
-    userContext ? `Hyperspell profile: ${userContext.name} · ${userContext.team} team` : "no profile found",
-    Date.now() - t0,
-  );
-  return { userContext };
+  const user = await getADUser(ticket.reporterEmail).catch(() => null);
+  const profile = user ? `${user.name} · ${user.title}, ${user.team} team` : null;
+  appendTrace(state.ticketId, "gatherProfile", "completed", profile ?? "no directory record", Date.now() - t0);
+  return { profile };
 }
 
-async function gatherMemories(state: TState) {
+// What we have learned about them before: keyed facts + recent ticket history.
+async function gatherMemory(state: TState) {
   const t0 = Date.now();
   const ticket = await getTicket(state.ticketId);
   if (!ticket) return {};
-  const memories = await queryMemories(`${ticket.subject}\n${ticket.body}`).catch(() => []);
+  const memory = await getUserMemory(ticket.workspaceId, ticket.reporterEmail).catch(() => EMPTY_MEMORY);
   appendTrace(
     state.ticketId,
-    "gatherMemories",
+    "gatherMemory",
     "completed",
-    `${memories.length} Hyperspell memory hit(s)`,
+    `${memory.facts.length} fact(s), ${memory.episodes.length} past ticket(s)`,
     Date.now() - t0,
   );
-  return { memories };
+  return { memory };
 }
 
 async function gatherDeviceContext(state: TState) {
@@ -116,7 +118,7 @@ async function gatherDeviceContext(state: TState) {
 
 async function draftPlanNode(state: TState) {
   const t0 = Date.now();
-  appendTrace(state.ticketId, "draftPlan", "started", "LLM drafting from runbooks + memories");
+  appendTrace(state.ticketId, "draftPlan", "started", "LLM drafting from runbooks + memory");
   const ticket = await getTicket(state.ticketId);
   if (!ticket) return {};
   try {
@@ -128,7 +130,7 @@ async function draftPlanNode(state: TState) {
         reporterEmail: ticket.reporterEmail,
         customerOrg: ticket.customerOrg,
         workspaceId: ticket.workspaceId,
-        memories: state.memories,
+        memory: state.memory,
       }),
       DRAFT_TIMEOUT_MS,
       "draftPlan",
@@ -161,7 +163,7 @@ async function draftPlanNode(state: TState) {
       reasoning: "draft failed — minimal fallback",
       response: `Hi ${firstName} — I'm taking a look at this and will follow up shortly. Could you share any error message or screenshot if you have one?`,
       plan: [
-        { id: "step-0", kind: "slack_reply", description: "Acknowledge and ask for more detail", status: "pending" },
+        { id: "step-0", kind: "reply", description: "Acknowledge and ask for more detail", status: "pending" },
       ],
       source: "fallback",
     };
@@ -175,23 +177,22 @@ async function classifyRisk(state: TState) {
   const ticket = await getTicket(state.ticketId);
   if (!ticket || !state.draft) return {};
   const draft = state.draft;
-  const userCtx = state.userContext;
 
   const citations: Citation[] = [...draft.citations];
-  if (userCtx) {
+  if (state.profile) {
     citations.push({
-      source: "hyperspell",
-      title: `${userCtx.name} — ${userCtx.team} team`,
-      snippet: `Recent apps: ${userCtx.recentApps.join(", ")}`,
-      ref: `user:${userCtx.email}`,
+      source: "memory",
+      title: state.profile,
+      snippet: state.memory.facts.map((f) => `${f.key}: ${f.value}`).join(" · ") || "no stored facts yet",
+      ref: `user:${ticket.reporterEmail}`,
     });
   }
-  for (const m of state.memories) {
+  for (const e of state.memory.episodes) {
     citations.push({
-      source: "hyperspell",
-      title: m.title,
-      snippet: m.summary.slice(0, 220),
-      ref: `memory:${m.resourceId}`,
+      source: "memory",
+      title: `Past ticket ${e.ticketId}`,
+      snippet: e.summary.slice(0, 220),
+      ref: `episode:${e.ticketId}`,
     });
   }
 
@@ -233,7 +234,7 @@ async function persistPlan(state: TState) {
   if (updatedForSlack) {
     const firstName = firstNameOf(ticket.reporter);
     const planLines = state.classifiedPlan.map((s, i) => `   ${i + 1}. ${humanStepLabel(s)}`).join("\n");
-    await postSlackUpdate(
+    await postUpdate(
       updatedForSlack,
       `🔎 Hi ${firstName} — here's my plan:\n${planLines}\n\n_Ticket ${state.ticketId} · saved for future reference_`,
     );
@@ -241,60 +242,44 @@ async function persistPlan(state: TState) {
   return {};
 }
 
-// Shared step dispatcher — identical logic to the old executePlan's per-step try/catch.
+// Shared step dispatcher: one branch per kind, no vendor branding.
 async function executeStepAndPersist(ticket: Ticket, step: PlanStep): Promise<{ ok: boolean }> {
   await updateStep(ticket.id, step.id, { status: "running", startedAt: Date.now() });
-  if (step.kind !== "slack_reply") {
-    await postSlackUpdate(ticket, `🔧 ${humanStepLabel(step)}…`);
+  if (step.kind !== "reply") {
+    await postUpdate(ticket, `\u{1F527} ${humanStepLabel(step)}\u2026`);
   }
 
   let ok = true;
-  let simulated = false;
   let log: string[] = [];
 
   try {
-    if (step.kind === "insforge") {
-      const r = await insforgeInvoke(step, ticket.reporterEmail);
+    if (step.kind === "backend") {
+      const r = await directoryInvoke(step, ticket.reporterEmail);
       ok = r.ok;
-      simulated = r.simulated ?? false;
       log = r.log;
-    } else if (step.kind === "aside") {
-      const r = await asideExecute(step, ticket.reporterEmail);
-      ok = r.ok;
-      simulated = r.simulated ?? false;
-      log = r.log;
-    } else if (step.kind === "tensorlake") {
-      if (isAgentJobCapability(step.capability)) {
-        // Capabilities that belong to the user's machine are decided by the
-        // machine. No parallel narration from the cloud — the device's
-        // before/after evidence is the only verdict.
-        const job = await enqueueAgentJob(ticket, step);
-        log.push(`[Agent Queue] Job ${job.id} dispatched to the device agent`);
-        log.push(`[Agent Queue] ${job.allowlistedCommand}`);
+    } else if (step.kind === "device") {
+      // Work on the user's machine is decided by the machine. No parallel
+      // narration from the cloud — the before/after evidence is the verdict.
+      const job = await enqueueAgentJob(ticket, step);
+      log.push(`[Agent Queue] Job ${job.id} dispatched to the device agent`);
+      log.push(`[Agent Queue] ${job.allowlistedCommand}`);
 
-        const finished = await waitForJob(job.id, AGENT_JOB_TIMEOUT_MS);
-        if (!finished) {
-          ok = false;
-          log.push(
-            `[Local Agent] No result within ${AGENT_JOB_TIMEOUT_MS / 1000}s — the device agent is offline or busy. ` +
-              `Nothing was done on the user's machine.`,
-          );
-        } else {
-          log = [...log, ...formatProofLines(finished)];
-          ok = isRealSuccess(finished.status);
-          simulated = finished.status === "simulated";
-          if (finished.status === "no_effect") {
-            log.push(`[Local Agent] Step marked failed: the fix ran but the device did not change.`);
-          }
-        }
+      const finished = await waitForJob(job.id, AGENT_JOB_TIMEOUT_MS);
+      if (!finished) {
+        ok = false;
+        log.push(
+          `[Local Agent] No result within ${AGENT_JOB_TIMEOUT_MS / 1000}s — the device agent is offline or busy. ` +
+            `Nothing was done on the user's machine.`,
+        );
       } else {
-        const r = await tensorlakeRun(step, ticket.reporterEmail);
-        ok = r.ok;
-        simulated = r.simulated ?? false;
-        log = [...log, ...r.log];
+        log = [...log, ...formatProofLines(finished)];
+        ok = isRealSuccess(finished.status);
+        if (finished.status === "no_effect") {
+          log.push(`[Local Agent] Step marked failed: the fix ran but the device did not change.`);
+        }
       }
-    } else if (step.kind === "slack_reply") {
-      log = [`[Slack] Waiting for any pending local-agent jobs before composing reply`];
+    } else if (step.kind === "reply") {
+      log = [`[Reply] Waiting for any pending device jobs before composing reply`];
       await waitForAgentJobs(ticket.id, 20_000);
 
       const fresh = await getTicket(ticket.id);
@@ -302,11 +287,11 @@ async function executeStepAndPersist(ticket: Ticket, step: PlanStep): Promise<{ 
       const allJobs = await listAgentJobs(ticket.workspaceId);
       const jobsForTicket = allJobs.filter((j) => j.ticketId === ticket.id);
 
-      const evidence = buildSlackReplyEvidence(stepsBeforeReply, jobsForTicket);
-      log.push(`[Slack] Synthesizing reply from ${evidence.length} executed step(s)`);
+      const evidence = buildReplyEvidence(stepsBeforeReply, jobsForTicket);
+      log.push(`[Reply] Synthesizing reply from ${evidence.length} executed step(s)`);
 
       const firstName = firstNameOf(ticket.reporter);
-      const synthesized = await synthesizeSlackReply({
+      const synthesized = await synthesizeReply({
         reporterFirstName: firstName,
         subject: ticket.subject,
         body: ticket.body,
@@ -315,24 +300,12 @@ async function executeStepAndPersist(ticket: Ticket, step: PlanStep): Promise<{ 
 
       const replyText =
         synthesized ?? ticket.draftResponse ?? `Hi ${firstName} — your IT ticket ${ticket.id} has been updated.`;
-      if (synthesized) log.push(`[Slack] Reply synthesized from real step results`);
-      else log.push(`[Slack] Reply synthesizer unavailable — falling back to initial draft`);
-
-      const ws = await getWorkspace(ticket.workspaceId);
-      const slackContext = slackContextFromTicket(ticket);
-      if (ws?.slackAccessToken && slackContext.channel) {
-        const msg = await postSlackMessage(
-          ws.slackAccessToken,
-          slackContext.channel,
-          replyText,
-          slackContext.threadTs,
-        );
-        if (msg.ok) log.push(`[Slack] Message delivered to ${slackContext.channel}`);
-        else log.push(`[Slack] API delivery failed: ${msg.error ?? "unknown_error"}`);
-      } else {
-        log.push(`[Slack] Message delivered`);
-      }
-      await new Promise((r) => setTimeout(r, 300));
+      log.push(
+        synthesized
+          ? `[Reply] Composed from real step results`
+          : `[Reply] Synthesizer unavailable — falling back to initial draft`,
+      );
+      await postUpdate(ticket, replyText);
     }
   } catch (err) {
     ok = false;
@@ -342,7 +315,6 @@ async function executeStepAndPersist(ticket: Ticket, step: PlanStep): Promise<{ 
   await updateStep(ticket.id, step.id, {
     status: ok ? "succeeded" : "failed",
     log,
-    simulated: simulated || undefined,
     finishedAt: Date.now(),
   });
   return { ok };
@@ -401,7 +373,7 @@ async function markAwaitingApproval(state: TState) {
       : "graph paused — waiting for human decision",
   );
   if (step) {
-    await postSlackUpdate(ticket, `⏸ Waiting on IT approval for: ${humanStepLabel(step)}`);
+    await postUpdate(ticket, `⏸ Waiting on IT approval for: ${humanStepLabel(step)}`);
   }
   return {};
 }
@@ -456,7 +428,7 @@ async function verifyOutcome(state: TState) {
   const fresh = await getTicket(state.ticketId);
   const allJobs = await listAgentJobs(ticket.workspaceId);
   const jobsForTicket = allJobs.filter((j) => j.ticketId === state.ticketId);
-  const evidence = buildSlackReplyEvidence(fresh?.plan ?? [], jobsForTicket);
+  const evidence = buildReplyEvidence(fresh?.plan ?? [], jobsForTicket);
 
   const verdict = await verifyAndReplan({
     subject: ticket.subject,
@@ -465,11 +437,9 @@ async function verifyOutcome(state: TState) {
     maxAttempts: MAX_ATTEMPTS,
     evidence,
     priorFindings: state.findings,
-    userContext: state.userContext
-      ? `${state.userContext.name} · ${state.userContext.team} team · recent apps: ${state.userContext.recentApps.join(", ")}`
-      : undefined,
+    userContext: state.profile ?? undefined,
     deviceContext: state.deviceContext ?? undefined,
-    memories: state.memories.map((m) => ({ title: m.title, summary: m.summary })),
+    memory: state.memory,
   }).catch(() => null);
 
   if (!verdict) {
@@ -533,7 +503,7 @@ async function replan(state: TState) {
   );
 
   const firstName = firstNameOf(ticket.reporter);
-  await postSlackUpdate(
+  await postUpdate(
     ticket,
     `🔁 Hi ${firstName} — first approach didn't resolve it. Trying attempt ${nextAttempt}: ${classified
       .map((s) => humanStepLabel(s))
@@ -565,34 +535,63 @@ async function finalizeExecution(state: TState) {
     `${state.attempt} attempt(s) · asking the user to confirm the fix worked`,
   );
 
-  if (finishedTicket.channel === "slack") {
-    const firstName = firstNameOf(finishedTicket.reporter);
-    const hadSlackReplyStep = finishedTicket.plan.some((s) => s.kind === "slack_reply");
+  await updateUserMemory(state, finishedTicket, summary);
 
-    if (!hadSlackReplyStep) {
+  {
+    const firstName = preferredName(state.memory, firstNameOf(finishedTicket.reporter));
+    const hadReplyStep = finishedTicket.plan.some((s) => s.kind === "reply");
+
+    if (!hadReplyStep) {
       await waitForAgentJobs(state.ticketId, 20_000);
       const refreshed = await getTicket(state.ticketId);
       const stepsForSynth = refreshed?.plan ?? [];
       const allJobs = await listAgentJobs(finishedTicket.workspaceId);
       const jobsForTicket = allJobs.filter((j) => j.ticketId === state.ticketId);
-      const evidence = buildSlackReplyEvidence(stepsForSynth, jobsForTicket);
-      const synthesized = await synthesizeSlackReply({
+      const evidence = buildReplyEvidence(stepsForSynth, jobsForTicket);
+      const synthesized = await synthesizeReply({
         reporterFirstName: firstName,
         subject: finishedTicket.subject,
         body: finishedTicket.body,
         evidence,
       }).catch(() => null);
       if (synthesized) {
-        await postSlackUpdate(finishedTicket, synthesized);
+        await postUpdate(finishedTicket, synthesized);
       }
     }
 
-    await postSlackUpdate(
+    await postUpdate(
       finishedTicket,
       `Is the issue resolved? Reply *yes* or *no* in this thread (ticket ${state.ticketId}).`,
     );
   }
   return {};
+}
+
+// Learn from the ticket we just handled: durable facts about the person, plus
+// one line of history. Best-effort — a memory write must never fail a ticket.
+async function updateUserMemory(state: TState, ticket: Ticket, outcome: string): Promise<void> {
+  const t0 = Date.now();
+  const extracted = await extractUserMemory({
+    subject: ticket.subject,
+    body: ticket.body,
+    outcome,
+    knownFacts: state.memory.facts,
+  }).catch(() => null);
+  if (!extracted) return;
+
+  for (const fact of extracted.facts) {
+    await rememberUserFact(ticket.workspaceId, ticket.reporterEmail, fact.key, fact.value);
+  }
+  if (extracted.episode) {
+    await rememberUserEpisode(ticket.workspaceId, ticket.reporterEmail, ticket.id, extracted.episode);
+  }
+  appendTrace(
+    state.ticketId,
+    "updateMemory",
+    "completed",
+    `remembered ${extracted.facts.length} fact(s)` + (extracted.episode ? " + 1 episode" : ""),
+    Date.now() - t0,
+  );
 }
 
 declare global {
@@ -604,8 +603,8 @@ declare global {
 
 function buildGraph() {
   return new StateGraph(TicketGraphState)
-    .addNode("gatherUserContext", gatherUserContext)
-    .addNode("gatherMemories", gatherMemories)
+    .addNode("gatherProfile", gatherProfile)
+    .addNode("gatherMemory", gatherMemory)
     .addNode("gatherDeviceContext", gatherDeviceContext)
     .addNode("draftPlan", draftPlanNode)
     .addNode("classifyRisk", classifyRisk)
@@ -616,13 +615,13 @@ function buildGraph() {
     .addNode("markAwaitingApproval", markAwaitingApproval)
     .addNode("awaitApproval", awaitApproval, { ends: ["runNextStep"] })
     .addNode("finalizeExecution", finalizeExecution)
-    .addEdge(START, "gatherUserContext")
-    .addEdge(START, "gatherMemories")
+    .addEdge(START, "gatherProfile")
+    .addEdge(START, "gatherMemory")
     .addEdge(START, "gatherDeviceContext")
-    .addEdge("gatherMemories", "draftPlan")
+    .addEdge("gatherMemory", "draftPlan")
     // Barrier join: classifyRisk must run exactly once, after ALL three
     // branches. Separate addEdge calls would fire it per-predecessor.
-    .addEdge(["gatherUserContext", "gatherDeviceContext", "draftPlan"], "classifyRisk")
+    .addEdge(["gatherProfile", "gatherDeviceContext", "draftPlan"], "classifyRisk")
     .addEdge("classifyRisk", "persistPlan")
     .addEdge("persistPlan", "runNextStep")
     .addEdge("markAwaitingApproval", "awaitApproval")

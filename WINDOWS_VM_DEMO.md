@@ -8,11 +8,27 @@ This closes the gap noted in [README.md](README.md) ("Cross-platform local agent
 
 | Capability | Real on Windows? | Notes |
 |---|---|---|
-| `fix.restart_app` | **Yes** | `Stop-Process` + `Start-Process` via PowerShell |
-| `fix.clear_app_cache` | **Yes** | Deletes `%LOCALAPPDATA%\<app>\Cache` via PowerShell |
+| `fix.restart_app` | **Yes** | `Stop-Process` + `Start-Process` via PowerShell. Proven by a pid change between the before and after probes. |
+| `fix.clear_app_cache` | **Yes** | Deletes `%LOCALAPPDATA%\<app>\Cache`. Proven by file count and size dropping to zero. |
 | `diag.system_info` | **Yes** | `Get-CimInstance` (OS, RAM, CPU, uptime) via PowerShell |
-| `fix.toggle_wifi` | **Not recommended for a VM** | Toggles the adapter named `"Wi-Fi"` via `netsh`. VMs almost always present a virtual **Ethernet** adapter to the guest, not a Wi-Fi radio — this capability will typically fail inside a VM. Demo `restart_app` or `clear_app_cache` instead; save `toggle_wifi` for when the agent runs on a real laptop. |
-| `diag.network_probe`, `sandbox.read_auth_logs`, `sandbox.read_kerberos_logs`, `collect_app_logs` | No — canned output | These were already hardcoded fake log lines before this change (see `runAllowlisted` in `scripts/local-agent.mjs`), on every OS, not just Windows. Not part of this fix; flagging so the demo doesn't imply otherwise. |
+| `diag.app_status`, `diag.app_logs` | **Yes** | `Get-Process` / `Get-WinEvent` against the real Application log |
+| `fix.toggle_wifi` | **Yes** | Cycles the machine's *primary physical adapter* (whatever `Get-NetAdapter -Physical` reports), so it works against a VM's virtual Ethernet — it no longer hardcodes an adapter named `"Wi-Fi"`. Needs an elevated agent. The guest loses its link for a few seconds; the agent journals locally and uploads once the adapter is back. |
+| VPN diagnostics, auth-log and Kerberos-log collection | **Deleted** | These returned canned log lines as `ok: true`. The handlers and the capabilities that referenced them are gone — the planner can no longer choose them, so no ticket can claim that work happened. |
+
+## Proof-of-effect: how you know something really happened
+
+Every device job is **probe → act → probe**. The agent reads the machine's state before the action, runs the commands, reads the state again, and diffs the two. That diff is the only thing allowed to count as success:
+
+- **before/after differ** → job `succeeded`, and the ticket shows the change (`pid 8123 → 9471`).
+- **before/after identical** → job `no_effect`. The step is marked failed and the agent retries or escalates. A fix that changed nothing can no longer be reported as a fix.
+
+Every envelope — argv, exit codes, stdout/stderr, both probes, the diff — is appended to a journal on the machine itself **before** it is uploaded:
+
+- Windows: `C:\ProgramData\BoltIt\journal\YYYY-MM-DD.jsonl`
+- macOS/Linux: `~/.bolt-it/journal/YYYY-MM-DD.jsonl`
+- override with `LOCAL_AGENT_JOURNAL_DIR`
+
+One JSON object per line. It survives the network dropping, the server being wiped, and the demo ending — which is what makes it useful for studying runs afterwards.
 
 ## 1. Install a VM app on your Mac
 
@@ -50,7 +66,7 @@ winget install OpenJS.NodeJS.LTS
 
 ## 5. Copy the agent script into the VM
 
-`scripts/local-agent.mjs` has zero dependencies beyond Node's stdlib — you only need that one file, not the whole repo. Easiest transfer: UTM's shared folder (enable in VM settings → Sharing), or just paste the file contents into a new `.mjs` file via Notepad inside the VM.
+`scripts/local-agent.mjs` has zero dependencies beyond Node's stdlib — you only need that one file, not the whole repo. Easiest transfer: UTM's shared folder (enable in VM settings → Sharing), or just paste the file contents into a new `.mjs` file via Notepad inside the VM. There is no self-update: re-copy the file when it changes.
 
 ## 6. Run the agent inside the VM
 
@@ -62,20 +78,20 @@ node local-agent.mjs
 
 The token must match `.env.local`'s `LOCAL_AGENT_TOKEN` on the Mac (already set there) — it's the shared bearer secret the `/api/agent/*` routes check. Do not commit it or paste it into chat/screen share.
 
-You should see the same `LOCAL SANDBOX AGENT — STARTED` banner as the Mac version, now reporting a Windows hostname/OS in the heartbeat, and the console's evidence panel / `local agent: offline` indicator should flip to connected within ~10s (`CONNECTED_WINDOW_MS` in `heartbeat/route.ts`).
+You should see the same `LOCAL SANDBOX AGENT — STARTED` banner as the Mac version, now reporting a Windows hostname/OS in the heartbeat, and the console's `local agent: offline` indicator should flip to connected within ~10s (`CONNECTED_WINDOW_MS` in `heartbeat/route.ts`).
 
 ## 7. Rehearsed demo script
 
 1. Inside the Windows VM, open **Notepad** (or **Calculator**) and leave it running — this is the "broken" app.
-2. On the Mac, in the console (or Slack demo tab), file a ticket: *"Notepad keeps freezing on my machine, can you restart it?"*
-3. Watch the plan draft: `fix.restart_app` should classify as `low`/`auto` (it's not on either policy allowlist by default unless already precedent-promoted, so it may go through the judge — expect `medium` or an approval step first time; approve if prompted).
+2. On the Mac, in the Chat tab, file a ticket: *"Notepad keeps freezing on my machine, can you restart it?"*
+3. Watch the plan draft: `fix.restart_app` classifies as `medium` risk / auto in [policy.ts](src/lib/policy.ts) — it runs without a click. `fix.toggle_wifi` and the `ad.*` writes are `high` and stop at the approval gate.
 4. Watch the Windows VM screen over the share: Notepad actually closes and reopens, driven by the agent job the VM polled and executed.
-5. Optional: run it two more times to build precedent (see `PROMOTION_THRESHOLD` in `governance.ts`) — the third run shouldn't need a click.
+5. Check the step log in the console: `[Proof] before: … / after: … / EFFECT: pid X → Y`, and the journal path on the VM.
 
 This is the "no sleight of hand" moment: the fix is visibly happening on a real, separate machine on screen, not a canned log line.
 
 ## Known limitations (accepted for a short build window)
 
 - Screen-sharing a VM window inside a video call adds a layer of lag/quality loss — test this specific combination once before presenting, not for the first time live.
-- `toggle_wifi` won't work against a VM's virtual NIC (see table above).
+- `toggle_wifi` needs the agent running elevated (Administrator) to disable/enable an adapter.
 - The agent's job poll only fetches jobs across all workspaces (no `workspaceId` filter passed from `local-agent.mjs`) — fine for a single-demo-machine setup, not multi-tenant safe. Pre-existing behavior, not introduced by this change.

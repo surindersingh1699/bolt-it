@@ -267,7 +267,7 @@ const SEED_GROUPS: Omit<ADGroup, "members" | "workspaceId">[] = [
 export async function ensureSeeded(): Promise<void> {
   if (seeding) return seeding;
   seeding = (async () => {
-    await ensureWorkspace(ACME_WORKSPACE_ID, "Acme Corp", false);
+    await ensureWorkspace(ACME_WORKSPACE_ID, "Acme Corp");
 
     const existingRunbooks = await listRunbooks(ACME_WORKSPACE_ID);
     if (existingRunbooks.length === 0) {

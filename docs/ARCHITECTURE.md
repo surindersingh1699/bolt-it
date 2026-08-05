@@ -34,8 +34,8 @@ The two things that make this more than a script: the approval gate is **structu
 ## 3. The graph
 
 ```
-            ┌─ gatherUserContext   (Hyperspell profile) ─┐
-START ──────┼─ gatherMemories      (Hyperspell search) ──┤   barrier join
+            ┌─ gatherProfile   (directory record) ───────┐
+START ──────┼─ gatherMemory    (facts + past tickets) ───┤   barrier join
             └─ gatherDeviceContext (fleet + heartbeat) ──┤
                         └─► draftPlan (LLM) ─────────────┘
                                     │
@@ -56,7 +56,7 @@ START ──────┼─ gatherMemories      (Hyperspell search) ──┤
 Three details that are easy to get wrong when editing:
 
 - **The barrier join.** `classifyRisk` is wired with a single `addEdge([...three predecessors], "classifyRisk")`. Three separate `addEdge` calls would fire it three times.
-- **`markAwaitingApproval` is separate from `awaitApproval` on purpose.** On resume, LangGraph re-runs the whole node function from the top. Anything placed before `interrupt()` fires twice — so the status flip and the Slack ping live in their own node.
+- **`markAwaitingApproval` is separate from `awaitApproval` on purpose.** On resume, LangGraph re-runs the whole node function from the top. Anything placed before `interrupt()` fires twice — so the status flip and the chat ping live in their own node.
 - **Resume never restarts.** `Command({resume})` continues from the paused step.
 
 ---
@@ -92,12 +92,10 @@ All in [src/lib/integrations/](../src/lib/integrations/). Every execution adapte
 
 | Adapter | Real backend | Notes |
 |---|---|---|
-| [ai-gateway.ts](../src/lib/integrations/ai-gateway.ts) | Yes | Drafting, risk judge, verifier, Slack reply synthesis, conversational replies |
-| [hyperspell.ts](../src/lib/integrations/hyperspell.ts) | Yes | Memory query + write-back. Always invoked, never gated |
-| [insforge.ts](../src/lib/integrations/insforge.ts) | Partial | AD reads/writes real against seeded state; Okta/MDM simulated |
+| [ai-gateway.ts](../src/lib/integrations/ai-gateway.ts) | Yes | Drafting, verifier, reply synthesis, conversational replies, memory extraction |
+| [memory.ts](../src/lib/memory.ts) | Yes | Per-user facts + episodes in the `user_memory` table |
+| [directory.ts](../src/lib/integrations/directory.ts) | Yes | AD reads/writes against seeded state. Every branch touches real rows |
 | [sandbox.ts](../src/lib/integrations/sandbox.ts) | Gated | Read-only log inspection with secret redaction |
-| [tensorlake.ts](../src/lib/integrations/tensorlake.ts) | No | Delegates to sandbox; routes device capabilities to the agent queue |
-| [aside.ts](../src/lib/integrations/aside.ts) | No | Browser action in the user's own session |
 
 Anything without a real backend appends `· simulated` to its log lines. **Output labeled simulated can never justify a "resolved" verdict** — the verifier enforces this.
 
@@ -109,7 +107,7 @@ The drafting contract itself lives in [draft.ts](../src/lib/integrations/draft.t
 
 [local-agent.mjs](../scripts/local-agent.mjs) is a zero-dependency Node script run on the target machine. It polls `/api/agent/jobs`, claims one, runs a command from its own internal allowlist, and posts the result back. Real capabilities: restart app, clear app cache (including Edge/Chrome profile paths), app status, app event logs, system info, Wi-Fi toggle. macOS and Windows.
 
-`public/local-agent.mjs` is a byte-identical copy served over HTTP so a VM can self-update. It is gitignored, so the two can silently drift — worth making a build step.
+The agent is copied onto the target machine by hand. There is no HTTP-served copy and no self-update: an unsigned update channel that also served a token-bearing `setup.ps1` was not worth the convenience.
 
 Auth is a single shared bearer token (`LOCAL_AGENT_TOKEN`). One agent at a time; jobs are not routed per-device.
 
@@ -119,7 +117,7 @@ Auth is a single shared bearer token (`LOCAL_AGENT_TOKEN`). One agent at a time;
 
 1. Status transitions happen only in the graph and the ticket Server Actions.
 2. No path reaches a high-risk step without the `interrupt()`.
-3. Action `kind` is one of `insforge | aside | tensorlake | slack_reply`. No general-purpose tool.
+3. Action `kind` is one of `device | backend | reply`. No general-purpose tool.
 4. Adapters return failures, never throw.
 5. Components never write to the store. Component → Server Action → `data.ts`.
 6. Anything simulated says so, in the log line the user sees.

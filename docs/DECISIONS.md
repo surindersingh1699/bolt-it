@@ -56,3 +56,44 @@ Not a fresh rewrite. `python-rebuild` already carries FastAPI + LangGraph + Post
 **Cost.** `python-rebuild` is at main's M1-era feature level. The port is carrying five things across: per-step `interrupt()`, the verify/replan loop, governance auto-promotion, the device agent + fleet, and Slack/Hyperspell.
 
 **Reverses if.** The feature gap turns out to be cheaper to close on `main` than to port.
+
+## 2026-08-05 — Device work is judged by the device, not by the agent finishing
+
+Every device job is probe → act → probe. The before/after diff is the verdict:
+identical state on a fix is recorded `no_effect`, fails the step, and can never
+be reported to the user as resolved. The full envelope (argv, exit codes,
+stdout/stderr, both probes, the diff) is appended to a journal on the machine
+itself before it is uploaded, so the trail survives the network and the server.
+
+Reversing this means going back to trusting an agent's prose about its own work.
+
+## 2026-08-05 — Deleted every adapter that had no real backend
+
+Aside (browser actions), Tensorlake (sandbox), the Vercel-sandbox log reader,
+and the Okta / MDM / identity.verify branches of the InsForge adapter were all
+narration: sleeps plus log lines claiming work that never happened. They are
+gone, along with the capabilities that referenced them. `ActionKind` is now
+`device | backend | reply`, and the planner's capability list contains only
+capabilities that are really implemented — so a fake plan cannot be drafted.
+
+## 2026-08-05 — Slack OAuth and the demo-workspace flow removed
+
+The in-app conversation thread (`SlackChat` + `chat.ts`) stays; the real Slack
+install, events, callback and disconnect routes are gone, as are the demo
+workspace minting/cookie/cron, the signup page, and the agent self-update +
+`public/setup.ps1` (which served a file with the agent token embedded).
+
+## 2026-08-05 — Hyperspell replaced by a `user_memory` table
+
+Hyperspell's user context was a hardcoded mock map, and its memory search was
+an external dependency for data we already own. Memory is now one small table:
+keyed facts (nickname, office, timezone, device, …) upserted in place, plus one
+episode per ticket. Written by an LLM extractor at finalize, read at draft.
+LangGraph's own store was considered and rejected: it needs an embeddings model
+for search and is lost on restart, which would have meant two memory systems.
+
+## 2026-08-05 — Risk classification is an allowlist, no LLM judge
+
+With ~10 real capabilities the judge was a moving part that could be wrong,
+unavailable, or prompt-injected. `policy.ts` is now a lookup across low/medium/
+high sets; anything unlisted is high risk and needs a human.

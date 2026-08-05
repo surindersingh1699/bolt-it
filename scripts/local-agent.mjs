@@ -2,7 +2,6 @@
 import os from "node:os";
 import fs from "node:fs";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
 import { spawn } from "node:child_process";
 
 const appUrl = process.env.IT_SUPPORT_APP_URL || "http://localhost:3000";
@@ -21,32 +20,6 @@ const AGENT_VERSION = "local-agent/0.6.0";
 const IS_MAC = os.platform() === "darwin";
 const IS_WINDOWS = os.platform() === "win32";
 
-// ---- self-update -----------------------------------------------------------
-// Every SELF_UPDATE_MS, fetch our own source from the app server; if it
-// differs from what's on disk, overwrite and exit(0). The installer's wrapper
-// loop (or a supervisor) relaunches us, now running the new code. Dev-network
-// convenience: updates are trusted because they come from the same private
-// server that hands out jobs — a production agent would verify a signature.
-const SELF_UPDATE_MS = Number(process.env.LOCAL_AGENT_UPDATE_MS || 5 * 60 * 1000);
-const SELF_PATH = fileURLToPath(import.meta.url);
-
-async function checkForUpdate() {
-  try {
-    const res = await fetch(`${appUrl}/local-agent.mjs`, { cache: "no-store" });
-    if (!res.ok) return;
-    const remote = await res.text();
-    if (!remote.includes("LOCAL SANDBOX AGENT")) return; // sanity: don't overwrite with an error page
-    const local = fs.readFileSync(SELF_PATH, "utf8");
-    if (remote !== local) {
-      console.log("[local-agent] update available — swapping code and restarting");
-      fs.writeFileSync(SELF_PATH, remote);
-      process.exit(0);
-    }
-  } catch {
-    // offline or server restarting — try again next cycle
-  }
-}
-
 const ANSI = {
   reset: "\x1b[0m",
   bold: "\x1b[1m",
@@ -64,10 +37,6 @@ let currentJob = null;
 
 function humanLabel(command) {
   const c = String(command || "");
-  if (c.startsWith("collect_vpn_diagnostics ")) return "Inspecting VPN client logs";
-  if (c.startsWith("collect_auth_logs ")) return "Reading authentication logs";
-  if (c.startsWith("collect_windows_event_logs ")) return "Checking Kerberos ticket status";
-  if (c.startsWith("collect_app_logs ")) return "Reviewing application crash logs";
   if (c.startsWith("restart_app ")) {
     const m = c.match(/--app "([^"]+)"/);
     return `Restarting ${m?.[1] || "app"}`;
@@ -350,6 +319,10 @@ async function actClearAppCache(ctx, { app }) {
 // Cycling an adapter returns it to its original state, so before/after alone
 // would look like nothing happened. The mid probe — taken while the adapter is
 // down — is what proves the link really went away and came back.
+//
+// On a VM this cuts the agent's own link to the server for a few seconds. That
+// is fine: the journal is written locally first, and the upload happens after
+// the adapter is back up.
 async function actToggleWifi(ctx, _args, helpers) {
   if (IS_WINDOWS) {
     const adapter = ctx.probes[0]?.facts?.adapter;
@@ -506,8 +479,6 @@ async function collectAppEventLogs(ctx, { app, limit }) {
 // ---- handler table ---------------------------------------------------------
 // `expectsChange: true` means the job is a fix: if the before/after probes
 // match, the server records `no_effect` instead of success.
-// `simulated` handlers are ones this agent genuinely cannot perform — they
-// declare that instead of returning canned text dressed up as a measurement.
 
 const HANDLERS = {
   restart_app: {
@@ -535,26 +506,6 @@ const HANDLERS = {
   },
   app_event_logs: { expectsChange: false, collect: collectAppEventLogs, requires: ["app"] },
 
-  collect_vpn_diagnostics: {
-    simulated: true,
-    sample: [
-      "vpn-client.log: AUTH_FAILED after SAML/password change",
-      "vpn-profile: gateway=us-west-1.old.acme.test profile_age_days=93",
-      "probe: TLS handshake failed certificate_unknown",
-    ],
-  },
-  collect_auth_logs: {
-    simulated: true,
-    sample: ["auth.log: USER_LOGIN failed x5 from known device", "auth.log: ACCOUNT_LOCKED threshold=5"],
-  },
-  collect_windows_event_logs: {
-    simulated: true,
-    sample: ["Windows Event: Kerberos ticket cache empty", "KDC: PREAUTH_FAILED then ticket expired"],
-  },
-  collect_app_logs: {
-    simulated: true,
-    sample: ["app log summary: crash signature found in recent application log"],
-  },
 };
 
 function parseCommand(command) {
@@ -634,21 +585,6 @@ async function executeJob(job) {
 
   for (const required of handler.requires ?? []) {
     if (!args[required]) return finish({ ok: false, error: `missing --${required} argument` });
-  }
-
-  // Commands this agent cannot really perform say so, loudly, instead of
-  // returning sample text that reads like a measurement.
-  if (handler.simulated) {
-    envelope.simulated = true;
-    envelope.effect.summary = "no command was executed on this device";
-    return finish({
-      ok: true,
-      output: [
-        `[SIMULATED] "${name}" is not implemented on this agent — nothing ran on ${AGENT_HOSTNAME}.`,
-        "The lines below are sample text kept for shape only. They are NOT from this machine:",
-        ...handler.sample.map((l) => `  ${l}`),
-      ].join("\n"),
-    });
   }
 
   const ctx = { commands: envelope.commands, probes: envelope.probes };
@@ -835,7 +771,6 @@ async function handleJob(job) {
 
   const ms = Date.now() - startedAt;
   const noEffect = result.ok !== false && envelope.expectsChange && !envelope.effect.changed;
-  const simulated = Boolean(envelope.simulated);
 
   try {
     await fetch(`${appUrl}/api/agent/jobs/${job.id}/complete`, {
@@ -862,9 +797,7 @@ async function handleJob(job) {
 
   if (result.ok === false) {
     bigBanner(`✗  ${label.toUpperCase()} — failed in ${ms}ms — ${result.error ?? "unknown"}`, ANSI.bgRed);
-  } else if (simulated) {
-    bigBanner(`⚠  ${label.toUpperCase()} — SIMULATED, nothing ran on this device`, ANSI.bgYellow);
-  } else if (noEffect) {
+    } else if (noEffect) {
     bigBanner(`⚠  ${label.toUpperCase()} — NO EFFECT, device state unchanged`, ANSI.bgYellow);
   } else {
     bigBanner(`✓  ${label.toUpperCase()} — ${envelope.effect.summary} — ${ms}ms`, ANSI.bgGreen);
@@ -875,9 +808,8 @@ async function handleJob(job) {
     AGENT_HOSTNAME,
     `${label} (${ms}ms)`,
   );
-  chime(result.ok !== false && !noEffect && !simulated ? "Hero" : "Basso");
+  chime(result.ok !== false && !noEffect ? "Hero" : "Basso");
 }
 
 await poll();
 setInterval(poll, intervalMs);
-setInterval(checkForUpdate, SELF_UPDATE_MS);

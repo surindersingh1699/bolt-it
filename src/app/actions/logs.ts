@@ -1,7 +1,7 @@
 "use server";
 
 import { insertRunbook } from "@/lib/data";
-import { addMemory } from "@/lib/integrations/hyperspell";
+import { rememberUserEpisode } from "@/lib/data";
 import { getCurrentWorkspaceId } from "@/lib/workspace";
 import { createTicket } from "./tickets";
 
@@ -59,20 +59,15 @@ export async function analyzeLogsAction(formData: FormData): Promise<LogAnalysis
     `Ticket: ${ticketId}`,
   ].join("\n");
 
+  const workspaceId = (await getCurrentWorkspaceId()) ?? "acme.test";
   let memoryId: string | undefined;
   if (saveScope === "person" || saveScope === "both") {
-    memoryId =
-      (await addMemory(
-        memoryText,
-        `IT support context: ${analysis.title}`,
-        "it-support-log-analyzer",
-        reporterEmail,
-      )) ?? undefined;
+    await rememberUserEpisode(workspaceId, reporterEmail, ticketId, memoryText.slice(0, 300));
+    memoryId = `episode:${ticketId}`;
   }
 
   let runbookId: string | undefined;
   if (saveScope === "company" || saveScope === "both") {
-    const workspaceId = (await getCurrentWorkspaceId()) ?? "acme.test";
     runbookId = `rb-log-${ticketId.toLowerCase()}`;
     const now = Date.now();
     await insertRunbook({

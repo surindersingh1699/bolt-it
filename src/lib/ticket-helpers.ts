@@ -1,9 +1,8 @@
-import { getAgentJob, getTicket, getWorkspace, listAgentJobs } from "@/lib/data";
+import { getAgentJob, getTicket, listAgentJobs } from "@/lib/data";
 import { AgentJob, PlanStep, Ticket } from "@/lib/types";
 import { humanLabelFor } from "@/lib/agent-jobs";
 import { effectSummaryFor } from "@/lib/evidence";
-import { postSlackMessage } from "@/lib/slack";
-import { SlackReplyEvidence } from "@/lib/integrations/ai-gateway";
+import { ReplyEvidence } from "@/lib/integrations/ai-gateway";
 import { appendChat } from "@/lib/chat";
 
 /** Address the reporter the way a colleague would — "Hi Dan", not "Hi Dan O'Connor". */
@@ -11,22 +10,16 @@ export function firstNameOf(reporter: string): string {
   return reporter.split(/\s+/)[0];
 }
 
-export async function postSlackUpdate(ticket: Ticket, text: string): Promise<void> {
-  // Always record in the in-app conversation transcript (the demo Slack tab
-  // shows the full thread even with no real Slack wired).
+/** Post to the ticket's conversation thread. */
+export async function postUpdate(ticket: Ticket, text: string): Promise<void> {
   appendChat(ticket.id, text);
-  const ws = await getWorkspace(ticket.workspaceId);
-  const ctx = slackContextFromTicket(ticket);
-  if (!ws?.slackAccessToken || !ctx.channel) return;
-  await postSlackMessage(ws.slackAccessToken, ctx.channel, text, ctx.threadTs).catch(() => undefined);
 }
 
 export function humanStepLabel(step: PlanStep): string {
   if (step.description) return step.description;
-  if (step.kind === "tensorlake") return humanLabelFor(step.capability);
-  if (step.kind === "insforge") return "Running secure backend action";
-  if (step.kind === "aside") return "Running action in your browser session";
-  if (step.kind === "slack_reply") return "Replying with the resolution";
+  if (step.kind === "device") return humanLabelFor(step.capability);
+  if (step.kind === "backend") return "Updating the user's account";
+  if (step.kind === "reply") return "Replying with the resolution";
   return "Working";
 }
 
@@ -46,21 +39,12 @@ export function substituteParams(
   return out;
 }
 
-export function slackContextFromTicket(ticket: Ticket): { channel?: string; threadTs?: string } {
-  const channel = ticket.body.match(/Slack channel:\s*([A-Z0-9]+)/i)?.[1];
-  const threadTs = ticket.body.match(/Slack thread:\s*([0-9.]+)/i)?.[1];
-  return { channel, threadTs };
-}
-
-export function buildSlackReplyEvidence(
-  steps: PlanStep[],
-  jobs: AgentJob[],
-): SlackReplyEvidence[] {
+export function buildReplyEvidence(steps: PlanStep[], jobs: AgentJob[]): ReplyEvidence[] {
   return steps
-    .filter((s) => s.kind !== "slack_reply" && s.status !== "pending" && s.status !== "skipped")
+    .filter((s) => s.kind !== "reply" && s.status !== "pending" && s.status !== "skipped")
     .map((s) => {
-      // Every finished job counts as evidence now, including the ones that
-      // changed nothing — those are exactly what the verifier must not miss.
+      // Every finished job counts as evidence, including the ones that changed
+      // nothing — those are exactly what the verifier must not miss.
       const matchingJob = jobs
         .filter((j) => j.stepId === s.id && j.status !== "queued" && j.status !== "claimed")
         .sort((a, b) => (b.completedAt ?? 0) - (a.completedAt ?? 0))[0];
@@ -71,7 +55,6 @@ export function buildSlackReplyEvidence(
         logLines: s.log ?? [],
         agentOutput: matchingJob?.output,
         deviceEffect: matchingJob ? effectSummaryFor(matchingJob.status, matchingJob.envelope) : undefined,
-        simulated: s.simulated || matchingJob?.status === "simulated",
       };
     });
 }

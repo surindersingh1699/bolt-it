@@ -15,6 +15,13 @@ import {
   TicketStatus,
   Workspace,
 } from "./types";
+import {
+  EMPTY_MEMORY,
+  EPISODE_WINDOW,
+  MemoryKind,
+  UserMemory,
+  isFactKey,
+} from "./memory";
 
 type DbRow = Record<string, unknown>;
 
@@ -43,14 +50,8 @@ function workspaceToRow(w: Workspace): DbRow {
   return {
     id: w.id,
     display_name: w.displayName,
-    is_demo: w.isDemo,
-    slack_team_id: w.slackTeamId ?? null,
-    slack_team_name: w.slackTeamName ?? null,
-    slack_access_token: w.slackAccessToken ?? null,
-    slack_connected_at: w.slackConnectedAt ?? null,
     created_at: w.createdAt,
     updated_at: w.updatedAt,
-    last_used_at: w.lastUsedAt ?? w.updatedAt,
   };
 }
 
@@ -58,14 +59,8 @@ function workspaceFromRow(r: DbRow): Workspace {
   return {
     id: r.id as string,
     displayName: r.display_name as string,
-    isDemo: Boolean(r.is_demo),
-    slackTeamId: (r.slack_team_id as string | null) ?? undefined,
-    slackTeamName: (r.slack_team_name as string | null) ?? undefined,
-    slackAccessToken: (r.slack_access_token as string | null) ?? undefined,
-    slackConnectedAt: r.slack_connected_at == null ? undefined : Number(r.slack_connected_at),
     createdAt: Number(r.created_at),
     updatedAt: Number(r.updated_at),
-    lastUsedAt: r.last_used_at == null ? undefined : Number(r.last_used_at),
   };
 }
 
@@ -405,20 +400,6 @@ export async function getWorkspace(id: string): Promise<Workspace | undefined> {
   return db.getWorkspace(id);
 }
 
-export async function getWorkspaceBySlackTeamId(teamId: string): Promise<Workspace | undefined> {
-  const ifg = isInsforgeEnabled() ? getInsforge() : null;
-  if (ifg) {
-    const { data, error } = await ifg.database
-      .from("workspaces")
-      .select()
-      .eq("slack_team_id", teamId)
-      .maybeSingle();
-    ifErr(error, "getWorkspaceBySlackTeamId");
-    return data ? workspaceFromRow(data as DbRow) : undefined;
-  }
-  return db.listWorkspaces().find((w) => w.slackTeamId === teamId);
-}
-
 export async function listWorkspaces(): Promise<Workspace[]> {
   const ifg = isInsforgeEnabled() ? getInsforge() : null;
   if (ifg) {
@@ -429,39 +410,9 @@ export async function listWorkspaces(): Promise<Workspace[]> {
   return db.listWorkspaces();
 }
 
-export async function disconnectSlackOnWorkspace(id: string): Promise<void> {
-  const row: DbRow = {
-    slack_team_id: null,
-    slack_team_name: null,
-    slack_access_token: null,
-    slack_connected_at: null,
-    updated_at: Date.now(),
-  };
-  const patch: Partial<Workspace> = {
-    slackTeamId: undefined,
-    slackTeamName: undefined,
-    slackAccessToken: undefined,
-    slackConnectedAt: undefined,
-  };
-  const ifg = isInsforgeEnabled() ? getInsforge() : null;
-  if (ifg) {
-    const { error } = await ifg.database.from("workspaces").update(row).eq("id", id);
-    ifErr(error, "disconnectSlackOnWorkspace");
-    cacheInvalidate("workspace:");
-  }
-  // Mirror into the in-memory store whenever it already has this workspace —
-  // see updateWorkspace() below for why.
-  if (db.getWorkspace(id)) db.updateWorkspace(id, patch);
-}
-
 export async function updateWorkspace(id: string, patch: Partial<Workspace>): Promise<void> {
   const row: DbRow = {};
   if (patch.displayName !== undefined) row.display_name = patch.displayName;
-  if (patch.isDemo !== undefined) row.is_demo = patch.isDemo;
-  if (patch.slackTeamId !== undefined) row.slack_team_id = patch.slackTeamId;
-  if (patch.slackTeamName !== undefined) row.slack_team_name = patch.slackTeamName;
-  if (patch.slackAccessToken !== undefined) row.slack_access_token = patch.slackAccessToken;
-  if (patch.slackConnectedAt !== undefined) row.slack_connected_at = patch.slackConnectedAt;
   row.updated_at = Date.now();
   const ifg = isInsforgeEnabled() ? getInsforge() : null;
   if (ifg) {
@@ -475,60 +426,6 @@ export async function updateWorkspace(id: string, patch: Partial<Workspace>): Pr
   // Mirror into the in-memory store whenever it already has this workspace,
   // so a workspace that lives there doesn't silently lose writes.
   if (!ifg || db.getWorkspace(id)) db.updateWorkspace(id, patch);
-}
-
-export async function touchWorkspace(id: string): Promise<void> {
-  const now = Date.now();
-  const ifg = isInsforgeEnabled() ? getInsforge() : null;
-  if (ifg) {
-    const { error } = await ifg.database
-      .from("workspaces")
-      .update({ last_used_at: now })
-      .eq("id", id);
-    ifErr(error, "touchWorkspace");
-    return;
-  }
-  db.updateWorkspace(id, { lastUsedAt: now });
-}
-
-/**
- * Delete every demo workspace whose last_used_at is older than `olderThanMs`,
- * along with its tickets/runbooks/AD records. Returns deleted workspace ids.
- */
-export async function deleteExpiredDemoWorkspaces(olderThanMs: number): Promise<string[]> {
-  const cutoff = Date.now() - olderThanMs;
-  const ifg = isInsforgeEnabled() ? getInsforge() : null;
-  if (ifg) {
-    const { data, error } = await ifg.database
-      .from("workspaces")
-      .select("id")
-      .eq("is_demo", true)
-      .lt("last_used_at", cutoff);
-    ifErr(error, "deleteExpiredDemoWorkspaces:list");
-    const ids = ((data as { id: string }[] | null) ?? []).map((r) => r.id);
-    for (const wsId of ids) {
-      for (const table of ["tickets", "runbooks", "ad_users", "ad_groups", "ad_accounts", "agent_jobs"] as const) {
-        const { error: delErr } = await ifg.database.from(table).delete().eq("workspace_id", wsId);
-        ifErr(delErr, `deleteExpiredDemoWorkspaces:${table}`);
-      }
-      const { error: wsErr } = await ifg.database.from("workspaces").delete().eq("id", wsId);
-      ifErr(wsErr, "deleteExpiredDemoWorkspaces:workspace");
-    }
-    return ids;
-  }
-  const expired = db.listWorkspaces().filter(
-    (w) => w.isDemo && (w.lastUsedAt ?? w.updatedAt) < cutoff,
-  );
-  for (const w of expired) {
-    for (const t of db.listTickets(w.id)) db.tickets.delete(t.id);
-    for (const r of db.listRunbooks(w.id)) db.runbooks.delete(r.id);
-    for (const u of db.listADUsers(w.id)) db.adUsers.delete(`${w.id}:${u.email}`);
-    for (const g of db.listADGroups(w.id)) db.adGroups.delete(`${w.id}:${g.id}`);
-    for (const a of db.listADAccounts(w.id)) db.adAccounts.delete(`${w.id}:${a.email}`);
-    for (const j of db.listAgentJobs(w.id)) db.agentJobs.delete(j.id);
-    db.workspaces.delete(w.id);
-  }
-  return expired.map((w) => w.id);
 }
 
 // Tickets
@@ -992,4 +889,119 @@ export async function deflectionStats(workspaceId?: string): Promise<DeflectionS
     avgResolutionMs,
     rate: totalTouched > 0 ? aiResolved.length / totalTouched : 0,
   };
+}
+
+// ---- user memory -----------------------------------------------------------
+// New in m12. InsForge-only: there is no in-memory mirror to keep in sync, and
+// memory that vanishes on restart is worse than no memory at all.
+
+function memoryRowId(workspaceId: string, email: string, kind: MemoryKind, key: string): string {
+  return `${workspaceId}:${email.toLowerCase()}:${kind}:${key}`;
+}
+
+export async function getUserMemory(workspaceId: string, email: string): Promise<UserMemory> {
+  const ifg = isInsforgeEnabled() ? getInsforge() : null;
+  if (!ifg) return EMPTY_MEMORY;
+  const key = `memory:${workspaceId}:${email.toLowerCase()}`;
+  const cached = cacheGet<UserMemory>(key);
+  if (cached) return cached;
+  try {
+    const { data, error } = await ifg.database
+      .from("user_memory")
+      .select()
+      .eq("workspace_id", workspaceId)
+      .eq("user_email", email.toLowerCase())
+      .order("updated_at", { ascending: false });
+    if (error) throw new Error(JSON.stringify(error));
+    const rows = (data as DbRow[]) ?? [];
+    const memory: UserMemory = {
+      facts: rows
+        .filter((r) => r.kind === "fact")
+        .map((r) => ({
+          key: String(r.fact_key ?? ""),
+          value: String(r.value ?? ""),
+          updatedAt: Number(r.updated_at),
+        })),
+      episodes: rows
+        .filter((r) => r.kind === "episode")
+        .slice(0, EPISODE_WINDOW)
+        .map((r) => ({
+          ticketId: String(r.ticket_id ?? ""),
+          summary: String(r.value ?? ""),
+          at: Number(r.updated_at),
+        })),
+    };
+    cacheSet(key, memory);
+    return memory;
+  } catch (err) {
+    console.warn("[InsForge] getUserMemory failed:", (err as Error).message);
+    return cacheStale<UserMemory>(key) ?? EMPTY_MEMORY;
+  }
+}
+
+/** Upsert a keyed fact. Re-learning the same key overwrites, never duplicates. */
+export async function rememberUserFact(
+  workspaceId: string,
+  email: string,
+  factKey: string,
+  value: string,
+): Promise<void> {
+  const ifg = isInsforgeEnabled() ? getInsforge() : null;
+  if (!ifg || !isFactKey(factKey)) return;
+  const now = Date.now();
+  const row: DbRow = {
+    id: memoryRowId(workspaceId, email, "fact", factKey),
+    workspace_id: workspaceId,
+    user_email: email.toLowerCase(),
+    kind: "fact",
+    fact_key: factKey,
+    value: value.slice(0, 300),
+    ticket_id: null,
+    created_at: now,
+    updated_at: now,
+  };
+  try {
+    const existing = await ifg.database.from("user_memory").select().eq("id", row.id as string).maybeSingle();
+    if (existing.data) {
+      await ifg.database
+        .from("user_memory")
+        .update({ value: row.value, updated_at: now })
+        .eq("id", row.id as string);
+    } else {
+      await ifg.database.from("user_memory").insert([row]);
+    }
+    cacheInvalidate(`memory:${workspaceId}:${email.toLowerCase()}`);
+  } catch (err) {
+    console.warn("[InsForge] rememberUserFact failed:", (err as Error).message);
+  }
+}
+
+/** Append one line of history for a ticket. Idempotent per ticket. */
+export async function rememberUserEpisode(
+  workspaceId: string,
+  email: string,
+  ticketId: string,
+  summary: string,
+): Promise<void> {
+  const ifg = isInsforgeEnabled() ? getInsforge() : null;
+  if (!ifg) return;
+  const now = Date.now();
+  try {
+    await ifg.database.from("user_memory").insert([
+      {
+        id: memoryRowId(workspaceId, email, "episode", ticketId),
+        workspace_id: workspaceId,
+        user_email: email.toLowerCase(),
+        kind: "episode",
+        fact_key: null,
+        value: summary.slice(0, 500),
+        ticket_id: ticketId,
+        created_at: now,
+        updated_at: now,
+      },
+    ]);
+    cacheInvalidate(`memory:${workspaceId}:${email.toLowerCase()}`);
+  } catch (err) {
+    console.warn("[InsForge] rememberUserEpisode failed:", (err as Error).message);
+  }
 }

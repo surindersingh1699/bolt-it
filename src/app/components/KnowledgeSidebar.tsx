@@ -7,7 +7,7 @@ import { BookOpen, CloudCog, DatabaseZap, HardDrive, KeyRound, MessageSquare, Sh
 type RowTone = "live" | "mock" | "off";
 
 export function KnowledgeSidebar() {
-  const { tickets, selectedTicketId, runbooks, integrations } = useAppState();
+  const { tickets, selectedTicketId, runbooks } = useAppState();
   const ticket = tickets.find((t) => t.id === selectedTicketId);
 
   if (!ticket) {
@@ -24,7 +24,7 @@ export function KnowledgeSidebar() {
   }
 
   const runbookCites = ticket.citations.filter((c) => c.source === "runbook");
-  const userCites = ticket.citations.filter((c) => c.source === "hyperspell");
+  const userCites = ticket.citations.filter((c) => c.source === "memory");
   const humanGated = ticket.plan.filter((s) => s.approvalMode === "human").length;
 
   return (
@@ -45,16 +45,6 @@ export function KnowledgeSidebar() {
         </div>
         <div className="grid grid-cols-1 gap-2">
           <SystemRow
-            icon={<MessageSquare size={12} />}
-            label="Slack intake"
-            value={
-              integrations.slackConnected
-                ? `connected${integrations.slackTeamName ? ` · ${integrations.slackTeamName}` : ""}`
-                : "not connected"
-            }
-            tone={integrations.slackConnected ? "live" : "off"}
-          />
-          <SystemRow
             icon={<BookOpen size={12} />}
             label="Docs + runbooks"
             value={`${runbooks.length} runbook${runbooks.length === 1 ? "" : "s"}`}
@@ -74,17 +64,13 @@ export function KnowledgeSidebar() {
           />
           <SystemRow
             icon={<DatabaseZap size={12} />}
-            label="Hyperspell"
+            label="Memory"
             value={
-              integrations.hyperspellMode === "live"
-                ? userCites.length > 0
-                  ? `${userCites.length} context hit${userCites.length === 1 ? "" : "s"}`
-                  : "live · no prior memory"
-                : userCites.length > 0
-                  ? `${userCites.length} context hit${userCites.length === 1 ? "" : "s"} (mocked)`
-                  : "no user memory (mocked)"
+              userCites.length > 0
+                ? `${userCites.length} context hit${userCites.length === 1 ? "" : "s"}`
+                : "no memory for this user yet"
             }
-            tone={integrations.hyperspellMode === "live" ? "live" : "mock"}
+            tone="live"
           />
           <SystemRow
             icon={<ShieldCheck size={12} />}
@@ -121,14 +107,12 @@ export function KnowledgeSidebar() {
         <div className="flex items-center gap-1.5 mb-3">
           <User2 size={12} className="text-violet-400" />
           <span className="text-[11px] uppercase tracking-wider text-neutral-400">
-            Hyperspell · user context
+            Memory · user context
           </span>
         </div>
         {userCites.length === 0 ? (
           <p className="text-xs text-neutral-500">
-            {integrations.hyperspellMode === "live"
-              ? "Hyperspell connected · no prior memory for this user yet. New tickets will write here."
-              : "No user context loaded."}
+            No memory for this user yet. Facts and history are written when a ticket finishes.
           </p>
         ) : (
           <ul className="space-y-2">

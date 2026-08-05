@@ -1,5 +1,6 @@
 import { listRunbooks } from "../data";
 import { Citation, PlanStep } from "../types";
+import { FACT_KEYS, UserFact, UserMemory, memoryAsContext } from "../memory";
 import { DraftInput, DraftResult, normalizeKind } from "./draft";
 import { extractJsonObject } from "./json";
 
@@ -35,43 +36,40 @@ Output ONLY a single JSON object with this exact shape (no markdown, no preface)
   "reasoning": "1-2 sentence explanation",
   "response": "Friendly reply to the user from the technician; address by first name",
   "plan": [
-    { "kind": "insforge"|"aside"|"tensorlake"|"slack_reply", "description": "...", "capability": "<one capability id from the list below>", "params": {} }
+    { "kind": "device"|"backend"|"reply", "description": "...", "capability": "<one capability id from the list below>", "params": {} }
   ]
 }
 
 "capability" MUST be copied verbatim from this list — never invent one, never emit a
-placeholder like "namespace.action_name". If nothing fits, use "slack_reply" with no capability.
-Allowed: ad.lookup_user, ad.unlock_account, ad.reset_password, ad.refresh_kerberos,
-okta.list_groups, okta.add_to_group, okta.send_reset, mdm.push_vpn_config, identity.verify,
-diag.network_probe, diag.system_info, diag.app_status, diag.app_logs, sandbox.read_auth_logs, sandbox.read_kerberos_logs,
-fix.restart_app, fix.clear_app_cache, fix.toggle_wifi
+placeholder like "namespace.action_name". Every capability below is really implemented;
+there are no others. If nothing fits, use kind "reply" with no capability.
 
-Capability kinds:
-- insforge: policy-gated backend action via customer edge function
-- aside: browser action in user's authenticated session (agent never holds creds)
-- tensorlake: sandboxed compute for diagnostic scripts (we have a real local sandbox agent on the technician's machine)
-- slack_reply: reply to user in Slack
+kind "backend" (account state in our directory):
+  ad.lookup_user, ad.unlock_account, ad.reset_password, ad.refresh_kerberos
+kind "device" (really executed on the user's machine by the local agent):
+  diag.system_info, diag.app_status, diag.app_logs,
+  fix.restart_app, fix.clear_app_cache, fix.toggle_wifi
+kind "reply" (message to the user, no capability)
 
 Use the literal string "{reporter_email}" as a placeholder for the user's email in params.
 
-CRITICAL behavior rule — DO NOT ask the user for OS, error messages, screenshots, or whether they recently changed their password. Our agent gathers that automatically. ALWAYS prefer a tensorlake diagnostic step over a clarification question.
+CRITICAL behavior rule — DO NOT ask the user for OS, error messages, screenshots, or whether they recently changed their password. Our agent gathers that automatically. ALWAYS prefer a device diagnostic step over a clarification question.
 
-Diagnostic capabilities (read-only, sandboxed):
-- VPN/network/connectivity issues → "diag.network_probe"
-- Login/lockout/auth/password → "sandbox.read_auth_logs"
-- Mapped drives / Kerberos / domain auth → "sandbox.read_kerberos_logs"
-- App crash / "X is not working" → "sandbox.read_auth_logs"
-- "What is my hostname / computer name / RAM / OS / serial number / uptime / model?" → "diag.system_info" (runs on the user's machine via local agent and returns the actual values)
+Diagnostic capabilities (read-only, run on the user's real machine):
+- App crash / "X is not working" / "X keeps freezing" → "diag.app_status" then "diag.app_logs" with params { "app": "<app name>" }
+- Login/lockout/password/Kerberos/mapped drives → "ad.lookup_user" (reads their account state)
+- "What is my hostname / computer name / RAM / OS / serial number / uptime / model?" → "diag.system_info" (returns the actual values)
+- Network/VPN complaints → "diag.system_info" plus "fix.toggle_wifi" if a link reset is warranted. We have no VPN-specific probe; do not pretend otherwise.
 
-Fix capabilities (REAL execution on the user's machine via local agent — include these AFTER diagnostics when the issue calls for it):
+Fix capabilities (REAL execution on the user's machine via the local agent — include these AFTER diagnostics when the issue calls for it):
 - App crashed/frozen/not responding (Excel, Outlook, Slack, Chrome, Word, PowerPoint, Teams, etc) → "fix.restart_app" with params: { "app": "<app name as it appears in /Applications>" }
 - App cache corruption suspected → "fix.clear_app_cache" with params: { "app": "<app name>" }
-- Wi-Fi flaky/slow/network-dropped → "fix.toggle_wifi" (no params)
+- Wi-Fi flaky/slow/network-dropped → "fix.toggle_wifi" (no params; cycles the machine's primary adapter)
 
 For ANY app issue (Excel crashing, Outlook not opening, etc), the plan should typically be:
-  1. tensorlake diagnostic step (read logs)
-  2. tensorlake fix.restart_app step (actually restart it)
-  3. (optional) tensorlake fix.clear_app_cache step if logs hint at corruption
+  1. device diag.app_status / diag.app_logs step (see the real state)
+  2. device fix.restart_app step (actually restart it)
+  3. (optional) device fix.clear_app_cache step if the logs hint at corruption
 
 CRITICAL — every step's "description" field MUST mention the user's specific issue by name. Bad: "Run diagnostic in sandbox". Good: "Check if Excel process is responding and inspect recent crash logs". The user sees this description in Slack — if you say "VPN" when they asked about Excel, they lose trust.
 
@@ -80,15 +78,7 @@ Reply text (the "response" field) should NEVER ask for clarification. Always say
 
 If no runbook match: still produce a real diagnostic plan based on the issue category above. Set confidence below 0.6 to flag the absence of a runbook, but the plan itself must be diagnostic-driven, not question-driven.`;
 
-  const memoryContext =
-    input.memories && input.memories.length > 0
-      ? `\n\n## Relevant context (Hyperspell memory search)\n${input.memories
-          .map(
-            (m, i) =>
-              `[${i + 1}] (${m.source}, score ${m.score.toFixed(2)}) ${m.title}: ${m.summary}`,
-          )
-          .join("\n")}\n`
-      : "";
+  const memoryContext = memoryAsContext(input.memory ?? null);
 
   const userPrompt = `## Runbook library
 ${runbookContext}
@@ -203,7 +193,7 @@ Produce the JSON object.`;
   };
 }
 
-export interface SlackReplyEvidence {
+export interface ReplyEvidence {
   stepDescription: string;
   capability?: string;
   status: PlanStep["status"];
@@ -211,16 +201,12 @@ export interface SlackReplyEvidence {
   agentOutput?: string;
   /** Verdict from the device's own before/after probes, when a job ran. */
   deviceEffect?: string;
-  /** True when nothing real happened — narrated or canned output only. */
-  simulated?: boolean;
 }
 
 /** Renders one evidence block, leading with the device verdict so the model sees it first. */
-function renderEvidence(e: SlackReplyEvidence, index: number, logLimit: number, outputLimit: number): string {
+function renderEvidence(e: ReplyEvidence, index: number, logLimit: number, outputLimit: number): string {
   const header = `### Step ${index + 1}: ${e.stepDescription} [${e.capability ?? e.status}] -> ${e.status}`;
-  const effect = e.simulated
-    ? "Device evidence: SIMULATED — nothing actually happened on the user's machine."
-    : `Device evidence: ${e.deviceEffect ?? "(no device job for this step)"}`;
+  const effect = `Device evidence: ${e.deviceEffect ?? "(no device job for this step)"}`;
   const log = e.logLines.length > 0 ? `Logs:\n${e.logLines.slice(0, logLimit).join("\n")}` : "Logs: (none)";
   const out = e.agentOutput ? `\nLocal-agent output:\n${e.agentOutput.slice(0, outputLimit)}` : "";
   return `${header}\n${effect}\n${log}${out}`;
@@ -248,12 +234,12 @@ export async function verifyAndReplan(args: {
   body: string;
   attempt: number;
   maxAttempts: number;
-  evidence: SlackReplyEvidence[];
+  evidence: ReplyEvidence[];
   priorFindings: string[];
-  /** Company knowledge: Hyperspell profile line, device line, memory hits. */
+  /** Company knowledge: directory profile line, device line, user memory. */
   userContext?: string;
   deviceContext?: string;
-  memories?: Array<{ title: string; summary: string }>;
+  memory?: UserMemory;
 }): Promise<VerdictResult | null> {
   if (!process.env.AI_GATEWAY_API_KEY) return null;
 
@@ -284,7 +270,6 @@ Attempt ${args.attempt} of ${args.maxAttempts}. If this is the final attempt, se
 Every step carries a "Device evidence" line, computed from probes the agent took on the user's machine before and after the action. It is the ONLY trustworthy signal — prose in the logs is not.
 - "VERIFIED CHANGE — <field before → after>": the machine really changed. This is the only evidence that can support resolved=true.
 - "NO EFFECT": the commands ran but the machine is byte-for-byte the same. The fix did not land. Treat it as a failed attempt and try something different — never repeat the identical step.
-- "SIMULATED": nothing ran on the machine at all. It is not evidence of anything. Never conclude "resolved" from it, and prefer next steps that use real device capabilities (diag.app_status, diag.app_logs, diag.system_info, fix.restart_app, fix.clear_app_cache, fix.toggle_wifi).
 - "FAILED": the command errored on the device; read the exit code and stderr in the logs before choosing the next step.
 
 Return ONLY JSON:
@@ -294,25 +279,20 @@ Return ONLY JSON:
   "hypothesis": "one line: what you believe is actually wrong",
   "reasoning": "2-3 sentences citing the specific evidence",
   "nextSteps": [
-    { "kind": "tensorlake"|"insforge"|"aside"|"slack_reply", "description": "...", "capability": "<id from allowed list>", "params": {} }
+    { "kind": "device"|"backend"|"reply", "description": "...", "capability": "<id from allowed list>", "params": {} }
   ]
 }
 
 Allowed capability ids (copy verbatim, never invent):
-diag.app_status, diag.app_logs, diag.system_info, diag.network_probe,
+diag.app_status, diag.app_logs, diag.system_info,
 fix.restart_app, fix.clear_app_cache, fix.toggle_wifi,
-sandbox.read_auth_logs, sandbox.read_kerberos_logs,
-ad.lookup_user, ad.unlock_account, ad.reset_password, ad.refresh_kerberos,
-okta.list_groups, okta.add_to_group, okta.send_reset, mdm.push_vpn_config, identity.verify
+ad.lookup_user, ad.unlock_account, ad.reset_password, ad.refresh_kerberos
 
-Use kind "tensorlake" for any diag.*/fix.*/sandbox.* capability (these run on the user's machine via the local agent).
+Use kind "device" for any diag.*/fix.* capability (these run on the user's machine via the local agent) and kind "backend" for ad.* capabilities.
 Use params {"app":"<AppName>"} for app-scoped capabilities.
-Return at most 3 nextSteps. Never include a slack_reply step — the agent writes the reply itself.`;
+Return at most 3 nextSteps. Never include a reply step — the agent writes the reply itself.`;
 
-  const memoryContext =
-    args.memories && args.memories.length > 0
-      ? args.memories.map((m) => `- ${m.title}: ${m.summary.slice(0, 200)}`).join("\n")
-      : "(none)";
+  const memoryContext = memoryAsContext(args.memory ?? null) || "(no memory yet)";
 
   const userPrompt = `Original problem: ${args.subject}
 Details: ${args.body}
@@ -323,7 +303,7 @@ ${runbookContext}
 
 User profile: ${args.userContext ?? "(unknown)"}
 User's device: ${args.deviceContext ?? "(no registered device)"}
-Memory hits (Hyperspell):
+User memory:
 ${memoryContext}
 
 Findings from earlier attempts:
@@ -372,11 +352,11 @@ ${evidenceText || "(nothing executed)"}`;
     }
 
     const nextSteps: PlanStep[] = (parsed.nextSteps ?? [])
-      .filter((s) => s.kind && s.kind !== "slack_reply")
+      .filter((s) => s.kind && s.kind !== "reply")
       .slice(0, 3)
       .map((s, i) => ({
         id: `a${args.attempt}-step-${i}`,
-        kind: (s.kind ?? "tensorlake") as PlanStep["kind"],
+        kind: (s.kind ?? "device") as PlanStep["kind"],
         description: s.description ?? "Follow-up diagnostic",
         capability: s.capability,
         params: s.params,
@@ -402,11 +382,11 @@ ${evidenceText || "(nothing executed)"}`;
  * is unavailable or returns an unusable response — caller should fall back to
  * the original draft.
  */
-export async function synthesizeSlackReply(args: {
+export async function synthesizeReply(args: {
   reporterFirstName: string;
   subject: string;
   body: string;
-  evidence: SlackReplyEvidence[];
+  evidence: ReplyEvidence[];
 }): Promise<string | null> {
   if (!process.env.AI_GATEWAY_API_KEY) return null;
   if (args.evidence.length === 0) return null;
@@ -513,6 +493,100 @@ export async function conversationalReply(args: {
     if (!jsonStr) return null;
     const parsed = JSON.parse(jsonStr) as { reply?: string; new_issue?: boolean };
     return { reply: parsed.reply ?? "", newIssue: Boolean(parsed.new_issue) };
+  } catch {
+    return null;
+  }
+}
+
+// ---- memory extraction -----------------------------------------------------
+
+export interface ExtractedMemory {
+  facts: Array<{ key: string; value: string }>;
+  episode: string;
+}
+
+/**
+ * After a ticket is finished, decide what is worth remembering about this
+ * person next time. Facts are restricted to a closed key set so memory stays a
+ * small profile, not a transcript. Returns null when nothing is worth storing.
+ */
+export async function extractUserMemory(args: {
+  subject: string;
+  body: string;
+  outcome: string;
+  knownFacts: UserFact[];
+}): Promise<ExtractedMemory | null> {
+  if (!process.env.AI_GATEWAY_API_KEY) return null;
+
+  const systemPrompt = `You maintain a small, durable memory profile for an IT support user — the things a good helpdesk colleague would remember about them.
+
+Return ONLY JSON:
+{
+  "facts": [ { "key": "<one of the allowed keys>", "value": "short value" } ],
+  "episode": "one sentence: what they needed and how it ended"
+}
+
+Allowed fact keys (use no others): ${FACT_KEYS.join(", ")}
+
+Rules:
+- Only record a fact you can actually support from the text. Never guess an office, a timezone, or a nickname.
+- Facts must be durable — true next month too. "Outlook crashed today" is NOT a fact; "uses Outlook as their mail client" is.
+- If a known fact is contradicted, emit the corrected value under the same key.
+- Return an empty facts array when nothing durable was learned. That is the normal case.
+- The episode is always one plain sentence, no names, under 25 words.`;
+
+  const userPrompt = `Known facts: ${
+    args.knownFacts.length > 0
+      ? args.knownFacts.map((f) => `${f.key}=${f.value}`).join(", ")
+      : "(none yet)"
+  }
+
+Ticket subject: ${args.subject}
+Ticket body: ${args.body}
+Outcome: ${args.outcome}
+
+Produce the JSON.`;
+
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), 12_000);
+  let res: Response;
+  try {
+    res = await fetch(`${AI_GATEWAY_URL}/chat/completions`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${process.env.AI_GATEWAY_API_KEY}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        model: AI_GATEWAY_MODEL,
+        messages: [
+          { role: "system", content: systemPrompt },
+          { role: "user", content: userPrompt },
+        ],
+        temperature: 0,
+      }),
+      signal: controller.signal,
+    });
+  } catch (err) {
+    console.warn("[AIGateway] memory extraction failed:", (err as Error).message);
+    return null;
+  } finally {
+    clearTimeout(timeoutId);
+  }
+  if (!res.ok) return null;
+
+  const data: { choices?: Array<{ message?: { content?: string } }> } = await res.json().catch(() => ({}));
+  const jsonStr = extractJsonObject(data?.choices?.[0]?.message?.content ?? "");
+  if (!jsonStr) return null;
+
+  try {
+    const parsed = JSON.parse(jsonStr) as ExtractedMemory;
+    return {
+      facts: (parsed.facts ?? [])
+        .filter((f) => f && typeof f.key === "string" && typeof f.value === "string" && f.value.trim())
+        .slice(0, 8),
+      episode: typeof parsed.episode === "string" ? parsed.episode.slice(0, 300) : "",
+    };
   } catch {
     return null;
   }

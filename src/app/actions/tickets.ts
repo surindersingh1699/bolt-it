@@ -13,10 +13,9 @@ import {
 } from "@/lib/data";
 import { Ticket } from "@/lib/types";
 import { ensureSeeded } from "@/lib/seed";
-import { addMemory } from "@/lib/integrations/hyperspell";
 import { getCurrentUser } from "@/lib/auth";
 import { ACME_WORKSPACE_ID, getCurrentWorkspaceId } from "@/lib/workspace";
-import { firstNameOf, inferTagsFromTicket, postSlackUpdate, synthesizeRunbookBody } from "@/lib/ticket-helpers";
+import { firstNameOf, inferTagsFromTicket, postUpdate, synthesizeRunbookBody } from "@/lib/ticket-helpers";
 import { runTicketGraphFromStart, resumeTicketGraph } from "@/lib/ticket-graph";
 
 export interface CreateTicketInput {
@@ -58,7 +57,7 @@ export async function createTicket(input: CreateTicketInput): Promise<string> {
     try {
       if (ticket.channel === "slack") {
         const firstName = firstNameOf(ticket.reporter);
-        await postSlackUpdate(
+        await postUpdate(
           ticket,
           `👋 Hi ${firstName} — got it. I'm gathering context from your runbooks, user history, and recent activity. Logged as ticket ${ticket.id}.`,
         );
@@ -88,10 +87,6 @@ export async function approveAndExecute(ticketId: string): Promise<void> {
     name: requestingUser.name,
     email: requestingUser.email,
   });
-}
-
-export async function demoApproveAndExecute(ticketId: string): Promise<void> {
-  await resumeApprovedStep(ticketId, { name: "demo IT staff", email: "demo@local" });
 }
 
 async function resumeApprovedStep(ticketId: string, approver: { name: string; email: string }): Promise<void> {
@@ -124,7 +119,7 @@ export async function confirmTicketResolved(
   });
   if (ticket.channel === "slack" && source === "user_slack") {
     const firstName = firstNameOf(ticket.reporter);
-    await postSlackUpdate(
+    await postUpdate(
       ticket,
       `🎉 Glad I could help, ${firstName}. I've saved this fix to the runbook so the next identical issue will resolve even faster.`,
     );
@@ -139,7 +134,7 @@ export async function escalateAfterUserDenied(ticketId: string): Promise<void> {
   await updateTicket(ticketId, { status: "escalated" });
   if (ticket.channel === "slack") {
     const firstName = firstNameOf(ticket.reporter);
-    await postSlackUpdate(
+    await postUpdate(
       ticket,
       `🙏 Sorry that didn't fix it, ${firstName}. I've escalated ticket ${ticketId} to a human technician — they'll reach out shortly.`,
     );
@@ -150,16 +145,6 @@ export async function escalateAfterUserDenied(ticketId: string): Promise<void> {
 export async function extractRunbook(ticketId: string): Promise<void> {
   const ticket = await getTicket(ticketId);
   if (!ticket || ticket.status !== "resolved") return;
-
-  // Write the resolution back to Hyperspell so it's a two-way memory, not just
-  // queried on draft. New behavior, not a preserved one — see CLAUDE.md's
-  // "Hyperspell is essential" note: it must stay live and unconditional.
-  await addMemory(
-    `Ticket ${ticket.id} resolved: ${ticket.subject}\n\n${synthesizeRunbookBody(ticket)}`,
-    `IT support resolution: ${ticket.subject}`,
-    "it-support-ticket-resolution",
-    ticket.reporterEmail,
-  ).catch(() => null);
 
   const sourceCitation = ticket.citations.find((c) => c.ref.startsWith("runbook:"));
   if (sourceCitation && ticket.confidence >= 0.6) {
@@ -225,7 +210,7 @@ export async function chatWithAgent(ticketId: string, message: string): Promise<
   // on the new_ticket path it becomes the new ticket's body instead.
   const { appendUserChat } = await import("@/lib/chat");
   appendUserChat(ticketId, message);
-  await postSlackUpdate(ticket, result.reply);
+  await postUpdate(ticket, result.reply);
   safeRevalidate("/");
   return "chat";
 }

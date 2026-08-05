@@ -24,10 +24,13 @@ The stack differs by branch. Check before writing code.
 
 - **Orchestration:** [src/lib/ticket-graph.ts](src/lib/ticket-graph.ts) — a `@langchain/langgraph` `StateGraph` run in-process (no LangGraph Platform). `MemorySaver` checkpointer is a `globalThis` singleton. This is the real ticket lifecycle engine: parallel context gather → LLM draft → risk classify → execute loop with per-step approval `interrupt()` → verify → replan (max 3 attempts) → finalize.
 - **Server Actions:** [src/app/actions/tickets.ts](src/app/actions/tickets.ts) — thin wrappers around `graph.invoke(...)` and `graph.invoke(new Command({resume}), ...)`. No business logic here.
-- **Risk gate:** [src/lib/policy.ts](src/lib/policy.ts) — `ALLOWLIST_LOW` / `ALLOWLIST_HIGH` first, LLM judge for anything unlisted, `high` fallback on failure. Never make the fallback permissive.
+- **Risk gate:** [src/lib/policy.ts](src/lib/policy.ts) — a pure allowlist lookup: `ALLOWLIST_LOW` / `ALLOWLIST_MEDIUM` / `ALLOWLIST_HIGH`. Anything unlisted is `high` + human approval. There is no LLM judge; never make the fallback permissive.
 - **Governance:** [src/lib/governance.ts](src/lib/governance.ts) — per-capability approval precedent, workspace-scoped. Auto-promotes a high-risk capability out of the human gate after `PROMOTION_THRESHOLD` (3) clean approvals. `NEVER_AUTO_PROMOTE` is a hard floor checked before the counter.
-- **Data:** [src/lib/data.ts](src/lib/data.ts) is the access layer — InsForge primary, in-memory [src/lib/db.ts](src/lib/db.ts) as fallback. There is no `convex/schema.ts`; Convex was retired.
-- **Device execution:** [scripts/local-agent.mjs](scripts/local-agent.mjs) polls for jobs and runs an allowlisted command set on a real machine (macOS + Windows). `public/local-agent.mjs` is a byte-identical copy served for VM self-update.
+- **Data:** [src/lib/data.ts](src/lib/data.ts) is the access layer — InsForge primary, in-memory [src/lib/db.ts](src/lib/db.ts) as fallback. **Collapsing to InsForge-only is the next planned change**; new tables (e.g. `user_memory`) are already written InsForge-only, with no in-memory mirror.
+- **Step kinds:** `device` (local agent), `backend` (directory/AD in our own store), `reply` (message to the user). Nothing else. Slack OAuth, the demo-workspace flow, and the Okta/MDM/Aside/Tensorlake adapters were deleted — they narrated work that never happened.
+- **Device execution:** [scripts/local-agent.mjs](scripts/local-agent.mjs) polls for jobs and runs an allowlisted command set on a real machine (macOS + Windows). Every job is probe → act → probe; the before/after diff is the only thing that counts as success. Copy the file to the machine by hand — there is no self-update and no `public/setup.ps1`.
+- **Proof of effect:** [src/lib/evidence.ts](src/lib/evidence.ts) — `deriveJobStatus` turns the device's envelope into `succeeded` / `no_effect` / `failed`. `no_effect` means the commands ran and the machine did not change; it fails the step.
+- **Memory:** [src/lib/memory.ts](src/lib/memory.ts) + `user_memory` table — keyed facts (nickname, office, device) and one episode per ticket, written by the LLM extractor at finalize, read at draft time. No external memory service.
 - **Realtime:** client polls `/api/state` every 600ms ([StateProvider.tsx](src/app/components/StateProvider.tsx)). Do not poll faster.
 
 ## Commands
@@ -45,7 +48,7 @@ pnpm agent          # run the local device agent
 2. **Approval gate is structural.** The human gate is a LangGraph `interrupt()`, resumed with `Command({resume})`. Never add a code path that reaches a high-risk step without it.
 3. **Capability-scoped actions only.** No general-purpose "run anything" tool. New actions get a named capability and a risk tier.
 4. **Adapters never throw.** Catch and return `{ ok: false, log: [...] }`. A failed step escalates the ticket; it never crashes the app.
-5. **Label what is simulated.** Any adapter without a real backend appends `· simulated` to its log lines. Output labeled simulated can never justify a "resolved" verdict.
+5. **No adapter without a real backend.** If a capability cannot really be performed, it does not exist — do not add a narrated stand-in. A device job that changes nothing is `no_effect` and can never justify a "resolved" verdict.
 6. **Components never write to the store.** Component → Server Action → `data.ts`.
 7. **No new deps without asking.** pnpm only — never npm or yarn. The lockfile is committed.
 8. **Icons:** `lucide-react` only. **Validation:** `zod`, already installed.

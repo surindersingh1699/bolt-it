@@ -7,9 +7,7 @@ import { SlackChat } from "./SlackChat";
 import { RunbooksTab } from "./RunbooksTab";
 import { LogAnalyzer } from "./LogAnalyzer";
 import { DeflectionDashboard } from "./DeflectionDashboard";
-import { DemoArcButton } from "./DemoArcButton";
 import { AgentStatusBadge } from "./AgentStatusBadge";
-import { SaveProgressBanner } from "./SaveProgressBanner";
 import { FleetTab } from "./FleetTab";
 import { logoutAction } from "@/app/actions/auth";
 import clsx from "clsx";
@@ -21,7 +19,7 @@ type Tab = "console" | "slack" | "logs" | "runbooks" | "fleet";
 const ALL_TABS: { id: Tab; label: string; icon: React.ReactNode; itStaffOnly?: boolean }[] = [
   { id: "console", label: "Console", icon: <LayoutGrid size={14} /> },
   { id: "fleet", label: "Users & Devices", icon: <Users size={14} />, itStaffOnly: true },
-  { id: "slack", label: "Slack (demo)", icon: <MessageSquare size={14} /> },
+  { id: "slack", label: "Chat", icon: <MessageSquare size={14} /> },
   { id: "logs", label: "Analyze logs", icon: <ScrollText size={14} /> },
   { id: "runbooks", label: "Runbooks", icon: <BookOpen size={14} /> },
 ];
@@ -29,17 +27,15 @@ const ALL_TABS: { id: Tab; label: string; icon: React.ReactNode; itStaffOnly?: b
 interface AppShellProps {
   currentUser: PublicUser;
   workspaceName: string;
-  demoMode?: boolean;
 }
 
-export function AppShell({ currentUser, workspaceName, demoMode = false }: AppShellProps) {
+export function AppShell({ currentUser, workspaceName }: AppShellProps) {
   const [tab, setTab] = useState<Tab>(currentUser.isITStaff ? "console" : "slack");
   const { stats, runbooks, tickets } = useAppState();
   const TABS = ALL_TABS.filter((t) => !t.itStaffOnly || currentUser.isITStaff);
 
   return (
     <div className="h-screen max-h-screen bg-neutral-950 text-neutral-100 flex flex-col overflow-hidden">
-      {demoMode && <SaveProgressBanner />}
       <header className="border-b border-neutral-800 px-6 py-3 flex items-center gap-6">
         <div className="flex items-center gap-2">
           <div className="w-7 h-7 rounded-md bg-gradient-to-br from-emerald-400 to-teal-600 flex items-center justify-center text-neutral-950 font-bold text-sm">
@@ -51,18 +47,7 @@ export function AppShell({ currentUser, workspaceName, demoMode = false }: AppSh
           </span>
         </div>
         <div className="ml-auto flex items-center gap-3">
-          {demoMode && <DemoArcButton onSwitchTab={setTab} />}
           <AgentStatusBadge />
-          {demoMode && (
-            <a
-              href="mailto:sabysurinder@gmail.com"
-              className="hidden lg:flex items-center gap-1.5 px-2.5 py-1 text-xs rounded-md border border-neutral-800 bg-neutral-900 text-neutral-300 hover:text-neutral-100 hover:bg-neutral-800 transition-colors"
-              title="Contact for a demo"
-            >
-              <Mail size={12} />
-              Contact
-            </a>
-          )}
           <nav className="flex gap-1">
             {TABS.map((t) => (
               <button
@@ -86,12 +71,12 @@ export function AppShell({ currentUser, workspaceName, demoMode = false }: AppSh
               </button>
             ))}
           </nav>
-          <UserBadge user={currentUser} demoMode={demoMode} />
+          <UserBadge user={currentUser} />
         </div>
       </header>
-      <DeflectionDashboard stats={stats} tickets={tickets} demoMode={demoMode} />
+      <DeflectionDashboard stats={stats} tickets={tickets} />
       <main className="flex-1 min-h-0 overflow-hidden">
-        {tab === "console" && <Console currentUser={currentUser} demoMode={demoMode} />}
+        {tab === "console" && <Console currentUser={currentUser} />}
         {tab === "fleet" && currentUser.isITStaff && <FleetTab currentUser={currentUser} />}
         {tab === "slack" && <SlackChat currentUser={currentUser} />}
         {tab === "logs" && <LogAnalyzer currentUser={currentUser} />}
@@ -101,25 +86,16 @@ export function AppShell({ currentUser, workspaceName, demoMode = false }: AppSh
   );
 }
 
-function UserBadge({ user, demoMode }: { user: PublicUser; demoMode: boolean }) {
+function UserBadge({ user }: { user: PublicUser }) {
   return (
     <div className="flex items-center gap-2 pl-3 border-l border-neutral-800">
       <div className="text-right hidden md:block">
         <div className="text-xs text-neutral-200 leading-tight">{user.name}</div>
         <div className="text-[10px] text-neutral-500 flex items-center gap-1 justify-end">
           {user.isITStaff && <ShieldCheck size={9} className="text-emerald-400" />}
-          {demoMode ? "Demo guest" : user.isITStaff ? "IT staff" : user.team}
+          {user.isITStaff ? "IT staff" : user.team}
         </div>
       </div>
-      {demoMode ? (
-        <a
-          href="/signup?from=demo"
-          className="text-[11px] text-neutral-950 bg-emerald-500 hover:bg-emerald-400 px-2 py-1.5 rounded flex items-center gap-1 transition-colors"
-          title="Sign up to keep this workspace"
-        >
-          <span className="hidden sm:inline">Sign up</span>
-        </a>
-      ) : (
         <form action={logoutAction}>
           <button
             type="submit"
@@ -130,7 +106,6 @@ function UserBadge({ user, demoMode }: { user: PublicUser; demoMode: boolean }) 
             <span className="hidden sm:inline">Sign out</span>
           </button>
         </form>
-      )}
     </div>
   );
 }

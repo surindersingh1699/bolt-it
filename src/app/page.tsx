@@ -93,7 +93,7 @@ export default async function Landing() {
               Live demo
             </Link>
             <Link
-              href="/signup"
+              href="/login"
               className="flex items-center gap-1.5 rounded-md bg-emerald-400 px-3 py-2 text-xs font-semibold text-neutral-950 hover:bg-emerald-300"
             >
               Enroll company
@@ -142,7 +142,7 @@ export default async function Landing() {
                 <ArrowRight size={15} />
               </Link>
               <Link
-                href="/signup"
+                href="/login"
                 className="flex items-center gap-2 rounded-md border border-white/10 bg-neutral-900 px-5 py-3 text-sm font-medium text-neutral-100 hover:bg-neutral-800"
               >
                 Start company enrollment
@@ -227,7 +227,7 @@ export default async function Landing() {
                 demo TTL cleanup, InsForge RLS proof, and full Slack OAuth install verification.
               </div>
               <Link
-                href="/signup"
+                href="/login"
                 className="mt-6 flex w-full items-center justify-center gap-2 rounded-md bg-emerald-400 px-4 py-3 text-sm font-semibold text-neutral-950 hover:bg-emerald-300"
               >
                 Enroll a company

@@ -4,15 +4,12 @@ import { AgentJob, PlanStep, Ticket } from "./types";
 
 export function isAgentJobCapability(capability?: string): boolean {
   return (
-    capability === "diag.network_probe" ||
     capability === "diag.system_info" ||
-    capability === "sandbox.read_auth_logs" ||
-    capability === "sandbox.read_kerberos_logs" ||
+    capability === "diag.app_status" ||
+    capability === "diag.app_logs" ||
     capability === "fix.restart_app" ||
     capability === "fix.clear_app_cache" ||
-    capability === "fix.toggle_wifi" ||
-    capability === "diag.app_status" ||
-    capability === "diag.app_logs"
+    capability === "fix.toggle_wifi"
   );
 }
 
@@ -35,7 +32,7 @@ export async function enqueueAgentJob(ticket: Ticket, step: PlanStep): Promise<A
   await updateStep(ticket.id, step.id, {
     log: [
       `[Agent Queue] Plan step: ${humanLabelFor(step.capability)}`,
-      `[Agent Queue] Routing to local sandbox agent on the technician's machine`,
+      `[Agent Queue] Routing to the local agent on the user's machine`,
       `[Agent Queue] Sandboxed command (audit): ${job.allowlistedCommand}`,
     ],
   });
@@ -43,24 +40,17 @@ export async function enqueueAgentJob(ticket: Ticket, step: PlanStep): Promise<A
 }
 
 export function humanLabelFor(capability: string | undefined): string {
-  if (capability === "diag.network_probe") return "Run network diagnostic in sandbox";
   if (capability === "diag.system_info") return "Collect device hardware and OS info";
-  if (capability === "sandbox.read_auth_logs") return "Inspect system logs in sandbox";
-  if (capability === "sandbox.read_kerberos_logs") return "Inspect domain auth logs in sandbox";
-  if (capability === "fix.restart_app") return "Restart the application";
-  if (capability === "fix.clear_app_cache") return "Clear application cache";
-  if (capability === "fix.toggle_wifi") return "Toggle Wi-Fi";
   if (capability === "diag.app_status") return "Check whether the app is running";
   if (capability === "diag.app_logs") return "Read the app's recent error events";
-  return "Run sandboxed action";
+  if (capability === "fix.restart_app") return "Restart the application";
+  if (capability === "fix.clear_app_cache") return "Clear application cache";
+  if (capability === "fix.toggle_wifi") return "Cycle the network adapter";
+  return "Run device action";
 }
 
 function jobKindForCapability(capability?: string): AgentJob["kind"] {
-  if (capability === "diag.network_probe") return "network_probe";
   if (capability === "diag.system_info") return "system_info";
-  if (capability === "sandbox.read_auth_logs" || capability === "sandbox.read_kerberos_logs") {
-    return "collect_logs";
-  }
   return "app_diagnostic";
 }
 
@@ -74,38 +64,13 @@ function commandForCapability(
   params: Record<string, unknown> | undefined,
 ): string {
   const user = email.replace(/[^a-zA-Z0-9@._-]/g, "");
-  if (capability === "diag.network_probe") {
-    return `collect_vpn_diagnostics --user ${user} --redact-secrets`;
-  }
-  if (capability === "diag.system_info") {
-    return `collect_system_info --user ${user}`;
-  }
-  if (capability === "sandbox.read_kerberos_logs") {
-    return `collect_windows_event_logs --user ${user} --source kerberos --redact-secrets`;
-  }
-  if (capability === "sandbox.read_auth_logs") {
-    return `collect_auth_logs --user ${user} --window 2h --redact-secrets`;
-  }
-  if (capability === "fix.restart_app") {
-    const app = sanitizeAppName(params?.app);
-    return `restart_app --app "${app}"`;
-  }
-  if (capability === "fix.clear_app_cache") {
-    const app = sanitizeAppName(params?.app);
-    return `clear_app_cache --app "${app}"`;
-  }
-  if (capability === "fix.toggle_wifi") {
-    return `toggle_wifi`;
-  }
-  if (capability === "diag.app_status") {
-    const app = sanitizeAppName(params?.app);
-    return `app_status --app "${app}"`;
-  }
-  if (capability === "diag.app_logs") {
-    const app = sanitizeAppName(params?.app);
-    return `app_event_logs --app "${app}" --limit 15`;
-  }
-  return `collect_app_logs --user ${user} --redact-secrets`;
+  const app = sanitizeAppName(params?.app);
+  if (capability === "diag.system_info") return `collect_system_info --user ${user}`;
+  if (capability === "diag.app_status") return `app_status --app "${app}"`;
+  if (capability === "diag.app_logs") return `app_event_logs --app "${app}" --limit 15`;
+  if (capability === "fix.restart_app") return `restart_app --app "${app}"`;
+  if (capability === "fix.clear_app_cache") return `clear_app_cache --app "${app}"`;
+  return "toggle_wifi";
 }
 
 function instructionsForCapability(ticket: Ticket, step: PlanStep): string {

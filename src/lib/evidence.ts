@@ -5,9 +5,8 @@ import { AgentJob, AgentJobStatus, ExecutionEnvelope } from "./types";
  *
  * A device job is only "succeeded" when the machine's own before/after probes
  * disagree — i.e. something on the client actually moved. A fix that ran
- * cleanly but left the device identical is `no_effect`, and a command the
- * agent has no real implementation for is `simulated`. Neither may be reported
- * to the user as a completed fix.
+ * cleanly but left the device identical is `no_effect`, and may never be
+ * reported to the user as a completed fix.
  */
 export function deriveJobStatus(
   ok: boolean,
@@ -15,7 +14,6 @@ export function deriveJobStatus(
 ): AgentJobStatus {
   if (!ok) return "failed";
   if (!envelope) return "succeeded";
-  if (envelope.simulated) return "simulated";
   if (envelope.expectsChange && !envelope.effect.changed) return "no_effect";
   return "succeeded";
 }
@@ -63,12 +61,7 @@ export function formatProofLines(job: AgentJob): string[] {
     );
   }
 
-  if (env.simulated) {
-    lines.push(
-      `[Proof] SIMULATED — this device agent has no real implementation for "${env.command.split(/\s+/)[0]}". ` +
-        `Nothing was executed on ${env.host}. Output below is sample text, not a measurement.`,
-    );
-  } else if (env.effect.changed) {
+  if (env.effect.changed) {
     lines.push(`[Proof] EFFECT: ${env.effect.summary}`);
   } else if (env.expectsChange) {
     lines.push(
@@ -88,9 +81,6 @@ export function formatProofLines(job: AgentJob): string[] {
 
 /** One-line effect statement handed to the LLM verifier and reply writer. */
 export function effectSummaryFor(status: AgentJobStatus, envelope?: ExecutionEnvelope): string {
-  if (status === "simulated") {
-    return "SIMULATED — the device agent has no real implementation; nothing ran on the machine.";
-  }
   if (status === "no_effect") {
     return "NO EFFECT — commands ran but the device's before/after state is identical; nothing changed.";
   }
