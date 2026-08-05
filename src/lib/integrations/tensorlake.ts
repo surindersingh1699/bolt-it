@@ -4,6 +4,8 @@ import { sandboxReadLogs } from "./sandbox";
 export interface TensorlakeResult {
   ok: boolean;
   log: string[];
+  /** True when the output is illustrative rather than measured. */
+  simulated?: boolean;
 }
 
 export async function tensorlakeRun(step: PlanStep, userEmail: string): Promise<TensorlakeResult> {
@@ -19,7 +21,7 @@ export async function tensorlakeRun(step: PlanStep, userEmail: string): Promise<
     await sleep(800);
     log.push(`[Tensorlake] Result: 14 hops, 3 retransmissions, MTU mismatch detected`);
     log.push(`[Tensorlake] Diagnosis: stale VPN profile referencing decommissioned gateway`);
-    return { ok: true, log };
+    return { ok: true, log, simulated: true };
   }
 
   if (step.capability === "sandbox.read_auth_logs") {
@@ -57,7 +59,7 @@ export async function tensorlakeRun(step: PlanStep, userEmail: string): Promise<
   }
 
   log.push(`[Tensorlake] Generic diagnostic finished`);
-  return { ok: true, log };
+  return { ok: true, log, simulated: true };
 }
 
 function sleep(ms: number) {

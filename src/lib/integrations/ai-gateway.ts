@@ -1,15 +1,16 @@
 import { listRunbooks } from "../data";
 import { Citation, PlanStep } from "../types";
-import { NiaDraftInput, NiaDraftResult } from "./nia";
+import { DraftInput, DraftResult, normalizeKind } from "./draft";
 import { extractJsonObject } from "./json";
 
 const AI_GATEWAY_URL = process.env.AI_GATEWAY_URL || "https://ai-gateway.vercel.sh/v1";
 const AI_GATEWAY_MODEL = process.env.AI_GATEWAY_MODEL || "anthropic/claude-haiku-4-5";
-// Conversational replies in the Slack thread use ChatGPT (via the same gateway),
-// separate from the planning/verdict model above.
-const AI_GATEWAY_CHAT_MODEL = process.env.AI_GATEWAY_CHAT_MODEL || "openai/gpt-4o-mini";
+// Conversational replies in the Slack thread; defaults to the same model the
+// planner uses (the endpoint decides valid ids — plain "gpt-4o-mini" against
+// api.openai.com, "openai/gpt-4o-mini" against the Vercel AI Gateway).
+const AI_GATEWAY_CHAT_MODEL = process.env.AI_GATEWAY_CHAT_MODEL || AI_GATEWAY_MODEL;
 
-export async function aiGatewayDraft(input: NiaDraftInput): Promise<NiaDraftResult | null> {
+export async function aiGatewayDraft(input: DraftInput): Promise<DraftResult | null> {
   if (!process.env.AI_GATEWAY_API_KEY) return null;
 
   const runbooks = await listRunbooks();
@@ -171,7 +172,7 @@ Produce the JSON object.`;
     const rb = runbooks.find((r) => r.id === parsed.matched_runbook_id);
     if (rb) {
       citations.push({
-        source: "nia",
+        source: "runbook",
         title: rb.title,
         snippet: (parsed.reasoning ?? rb.body).slice(0, 220),
         ref: `runbook:${rb.id}`,
@@ -202,17 +203,27 @@ Produce the JSON object.`;
   };
 }
 
-function normalizeKind(k: string | undefined): PlanStep["kind"] {
-  if (k === "insforge" || k === "aside" || k === "tensorlake" || k === "slack_reply") return k;
-  return "slack_reply";
-}
-
 export interface SlackReplyEvidence {
   stepDescription: string;
   capability?: string;
   status: PlanStep["status"];
   logLines: string[];
   agentOutput?: string;
+  /** Verdict from the device's own before/after probes, when a job ran. */
+  deviceEffect?: string;
+  /** True when nothing real happened — narrated or canned output only. */
+  simulated?: boolean;
+}
+
+/** Renders one evidence block, leading with the device verdict so the model sees it first. */
+function renderEvidence(e: SlackReplyEvidence, index: number, logLimit: number, outputLimit: number): string {
+  const header = `### Step ${index + 1}: ${e.stepDescription} [${e.capability ?? e.status}] -> ${e.status}`;
+  const effect = e.simulated
+    ? "Device evidence: SIMULATED — nothing actually happened on the user's machine."
+    : `Device evidence: ${e.deviceEffect ?? "(no device job for this step)"}`;
+  const log = e.logLines.length > 0 ? `Logs:\n${e.logLines.slice(0, logLimit).join("\n")}` : "Logs: (none)";
+  const out = e.agentOutput ? `\nLocal-agent output:\n${e.agentOutput.slice(0, outputLimit)}` : "";
+  return `${header}\n${effect}\n${log}${out}`;
 }
 
 export interface VerdictResult {
@@ -256,14 +267,7 @@ export async function verifyAndReplan(args: {
           .join("\n\n")
       : "(no runbooks yet)";
 
-  const evidenceText = args.evidence
-    .map((e, i) => {
-      const header = `### Step ${i + 1}: ${e.stepDescription} [${e.capability ?? e.status}] -> ${e.status}`;
-      const log = e.logLines.length > 0 ? `Logs:\n${e.logLines.slice(0, 25).join("\n")}` : "Logs: (none)";
-      const out = e.agentOutput ? `\nLocal-agent output:\n${e.agentOutput.slice(0, 1500)}` : "";
-      return `${header}\n${log}${out}`;
-    })
-    .join("\n\n");
+  const evidenceText = args.evidence.map((e, i) => renderEvidence(e, i, 25, 1500)).join("\n\n");
 
   const systemPrompt = `You are the reasoning loop of an IT support agent, acting like an experienced technician.
 
@@ -277,7 +281,11 @@ Ground your reasoning in COMPANY KNOWLEDGE first: if a runbook below matches thi
 
 Attempt ${args.attempt} of ${args.maxAttempts}. If this is the final attempt, set resolved=false and return an empty nextSteps array — the agent will hand off to a human with your findings.
 
-Note: "sample data" or "simulated" in a log means that step produced NO real evidence. Never conclude "resolved" from simulated output.
+Every step carries a "Device evidence" line, computed from probes the agent took on the user's machine before and after the action. It is the ONLY trustworthy signal — prose in the logs is not.
+- "VERIFIED CHANGE — <field before → after>": the machine really changed. This is the only evidence that can support resolved=true.
+- "NO EFFECT": the commands ran but the machine is byte-for-byte the same. The fix did not land. Treat it as a failed attempt and try something different — never repeat the identical step.
+- "SIMULATED": nothing ran on the machine at all. It is not evidence of anything. Never conclude "resolved" from it, and prefer next steps that use real device capabilities (diag.app_status, diag.app_logs, diag.system_info, fix.restart_app, fix.clear_app_cache, fix.toggle_wifi).
+- "FAILED": the command errored on the device; read the exit code and stderr in the logs before choosing the next step.
 
 Return ONLY JSON:
 {
@@ -403,14 +411,7 @@ export async function synthesizeSlackReply(args: {
   if (!process.env.AI_GATEWAY_API_KEY) return null;
   if (args.evidence.length === 0) return null;
 
-  const evidenceText = args.evidence
-    .map((e, i) => {
-      const header = `### Step ${i + 1}: ${e.stepDescription} [${e.capability ?? e.status}]`;
-      const log = e.logLines.length > 0 ? `Logs:\n${e.logLines.slice(0, 30).join("\n")}` : "Logs: (none)";
-      const out = e.agentOutput ? `\nLocal-agent output:\n${e.agentOutput.slice(0, 2000)}` : "";
-      return `${header}\n${log}${out}`;
-    })
-    .join("\n\n");
+  const evidenceText = args.evidence.map((e, i) => renderEvidence(e, i, 30, 2000)).join("\n\n");
 
   const systemPrompt = `You write the final Slack reply an IT support copilot sends to the user after running a diagnostic/fix plan.
 

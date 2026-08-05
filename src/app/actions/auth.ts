@@ -131,18 +131,3 @@ export async function signupAction(formData: FormData): Promise<void> {
   redirect("/app");
 }
 
-const demoLoginSchema = z.object({
-  email: z.string().email().max(200),
-});
-
-export async function demoLoginAction(formData: FormData): Promise<void> {
-  await ensureSeeded();
-  const parsed = demoLoginSchema.safeParse({ email: formData.get("email") });
-  if (!parsed.success) redirect("/login?err=bad_credentials");
-  const email = parsed.data.email.toLowerCase().trim();
-  const user = await getADUser(email, ACME_WORKSPACE_ID);
-  if (!user) redirect(`/login?err=bad_credentials&email=${encodeURIComponent(email)}`);
-  await setSessionCookie(email, user!.workspaceId);
-  revalidatePath("/", "layout");
-  redirect("/app");
-}

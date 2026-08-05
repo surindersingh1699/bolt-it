@@ -48,7 +48,6 @@ function workspaceToRow(w: Workspace): DbRow {
     slack_team_name: w.slackTeamName ?? null,
     slack_access_token: w.slackAccessToken ?? null,
     slack_connected_at: w.slackConnectedAt ?? null,
-    nia_sources: w.niaSources ?? [],
     created_at: w.createdAt,
     updated_at: w.updatedAt,
     last_used_at: w.lastUsedAt ?? w.updatedAt,
@@ -64,7 +63,6 @@ function workspaceFromRow(r: DbRow): Workspace {
     slackTeamName: (r.slack_team_name as string | null) ?? undefined,
     slackAccessToken: (r.slack_access_token as string | null) ?? undefined,
     slackConnectedAt: r.slack_connected_at == null ? undefined : Number(r.slack_connected_at),
-    niaSources: (r.nia_sources as Workspace["niaSources"]) ?? [],
     createdAt: Number(r.created_at),
     updatedAt: Number(r.updated_at),
     lastUsedAt: r.last_used_at == null ? undefined : Number(r.last_used_at),
@@ -305,6 +303,9 @@ function agentJobToRow(j: AgentJob): DbRow {
     completed_at: j.completedAt ?? null,
     output: j.output ?? null,
     error: j.error ?? null,
+    envelope: j.envelope ?? null,
+    effect_changed: j.effectChanged ?? null,
+    effect_summary: j.effectSummary ?? null,
   };
 }
 
@@ -325,6 +326,9 @@ function agentJobFromRow(r: DbRow): AgentJob {
     completedAt: r.completed_at == null ? undefined : Number(r.completed_at),
     output: (r.output as string | null) ?? undefined,
     error: (r.error as string | null) ?? undefined,
+    envelope: (r.envelope as AgentJob["envelope"] | null) ?? undefined,
+    effectChanged: (r.effect_changed as boolean | null) ?? undefined,
+    effectSummary: (r.effect_summary as string | null) ?? undefined,
   };
 }
 
@@ -335,6 +339,9 @@ function agentJobPatchToRow(patch: Partial<AgentJob>): DbRow {
   if (patch.completedAt !== undefined) out.completed_at = patch.completedAt;
   if (patch.output !== undefined) out.output = patch.output;
   if (patch.error !== undefined) out.error = patch.error;
+  if (patch.envelope !== undefined) out.envelope = patch.envelope;
+  if (patch.effectChanged !== undefined) out.effect_changed = patch.effectChanged;
+  if (patch.effectSummary !== undefined) out.effect_summary = patch.effectSummary;
   out.updated_at = Date.now();
   return out;
 }
@@ -455,7 +462,6 @@ export async function updateWorkspace(id: string, patch: Partial<Workspace>): Pr
   if (patch.slackTeamName !== undefined) row.slack_team_name = patch.slackTeamName;
   if (patch.slackAccessToken !== undefined) row.slack_access_token = patch.slackAccessToken;
   if (patch.slackConnectedAt !== undefined) row.slack_connected_at = patch.slackConnectedAt;
-  if (patch.niaSources !== undefined) row.nia_sources = patch.niaSources;
   row.updated_at = Date.now();
   const ifg = isInsforgeEnabled() ? getInsforge() : null;
   if (ifg) {
@@ -987,5 +993,3 @@ export async function deflectionStats(workspaceId?: string): Promise<DeflectionS
     rate: totalTouched > 0 ? aiResolved.length / totalTouched : 0,
   };
 }
-
-export const isConvexEnabled = (): boolean => false;

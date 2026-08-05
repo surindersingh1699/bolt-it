@@ -16,7 +16,7 @@ export type StepApprovalMode = "auto" | "human";
 export type RiskSource = "allowlist" | "judge" | "fallback";
 
 export interface Citation {
-  source: "nia" | "hyperspell";
+  source: "runbook" | "hyperspell";
   title: string;
   snippet: string;
   ref: string;
@@ -37,6 +37,12 @@ export interface PlanStep {
   riskReason?: string;
   riskSource?: RiskSource;
   governancePromoted?: boolean;
+  /**
+   * True when the step's "work" was illustrative only — a canned integration
+   * branch or a device job the agent cannot really perform. A simulated step
+   * must never be described to the user as something that was actually done.
+   */
+  simulated?: boolean;
 }
 
 export interface CapabilityPrecedent {
@@ -48,21 +54,6 @@ export interface CapabilityPrecedent {
   promotedAt?: number;
 }
 
-export type NiaSourceType = "repository" | "documentation";
-export type NiaSourceStatus = "indexing" | "ready" | "failed";
-
-export interface NiaSource {
-  id: string;
-  identifier: string;
-  displayName: string;
-  type: NiaSourceType;
-  status: NiaSourceStatus;
-  url: string;
-  addedAt: number;
-  updatedAt: number;
-  errorMessage?: string;
-}
-
 export interface Workspace {
   id: string;
   displayName: string;
@@ -71,13 +62,72 @@ export interface Workspace {
   slackTeamName?: string;
   slackAccessToken?: string;
   slackConnectedAt?: number;
-  niaSources?: NiaSource[];
   createdAt: number;
   updatedAt: number;
   lastUsedAt?: number;
 }
 
-export type AgentJobStatus = "queued" | "claimed" | "succeeded" | "failed";
+export type AgentJobStatus =
+  | "queued"
+  | "claimed"
+  | "succeeded"
+  /** Ran cleanly, but the device's own state never moved — not a fix. */
+  | "no_effect"
+  /** The device agent has no real implementation for this command. */
+  | "simulated"
+  | "failed";
+
+/** One `Get-*`/`pgrep` style read of device state, taken around an action. */
+export interface DeviceProbe {
+  /** e.g. "process:Outlook (before)" */
+  label: string;
+  /** Exact command used to read the state, for audit. */
+  command: string;
+  exitCode: number;
+  /** Stable, comparable facts — the things a diff is computed over. */
+  facts: Record<string, string | number | boolean | null>;
+}
+
+/** One command the device agent actually executed, with its real result. */
+export interface DeviceCommand {
+  argv: string[];
+  exitCode: number;
+  stdout: string;
+  stderr: string;
+  durationMs: number;
+}
+
+export interface EffectDiff {
+  field: string;
+  before: string | number | boolean | null;
+  after: string | number | boolean | null;
+}
+
+/**
+ * The proof-of-effect record for a single device job: what the machine looked
+ * like before, what was run, what it looked like after, and whether anything
+ * actually changed. `effect.changed === false` on a job that was supposed to
+ * change something is the signal that the agent left no fingerprint.
+ */
+export interface ExecutionEnvelope {
+  jobId: string;
+  command: string;
+  host: string;
+  os: string;
+  agentVersion: string;
+  startedAt: number;
+  finishedAt: number;
+  durationMs: number;
+  /** Whether this command is a fix (must change state) or a read-only probe. */
+  expectsChange: boolean;
+  /** True when the agent has no real implementation and produced canned text. */
+  simulated?: boolean;
+  probes: DeviceProbe[];
+  commands: DeviceCommand[];
+  effect: { changed: boolean; diff: EffectDiff[]; summary: string };
+  /** Where the append-only copy lives on the device itself. */
+  journalPath?: string;
+}
 
 export interface AgentJob {
   id: string;
@@ -95,6 +145,10 @@ export interface AgentJob {
   completedAt?: number;
   output?: string;
   error?: string;
+  envelope?: ExecutionEnvelope;
+  /** Denormalized from the envelope so lists can filter without parsing it. */
+  effectChanged?: boolean;
+  effectSummary?: string;
 }
 
 export interface Ticket {

@@ -3,6 +3,8 @@ import { PlanStep } from "../types";
 export interface AsideExecutionResult {
   ok: boolean;
   log: string[];
+  /** True when the browser flow was narrated, not driven. */
+  simulated?: boolean;
 }
 
 export async function asideExecute(step: PlanStep, userEmail: string): Promise<AsideExecutionResult> {
@@ -22,7 +24,7 @@ export async function asideExecute(step: PlanStep, userEmail: string): Promise<A
     log.push(`[Aside] Submitted "Add member" form for ${userEmail}`);
     await sleep(300);
     log.push(`[Aside] Confirmation: ${userEmail} added to ${group}`);
-    return { ok: true, log };
+    return { ok: true, log, simulated: true };
   }
 
   if (step.capability === "okta.send_reset") {
@@ -31,11 +33,11 @@ export async function asideExecute(step: PlanStep, userEmail: string): Promise<A
     log.push(`[Aside] Triggered "More Actions > Reset Password"`);
     await sleep(300);
     log.push(`[Aside] Reset email dispatched`);
-    return { ok: true, log };
+    return { ok: true, log, simulated: true };
   }
 
   log.push(`[Aside] Generic action completed via user browser`);
-  return { ok: true, log };
+  return { ok: true, log, simulated: true };
 }
 
 function sleep(ms: number) {

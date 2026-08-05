@@ -2,25 +2,32 @@ import { StateGraph, Annotation, START, END, MemorySaver, interrupt, Command } f
 import { getTicket, updateTicket, updateStep, getWorkspace, listAgentJobs, listDevices } from "@/lib/data";
 import { Citation, PlanStep, Ticket } from "@/lib/types";
 import { getUserContext, queryMemories, MemoryHit } from "@/lib/integrations/hyperspell";
-import { niaDraft, NiaDraftResult } from "@/lib/integrations/nia";
+import { DraftResult } from "@/lib/integrations/draft";
 import { classifyPlan } from "@/lib/policy";
 import { insforgeInvoke } from "@/lib/integrations/insforge";
 import { asideExecute } from "@/lib/integrations/aside";
 import { tensorlakeRun } from "@/lib/integrations/tensorlake";
-import { synthesizeSlackReply, verifyAndReplan } from "@/lib/integrations/ai-gateway";
+import { aiGatewayDraft, synthesizeSlackReply, verifyAndReplan } from "@/lib/integrations/ai-gateway";
 import { postSlackMessage } from "@/lib/slack";
 import { enqueueAgentJob, isAgentJobCapability } from "@/lib/agent-jobs";
+import { formatProofLines, isRealSuccess } from "@/lib/evidence";
 import { recordCleanExecution } from "@/lib/governance";
 import { appendTrace } from "@/lib/trace";
 import { readHeartbeat, HEARTBEAT_CONNECTED_WINDOW_MS } from "@/lib/agent-heartbeat";
 import {
   buildSlackReplyEvidence,
+  firstNameOf,
   humanStepLabel,
   postSlackUpdate,
   slackContextFromTicket,
   substituteParams,
   waitForAgentJobs,
+  waitForJob,
 } from "@/lib/ticket-helpers";
+
+// How long a step will wait for the user's machine to report back before
+// treating the work as not done.
+const AGENT_JOB_TIMEOUT_MS = 45_000;
 
 export interface Approver {
   name: string;
@@ -43,7 +50,7 @@ const TicketGraphState = Annotation.Root({
   userContext: Annotation<Awaited<ReturnType<typeof getUserContext>>>({ reducer: overwrite, default: () => null }),
   memories: Annotation<MemoryHit[]>({ reducer: overwrite, default: () => [] }),
   deviceContext: Annotation<string | null>({ reducer: overwrite, default: () => null }),
-  draft: Annotation<NiaDraftResult | null>({ reducer: overwrite, default: () => null }),
+  draft: Annotation<DraftResult | null>({ reducer: overwrite, default: () => null }),
   citations: Annotation<Citation[]>({ reducer: overwrite, default: () => [] }),
   classifiedPlan: Annotation<PlanStep[]>({ reducer: overwrite, default: () => [] }),
   attempt: Annotation<number>({ reducer: overwrite, default: () => 1 }),
@@ -107,14 +114,14 @@ async function gatherDeviceContext(state: TState) {
   return { deviceContext: device ? detail : null };
 }
 
-async function draftWithNia(state: TState) {
+async function draftPlanNode(state: TState) {
   const t0 = Date.now();
   appendTrace(state.ticketId, "draftPlan", "started", "LLM drafting from runbooks + memories");
   const ticket = await getTicket(state.ticketId);
   if (!ticket) return {};
   try {
     const draft = await withTimeout(
-      niaDraft({
+      aiGatewayDraft({
         subject: ticket.subject,
         body: ticket.body,
         reporter: ticket.reporter,
@@ -126,6 +133,10 @@ async function draftWithNia(state: TState) {
       DRAFT_TIMEOUT_MS,
       "draftPlan",
     );
+    // No AI_GATEWAY_API_KEY, or the endpoint returned nothing usable. Treated
+    // the same as a thrown error: fall through to the acknowledge-only plan
+    // below rather than inventing steps we have no grounding for.
+    if (!draft) throw new Error("no drafting provider available");
     appendTrace(
       state.ticketId,
       "draftPlan",
@@ -135,7 +146,7 @@ async function draftWithNia(state: TState) {
     );
     return { draft };
   } catch (err) {
-    console.warn(`[draftWithNia] ${state.ticketId} failed (${(err as Error).message}); using minimal fallback`);
+    console.warn(`[draftPlanNode] ${state.ticketId} failed (${(err as Error).message}); using minimal fallback`);
     appendTrace(
       state.ticketId,
       "draftPlan",
@@ -143,8 +154,8 @@ async function draftWithNia(state: TState) {
       `${(err as Error).message} — using minimal fallback plan`,
       Date.now() - t0,
     );
-    const firstName = ticket.reporter.split(/\s+/)[0];
-    const fallback: NiaDraftResult = {
+    const firstName = firstNameOf(ticket.reporter);
+    const fallback: DraftResult = {
       citations: [],
       confidence: 0.4,
       reasoning: "draft failed — minimal fallback",
@@ -152,7 +163,7 @@ async function draftWithNia(state: TState) {
       plan: [
         { id: "step-0", kind: "slack_reply", description: "Acknowledge and ask for more detail", status: "pending" },
       ],
-      source: "mock",
+      source: "fallback",
     };
     return { draft: fallback };
   }
@@ -220,7 +231,7 @@ async function persistPlan(state: TState) {
 
   const updatedForSlack = await getTicket(state.ticketId);
   if (updatedForSlack) {
-    const firstName = ticket.reporter.split(/\s+/)[0];
+    const firstName = firstNameOf(ticket.reporter);
     const planLines = state.classifiedPlan.map((s, i) => `   ${i + 1}. ${humanStepLabel(s)}`).join("\n");
     await postSlackUpdate(
       updatedForSlack,
@@ -238,26 +249,50 @@ async function executeStepAndPersist(ticket: Ticket, step: PlanStep): Promise<{ 
   }
 
   let ok = true;
+  let simulated = false;
   let log: string[] = [];
 
   try {
     if (step.kind === "insforge") {
       const r = await insforgeInvoke(step, ticket.reporterEmail);
       ok = r.ok;
+      simulated = r.simulated ?? false;
       log = r.log;
     } else if (step.kind === "aside") {
       const r = await asideExecute(step, ticket.reporterEmail);
       ok = r.ok;
+      simulated = r.simulated ?? false;
       log = r.log;
     } else if (step.kind === "tensorlake") {
       if (isAgentJobCapability(step.capability)) {
+        // Capabilities that belong to the user's machine are decided by the
+        // machine. No parallel narration from the cloud — the device's
+        // before/after evidence is the only verdict.
         const job = await enqueueAgentJob(ticket, step);
-        log.push(`[Agent Queue] Job ${job.id} queued for local sandbox agent`);
+        log.push(`[Agent Queue] Job ${job.id} dispatched to the device agent`);
         log.push(`[Agent Queue] ${job.allowlistedCommand}`);
+
+        const finished = await waitForJob(job.id, AGENT_JOB_TIMEOUT_MS);
+        if (!finished) {
+          ok = false;
+          log.push(
+            `[Local Agent] No result within ${AGENT_JOB_TIMEOUT_MS / 1000}s — the device agent is offline or busy. ` +
+              `Nothing was done on the user's machine.`,
+          );
+        } else {
+          log = [...log, ...formatProofLines(finished)];
+          ok = isRealSuccess(finished.status);
+          simulated = finished.status === "simulated";
+          if (finished.status === "no_effect") {
+            log.push(`[Local Agent] Step marked failed: the fix ran but the device did not change.`);
+          }
+        }
+      } else {
+        const r = await tensorlakeRun(step, ticket.reporterEmail);
+        ok = r.ok;
+        simulated = r.simulated ?? false;
+        log = [...log, ...r.log];
       }
-      const r = await tensorlakeRun(step, ticket.reporterEmail);
-      ok = r.ok;
-      log = [...log, ...r.log];
     } else if (step.kind === "slack_reply") {
       log = [`[Slack] Waiting for any pending local-agent jobs before composing reply`];
       await waitForAgentJobs(ticket.id, 20_000);
@@ -270,7 +305,7 @@ async function executeStepAndPersist(ticket: Ticket, step: PlanStep): Promise<{ 
       const evidence = buildSlackReplyEvidence(stepsBeforeReply, jobsForTicket);
       log.push(`[Slack] Synthesizing reply from ${evidence.length} executed step(s)`);
 
-      const firstName = ticket.reporter.split(/\s+/)[0];
+      const firstName = firstNameOf(ticket.reporter);
       const synthesized = await synthesizeSlackReply({
         reporterFirstName: firstName,
         subject: ticket.subject,
@@ -304,7 +339,12 @@ async function executeStepAndPersist(ticket: Ticket, step: PlanStep): Promise<{ 
     log = [`[Error] ${(err as Error).message}`];
   }
 
-  await updateStep(ticket.id, step.id, { status: ok ? "succeeded" : "failed", log, finishedAt: Date.now() });
+  await updateStep(ticket.id, step.id, {
+    status: ok ? "succeeded" : "failed",
+    log,
+    simulated: simulated || undefined,
+    finishedAt: Date.now(),
+  });
   return { ok };
 }
 
@@ -492,7 +532,7 @@ async function replan(state: TState) {
     Date.now() - t0,
   );
 
-  const firstName = ticket.reporter.split(/\s+/)[0];
+  const firstName = firstNameOf(ticket.reporter);
   await postSlackUpdate(
     ticket,
     `🔁 Hi ${firstName} — first approach didn't resolve it. Trying attempt ${nextAttempt}: ${classified
@@ -526,7 +566,7 @@ async function finalizeExecution(state: TState) {
   );
 
   if (finishedTicket.channel === "slack") {
-    const firstName = finishedTicket.reporter.split(/\s+/)[0];
+    const firstName = firstNameOf(finishedTicket.reporter);
     const hadSlackReplyStep = finishedTicket.plan.some((s) => s.kind === "slack_reply");
 
     if (!hadSlackReplyStep) {
@@ -567,7 +607,7 @@ function buildGraph() {
     .addNode("gatherUserContext", gatherUserContext)
     .addNode("gatherMemories", gatherMemories)
     .addNode("gatherDeviceContext", gatherDeviceContext)
-    .addNode("draftWithNia", draftWithNia)
+    .addNode("draftPlan", draftPlanNode)
     .addNode("classifyRisk", classifyRisk)
     .addNode("persistPlan", persistPlan)
     .addNode("runNextStep", runNextStep, { ends: ["runNextStep", "markAwaitingApproval", "verifyOutcome", END] })
@@ -579,10 +619,10 @@ function buildGraph() {
     .addEdge(START, "gatherUserContext")
     .addEdge(START, "gatherMemories")
     .addEdge(START, "gatherDeviceContext")
-    .addEdge("gatherMemories", "draftWithNia")
+    .addEdge("gatherMemories", "draftPlan")
     // Barrier join: classifyRisk must run exactly once, after ALL three
     // branches. Separate addEdge calls would fire it per-predecessor.
-    .addEdge(["gatherUserContext", "gatherDeviceContext", "draftWithNia"], "classifyRisk")
+    .addEdge(["gatherUserContext", "gatherDeviceContext", "draftPlan"], "classifyRisk")
     .addEdge("classifyRisk", "persistPlan")
     .addEdge("persistPlan", "runNextStep")
     .addEdge("markAwaitingApproval", "awaitApproval")

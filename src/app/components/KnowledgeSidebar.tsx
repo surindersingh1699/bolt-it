@@ -3,7 +3,6 @@
 import { useAppState } from "./StateProvider";
 import { Citation } from "@/lib/types";
 import { BookOpen, CloudCog, DatabaseZap, HardDrive, KeyRound, MessageSquare, ShieldCheck, User2 } from "lucide-react";
-import { ConnectDocsCard } from "./ConnectDocsCard";
 
 type RowTone = "live" | "mock" | "off";
 
@@ -20,15 +19,13 @@ export function KnowledgeSidebar() {
             Select a ticket to see per-ticket grounding sources.
           </p>
         </div>
-        <ConnectDocsCard />
       </div>
     );
   }
 
-  const niaCites = ticket.citations.filter((c) => c.source === "nia");
+  const runbookCites = ticket.citations.filter((c) => c.source === "runbook");
   const userCites = ticket.citations.filter((c) => c.source === "hyperspell");
   const humanGated = ticket.plan.filter((s) => s.approvalMode === "human").length;
-  const niaSourceCount = integrations.niaSources.length;
 
   return (
     <div className="bg-neutral-950 overflow-y-auto">
@@ -60,11 +57,7 @@ export function KnowledgeSidebar() {
           <SystemRow
             icon={<BookOpen size={12} />}
             label="Docs + runbooks"
-            value={
-              niaSourceCount > 0
-                ? `${runbooks.length} runbook${runbooks.length === 1 ? "" : "s"} · ${niaSourceCount} Nia source${niaSourceCount === 1 ? "" : "s"}`
-                : `${runbooks.length} runbook${runbooks.length === 1 ? "" : "s"}`
-            }
+            value={`${runbooks.length} runbook${runbooks.length === 1 ? "" : "s"}`}
             tone="live"
           />
           <SystemRow
@@ -106,21 +99,19 @@ export function KnowledgeSidebar() {
         </div>
       </section>
 
-      <ConnectDocsCard />
-
       <section className="px-4 py-4 border-b border-neutral-800">
         <div className="flex items-center gap-1.5 mb-3">
           <BookOpen size={12} className="text-emerald-400" />
           <span className="text-[11px] uppercase tracking-wider text-neutral-400">
-            Nia · runbook hits
+            Runbook hits
           </span>
-          <span className="text-[10px] text-neutral-600 ml-auto">{niaCites.length}</span>
+          <span className="text-[10px] text-neutral-600 ml-auto">{runbookCites.length}</span>
         </div>
-        {niaCites.length === 0 && (
+        {runbookCites.length === 0 && (
           <p className="text-xs text-neutral-500">No runbook matches yet.</p>
         )}
         <ul className="space-y-2">
-          {niaCites.map((c) => (
+          {runbookCites.map((c) => (
             <CiteCard key={c.ref} cite={c} runbookCount={runbooks.length} />
           ))}
         </ul>

@@ -1,5 +1,8 @@
 import { NextResponse } from "next/server";
+import { z } from "zod";
 import { getAgentJob, updateAgentJob, updateStep } from "@/lib/data";
+import { deriveJobStatus, formatProofLines } from "@/lib/evidence";
+import { ExecutionEnvelope } from "@/lib/types";
 
 export const dynamic = "force-dynamic";
 
@@ -14,36 +17,89 @@ interface Params {
   params: Promise<{ id: string }>;
 }
 
+const probeSchema = z.object({
+  label: z.string().max(120),
+  command: z.string().max(1000),
+  exitCode: z.number(),
+  facts: z.record(z.string().max(64), z.union([z.string().max(500), z.number(), z.boolean(), z.null()])),
+});
+
+const commandSchema = z.object({
+  argv: z.array(z.string().max(2000)).max(16),
+  exitCode: z.number(),
+  stdout: z.string().max(4000),
+  stderr: z.string().max(2000),
+  durationMs: z.number(),
+});
+
+const envelopeSchema = z.object({
+  jobId: z.string().max(64),
+  command: z.string().max(500),
+  host: z.string().max(253),
+  os: z.string().max(200),
+  agentVersion: z.string().max(64),
+  startedAt: z.number(),
+  finishedAt: z.number(),
+  durationMs: z.number(),
+  expectsChange: z.boolean(),
+  simulated: z.boolean().optional(),
+  probes: z.array(probeSchema).max(12),
+  commands: z.array(commandSchema).max(24),
+  effect: z.object({
+    changed: z.boolean(),
+    diff: z
+      .array(
+        z.object({
+          field: z.string().max(64),
+          before: z.union([z.string().max(500), z.number(), z.boolean(), z.null()]),
+          after: z.union([z.string().max(500), z.number(), z.boolean(), z.null()]),
+        }),
+      )
+      .max(32),
+    summary: z.string().max(1000),
+  }),
+  journalPath: z.string().max(500).optional(),
+});
+
+const bodySchema = z.object({
+  ok: z.boolean().optional(),
+  output: z.string().optional(),
+  error: z.string().optional(),
+  agentHost: z.string().max(253).optional(),
+  agentOs: z.string().max(200).optional(),
+  envelope: envelopeSchema.optional(),
+});
+
 export async function POST(req: Request, { params }: Params) {
   if (!authorized(req)) return NextResponse.json({ error: "unauthorized" }, { status: 401 });
   const { id } = await params;
-  const body = (await req.json().catch(() => ({}))) as {
-    ok?: boolean;
-    output?: string;
-    error?: string;
-    agentHost?: string;
-    agentOs?: string;
-  };
+  const raw = await req.json().catch(() => ({}));
+  const parsed = bodySchema.safeParse(raw);
+  if (!parsed.success) return NextResponse.json({ error: "invalid body" }, { status: 400 });
+  const body = parsed.data;
+
   const job = await getAgentJob(id);
   if (!job) return NextResponse.json({ error: "not_found" }, { status: 404 });
 
-  const status = body.ok === false ? "failed" : "succeeded";
+  const envelope = body.envelope as ExecutionEnvelope | undefined;
+  // The device's own before/after evidence decides the verdict — not the fact
+  // that the agent finished talking.
+  const status = deriveJobStatus(body.ok !== false, envelope);
   const completedAt = Date.now();
-  const output = String(body.output ?? "").slice(0, 8000);
-  const error = body.error ? String(body.error).slice(0, 2000) : undefined;
-  const agentHost = body.agentHost ? String(body.agentHost).slice(0, 200) : undefined;
-  const agentOs = body.agentOs ? String(body.agentOs).slice(0, 200) : undefined;
-  await updateAgentJob(id, { status, completedAt, output, error });
+  const patch = {
+    status,
+    completedAt,
+    output: String(body.output ?? "").slice(0, 8000),
+    error: body.error ? String(body.error).slice(0, 2000) : undefined,
+    envelope,
+    effectChanged: envelope?.effect.changed,
+    effectSummary: envelope?.effect.summary,
+  };
+  await updateAgentJob(id, patch);
 
   if (job.stepId) {
     await updateStep(job.ticketId, job.stepId, {
-      log: [
-        ...(agentHost && agentOs ? [`[Local Agent] Job ran on ${agentHost} (${agentOs})`] : []),
-        `[Local Agent] ${status}: ${id}`,
-        `[Local Agent] Command: ${job.allowlistedCommand}`,
-        ...(output ? output.split(/\r?\n/).slice(0, 16).map((line) => `[Local Agent] ${line}`) : []),
-        ...(error ? [`[Local Agent] Error: ${error}`] : []),
-      ],
+      log: formatProofLines({ ...job, ...patch }),
     });
   }
 

@@ -203,5 +203,3 @@ export async function attemptLogin(email: string, password: string): Promise<Log
   });
   return { ok: true, user: toPublic(user) };
 }
-
-export const sessionConstants = { COOKIE_NAME, SESSION_TTL_MS };

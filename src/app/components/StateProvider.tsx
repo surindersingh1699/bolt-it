@@ -8,13 +8,11 @@ import {
   useMemo,
   useState,
 } from "react";
-import { Ticket, Runbook, DeflectionStat, NiaSource } from "@/lib/types";
+import { Ticket, Runbook, DeflectionStat } from "@/lib/types";
 
 export interface IntegrationsState {
   slackConnected: boolean;
   slackTeamName: string | null;
-  niaSources: NiaSource[];
-  niaEnvSources: string[];
   hyperspellMode: "mock" | "live";
 }
 
@@ -87,8 +85,6 @@ function emptyIntegrations(): IntegrationsState {
   return {
     slackConnected: false,
     slackTeamName: null,
-    niaSources: [],
-    niaEnvSources: [],
     hyperspellMode: "mock",
   };
 }

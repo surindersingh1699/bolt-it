@@ -13,11 +13,10 @@ import {
 } from "@/lib/data";
 import { Ticket } from "@/lib/types";
 import { ensureSeeded } from "@/lib/seed";
-import { niaIngestTicketResolution } from "@/lib/integrations/nia";
 import { addMemory } from "@/lib/integrations/hyperspell";
 import { getCurrentUser } from "@/lib/auth";
 import { ACME_WORKSPACE_ID, getCurrentWorkspaceId } from "@/lib/workspace";
-import { inferTagsFromTicket, postSlackUpdate, synthesizeRunbookBody } from "@/lib/ticket-helpers";
+import { firstNameOf, inferTagsFromTicket, postSlackUpdate, synthesizeRunbookBody } from "@/lib/ticket-helpers";
 import { runTicketGraphFromStart, resumeTicketGraph } from "@/lib/ticket-graph";
 
 export interface CreateTicketInput {
@@ -58,7 +57,7 @@ export async function createTicket(input: CreateTicketInput): Promise<string> {
   after(async () => {
     try {
       if (ticket.channel === "slack") {
-        const firstName = ticket.reporter.split(/\s+/)[0];
+        const firstName = firstNameOf(ticket.reporter);
         await postSlackUpdate(
           ticket,
           `👋 Hi ${firstName} — got it. I'm gathering context from your runbooks, user history, and recent activity. Logged as ticket ${ticket.id}.`,
@@ -124,7 +123,7 @@ export async function confirmTicketResolved(
     resolutionTimeMs: Date.now() - ticket.createdAt,
   });
   if (ticket.channel === "slack" && source === "user_slack") {
-    const firstName = ticket.reporter.split(/\s+/)[0];
+    const firstName = firstNameOf(ticket.reporter);
     await postSlackUpdate(
       ticket,
       `🎉 Glad I could help, ${firstName}. I've saved this fix to the runbook so the next identical issue will resolve even faster.`,
@@ -139,7 +138,7 @@ export async function escalateAfterUserDenied(ticketId: string): Promise<void> {
   if (!ticket || ticket.status !== "awaiting_confirmation") return;
   await updateTicket(ticketId, { status: "escalated" });
   if (ticket.channel === "slack") {
-    const firstName = ticket.reporter.split(/\s+/)[0];
+    const firstName = firstNameOf(ticket.reporter);
     await postSlackUpdate(
       ticket,
       `🙏 Sorry that didn't fix it, ${firstName}. I've escalated ticket ${ticketId} to a human technician — they'll reach out shortly.`,
@@ -191,7 +190,6 @@ export async function extractRunbook(ticketId: string): Promise<void> {
     successCount: 1,
     failureCount: 0,
   });
-  await niaIngestTicketResolution(ticket.id, ticket.subject, body, tags);
 }
 
 export async function clearTicketQueue(): Promise<{ tickets: number; agentJobs: number }> {
@@ -215,7 +213,7 @@ export async function escalateTicket(ticketId: string): Promise<void> {
 export async function chatWithAgent(ticketId: string, message: string): Promise<"chat" | "new_ticket"> {
   const ticket = await getTicket(ticketId);
   if (!ticket) return "new_ticket";
-  const firstName = ticket.reporter.split(/\s+/)[0];
+  const firstName = firstNameOf(ticket.reporter);
   const planLines = ticket.plan
     .map((s) => `- [${s.status}] ${s.description}${s.log?.length ? ` | ${s.log.slice(-2).join(" | ").slice(0, 200)}` : ""}`)
     .join("\n");

@@ -5,6 +5,8 @@ export interface InsforgeResult {
   ok: boolean;
   log: string[];
   data?: Record<string, unknown>;
+  /** True when no live tenant was called and the log is illustrative. */
+  simulated?: boolean;
 }
 
 export async function insforgeInvoke(step: PlanStep, userEmail: string): Promise<InsforgeResult> {
@@ -22,7 +24,7 @@ export async function insforgeInvoke(step: PlanStep, userEmail: string): Promise
     const groups = ["everyone", "engineering"];
     log.push(`[InsForge] User ${userEmail} groups: ${groups.join(", ")}`);
     log.push(`[InsForge] Expected group "figma-designers" missing`);
-    return { ok: true, log, data: { groups, missing: ["figma-designers"] } };
+    return { ok: true, log, simulated: true, data: { groups, missing: ["figma-designers"] } };
   }
 
   if (step.capability === "mdm.push_vpn_config") {
@@ -32,7 +34,7 @@ export async function insforgeInvoke(step: PlanStep, userEmail: string): Promise
     log.push(`[InsForge] Pushing refreshed VPN profile`);
     await sleep(300);
     log.push(`[InsForge] Push acknowledged by device`);
-    return { ok: true, log };
+    return { ok: true, log, simulated: true };
   }
 
   if (step.capability === "identity.verify") {
@@ -40,7 +42,7 @@ export async function insforgeInvoke(step: PlanStep, userEmail: string): Promise
     log.push(`[InsForge] Cross-referencing Hyperspell user context`);
     await sleep(400);
     log.push(`[InsForge] Recent activity matches reported account; identity verified`);
-    return { ok: true, log };
+    return { ok: true, log, simulated: true };
   }
 
   if (step.capability === "ad.lookup_user") {
@@ -126,7 +128,7 @@ export async function insforgeInvoke(step: PlanStep, userEmail: string): Promise
   }
 
   log.push(`[InsForge] Generic capability completed`);
-  return { ok: true, log };
+  return { ok: true, log, simulated: true };
 }
 
 function sleep(ms: number) {

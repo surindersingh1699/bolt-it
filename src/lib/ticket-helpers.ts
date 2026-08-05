@@ -1,9 +1,15 @@
-import { getTicket, getWorkspace, listAgentJobs } from "@/lib/data";
+import { getAgentJob, getTicket, getWorkspace, listAgentJobs } from "@/lib/data";
 import { AgentJob, PlanStep, Ticket } from "@/lib/types";
 import { humanLabelFor } from "@/lib/agent-jobs";
+import { effectSummaryFor } from "@/lib/evidence";
 import { postSlackMessage } from "@/lib/slack";
 import { SlackReplyEvidence } from "@/lib/integrations/ai-gateway";
 import { appendChat } from "@/lib/chat";
+
+/** Address the reporter the way a colleague would — "Hi Dan", not "Hi Dan O'Connor". */
+export function firstNameOf(reporter: string): string {
+  return reporter.split(/\s+/)[0];
+}
 
 export async function postSlackUpdate(ticket: Ticket, text: string): Promise<void> {
   // Always record in the in-app conversation transcript (the demo Slack tab
@@ -53,8 +59,10 @@ export function buildSlackReplyEvidence(
   return steps
     .filter((s) => s.kind !== "slack_reply" && s.status !== "pending" && s.status !== "skipped")
     .map((s) => {
+      // Every finished job counts as evidence now, including the ones that
+      // changed nothing — those are exactly what the verifier must not miss.
       const matchingJob = jobs
-        .filter((j) => j.stepId === s.id && j.status === "succeeded" && j.output)
+        .filter((j) => j.stepId === s.id && j.status !== "queued" && j.status !== "claimed")
         .sort((a, b) => (b.completedAt ?? 0) - (a.completedAt ?? 0))[0];
       return {
         stepDescription: s.description || humanStepLabel(s),
@@ -62,8 +70,26 @@ export function buildSlackReplyEvidence(
         status: s.status,
         logLines: s.log ?? [],
         agentOutput: matchingJob?.output,
+        deviceEffect: matchingJob ? effectSummaryFor(matchingJob.status, matchingJob.envelope) : undefined,
+        simulated: s.simulated || matchingJob?.status === "simulated",
       };
     });
+}
+
+/**
+ * Block until a specific device job reaches a terminal state. A step that
+ * dispatched work to the user's machine cannot honestly be marked succeeded
+ * before the machine has reported back — timing out here means the device
+ * never did the work, which is a failure, not a success.
+ */
+export async function waitForJob(jobId: string, timeoutMs: number): Promise<AgentJob | null> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const job = await getAgentJob(jobId);
+    if (job && job.status !== "queued" && job.status !== "claimed") return job;
+    await new Promise((r) => setTimeout(r, 800));
+  }
+  return null;
 }
 
 export async function waitForAgentJobs(ticketId: string, timeoutMs: number): Promise<void> {

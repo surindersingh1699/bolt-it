@@ -111,7 +111,7 @@ function TicketView({
               <ShieldCheck size={12} className="text-emerald-400" />
               Confidence: {Math.round(ticket.confidence * 100)}%
               <span className="text-neutral-700">·</span>
-              {ticket.citations.filter((c) => c.source === "nia").length} runbook citations from Nia
+              {ticket.citations.filter((c) => c.source === "runbook").length} runbook citations
             </div>
           </>
         ) : (
@@ -227,11 +227,24 @@ function PlanStepRow({ step, index }: { step: PlanStep; index: number }) {
               <span className="text-[10px] font-mono text-neutral-600">{step.capability}</span>
             )}
             <RiskBadge step={step} />
+            {step.simulated && (
+              <span
+                className="text-[10px] px-1.5 py-0.5 rounded bg-amber-500/15 text-amber-300 border border-amber-500/30"
+                title="Illustrative only — nothing was executed on the user's machine"
+              >
+                simulated · no device effect
+              </span>
+            )}
           </div>
           <div className="text-sm text-neutral-200">{step.description}</div>
           {step.log && step.log.length > 0 && (
-            <pre className="mt-2 text-[11px] font-mono text-neutral-500 leading-relaxed whitespace-pre-wrap">
-              {step.log.join("\n")}
+            <pre className="mt-2 text-[11px] font-mono leading-relaxed whitespace-pre-wrap">
+              {step.log.map((line, i) => (
+                <span key={i} className={proofLineClass(line)}>
+                  {line}
+                  {"\n"}
+                </span>
+              ))}
             </pre>
           )}
         </div>
@@ -272,6 +285,16 @@ function RiskBadge({ step }: { step: PlanStep }) {
       {step.risk} risk · auto
     </span>
   );
+}
+
+// Device evidence is the line a reviewer should read first, so it is the only
+// part of the log that gets colour: green when the machine verifiably changed,
+// amber when it demonstrably did not.
+function proofLineClass(line: string): string {
+  if (line.startsWith("[Proof] EFFECT:")) return "text-emerald-400";
+  if (line.startsWith("[Proof] NO EFFECT") || line.startsWith("[Proof] SIMULATED")) return "text-amber-300";
+  if (line.startsWith("[Proof]")) return "text-neutral-400";
+  return "text-neutral-500";
 }
 
 function stepIcon(step: PlanStep) {
