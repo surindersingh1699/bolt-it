@@ -49,6 +49,12 @@ function humanLabel(command) {
   if (c.startsWith("collect_system_info")) return "Collecting computer hardware/OS info";
   if (c.startsWith("app_status ")) return "Checking whether the app is running";
   if (c.startsWith("app_event_logs ")) return "Reading the app's recent error events";
+  if (c.startsWith("process_list")) return "Listing what's running on the machine";
+  if (c.startsWith("network_state")) return "Reading interfaces, routes and DNS";
+  if (c.startsWith("command_output ")) {
+    const m = c.match(/--binary "([^"]+)"/);
+    return `Reading device state via ${m?.[1] || "a read-only command"}`;
+  }
   return "Running sandboxed diagnostic";
 }
 
@@ -476,6 +482,152 @@ async function collectAppEventLogs(ctx, { app, limit }) {
   };
 }
 
+// ---- open read surface -----------------------------------------------------
+// Differential diagnosis needs evidence variety: a hypothesis is only worth
+// forming if something can kill it. Three app-scoped probes can't kill much, so
+// these widen what can be observed — without adding any way to change the
+// machine. Every binary below is read-only, and runShell never uses a shell, so
+// there is nothing here for a metacharacter to act on.
+
+const READ_ONLY_BINARIES = IS_WINDOWS
+  ? {
+      systeminfo: {},
+      ipconfig: {},
+      netstat: {},
+      nslookup: {},
+      tasklist: {},
+      whoami: {},
+      hostname: {},
+      certutil: { subcommands: ["-store"] },
+      powershell: { getCmdletOnly: true },
+    }
+  : {
+      sw_vers: {},
+      uname: {},
+      uptime: {},
+      whoami: {},
+      hostname: {},
+      ps: {},
+      df: {},
+      du: {},
+      ls: {},
+      stat: {},
+      file: {},
+      ifconfig: {},
+      netstat: {},
+      route: { subcommands: ["-n", "get"] },
+      scutil: { subcommands: ["--dns", "--proxy", "--nwi"] },
+      dig: {},
+      host: {},
+      nslookup: {},
+      ping: {},
+      traceroute: {},
+      lsof: {},
+      sysctl: {},
+      pmset: { subcommands: ["-g"] },
+      system_profiler: {},
+      diskutil: { subcommands: ["list", "info"] },
+      defaults: { subcommands: ["read", "read-type", "domains"] },
+      plutil: { subcommands: ["-p"] },
+      codesign: { subcommands: ["-dv", "--display"] },
+      security: { subcommands: ["find-certificate", "list-keychains"] },
+      softwareupdate: { subcommands: ["--list", "-l"] },
+      log: { subcommands: ["show", "stats"] },
+      networksetup: {
+        subcommands: [
+          "-listallnetworkservices",
+          "-getinfo",
+          "-getairportpower",
+          "-getdnsservers",
+        ],
+      },
+    };
+
+// Spaces are excluded deliberately: it keeps every argument a single token, so
+// the audit string in the job record is exactly the argv that ran. Paths
+// containing spaces are the known cost of that, and worth it.
+const SAFE_ARG = /^[A-Za-z0-9._\-/:@=+,%[\]]+$/;
+
+// Enforced no matter which root a path sits under. Reading a credential store
+// is never diagnostics.
+const DENIED_ARG = /(\.ssh|\.aws|\.gnupg|keychain|cookies|login ?data|\.env|id_rsa|id_ed25519|id_ecdsa|credentials|secring|\.netrc|shadow)/i;
+
+function validateReadOnlyCommand(binary, argv) {
+  const spec = READ_ONLY_BINARIES[binary];
+  if (!spec) {
+    return `"${binary}" is not on the read-only binary allowlist`;
+  }
+  if (argv.length > 12) return "too many arguments";
+  for (const a of argv) {
+    if (a.length > 256) return "argument too long";
+    if (!SAFE_ARG.test(a)) return `argument ${JSON.stringify(a)} contains disallowed characters`;
+    if (DENIED_ARG.test(a)) return `argument ${JSON.stringify(a)} targets a credential store`;
+  }
+  if (spec.subcommands && !spec.subcommands.includes(argv[0])) {
+    return `"${binary}" allows only: ${spec.subcommands.join(", ")}`;
+  }
+  if (spec.getCmdletOnly && !/^Get-[A-Za-z]+$/.test(argv[0] ?? "")) {
+    return `"${binary}" allows only Get-* cmdlets`;
+  }
+  return null;
+}
+
+async function collectCommandOutput(ctx, { binary, argv }) {
+  const rejection = validateReadOnlyCommand(binary, argv);
+  if (rejection) return { ok: false, error: rejection };
+
+  const res = await runRecorded(ctx, binary, argv);
+  const stdout = (res.stdout || "").trim();
+  const stderr = (res.stderr || "").trim();
+  if (!stdout && stderr) {
+    return { ok: false, error: `${binary} exited ${res.code}: ${stderr.slice(0, 400)}` };
+  }
+  return {
+    ok: true,
+    output: stdout.slice(0, 6000) || `${binary} produced no output (exit ${res.code})`,
+  };
+}
+
+async function collectProcessList(ctx) {
+  if (IS_WINDOWS) {
+    const res = await runRecordedPs(
+      ctx,
+      `Get-Process | Sort-Object -Property CPU -Descending | Select-Object -First 30 ` +
+        `Id, ProcessName, CPU, @{n='MemMB';e={[math]::Round($_.WorkingSet64/1MB,1)}} | ` +
+        `Format-Table -AutoSize | Out-String -Width 200`,
+    );
+    return { ok: true, output: (res.stdout || "").trim() || "no processes returned" };
+  }
+  // -r sorts by current CPU, so the interesting rows are at the top.
+  const res = await runRecorded(ctx, "ps", ["axo", "pid,pcpu,pmem,etime,comm", "-r"]);
+  const lines = (res.stdout || "").split(/\r?\n/).slice(0, 31);
+  return { ok: true, output: lines.join("\n").trim() || "no processes returned" };
+}
+
+async function collectNetworkState(ctx) {
+  const sections = [];
+  const add = (title, text, limit) => {
+    const body = (text || "").trim();
+    if (body) sections.push(`## ${title}\n${body.slice(0, limit)}`);
+  };
+
+  if (IS_WINDOWS) {
+    add("Interfaces", (await runRecorded(ctx, "ipconfig", ["/all"])).stdout, 2500);
+    add("Routes", (await runRecorded(ctx, "netstat", ["-rn"])).stdout, 1200);
+    add("TCP", (await runRecorded(ctx, "netstat", ["-ano", "-p", "tcp"])).stdout, 1500);
+  } else {
+    add("Interfaces", (await runRecorded(ctx, "ifconfig", [])).stdout, 2500);
+    add("Routes", (await runRecorded(ctx, "netstat", ["-rn", "-f", "inet"])).stdout, 1200);
+    add("DNS resolvers", (await runRecorded(ctx, "scutil", ["--dns"])).stdout, 1500);
+    add("Listening TCP", (await runRecorded(ctx, "netstat", ["-an", "-p", "tcp"])).stdout, 1500);
+  }
+
+  return {
+    ok: true,
+    output: sections.join("\n\n") || "no network state could be read",
+  };
+}
+
 // ---- handler table ---------------------------------------------------------
 // `expectsChange: true` means the job is a fix: if the before/after probes
 // match, the server records `no_effect` instead of success.
@@ -505,17 +657,22 @@ const HANDLERS = {
     requires: ["app"],
   },
   app_event_logs: { expectsChange: false, collect: collectAppEventLogs, requires: ["app"] },
-
+  process_list: { expectsChange: false, collect: collectProcessList },
+  network_state: { expectsChange: false, collect: collectNetworkState },
+  command_output: { expectsChange: false, collect: collectCommandOutput, requires: ["binary"] },
 };
 
 function parseCommand(command) {
   const raw = String(command || "").trim();
   const name = raw.split(/\s+/)[0] ?? "";
+  const argvRaw = raw.match(/--args "([^"]*)"/)?.[1] ?? "";
   return {
     name,
     args: {
       app: raw.match(/--app "([^"]+)"/)?.[1],
       limit: Math.min(Number(raw.match(/--limit (\d+)/)?.[1] ?? 15), 50),
+      binary: raw.match(/--binary "([^"]+)"/)?.[1],
+      argv: argvRaw.split(/\s+/).filter(Boolean),
     },
   };
 }
