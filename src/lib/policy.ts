@@ -14,6 +14,10 @@ const ALLOWLIST_LOW = new Set([
   "diag.system_info",
   "diag.app_status",
   "diag.app_logs",
+  // Open read surface: observation only, no path that changes the machine.
+  "diag.process_list",
+  "diag.network_state",
+  "diag.command_output",
 ]);
 
 // Changes the user's machine, but only their own session, and reversibly.

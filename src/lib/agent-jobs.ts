@@ -9,7 +9,10 @@ export function isAgentJobCapability(capability?: string): boolean {
     capability === "diag.app_logs" ||
     capability === "fix.restart_app" ||
     capability === "fix.clear_app_cache" ||
-    capability === "fix.toggle_wifi"
+    capability === "fix.toggle_wifi" ||
+    capability === "diag.process_list" ||
+    capability === "diag.network_state" ||
+    capability === "diag.command_output"
   );
 }
 
@@ -46,16 +49,35 @@ export function humanLabelFor(capability: string | undefined): string {
   if (capability === "fix.restart_app") return "Restart the application";
   if (capability === "fix.clear_app_cache") return "Clear application cache";
   if (capability === "fix.toggle_wifi") return "Cycle the network adapter";
+  if (capability === "diag.process_list") return "List what's running on the machine";
+  if (capability === "diag.network_state") return "Read interfaces, routes and DNS";
+  if (capability === "diag.command_output") return "Read device state with a read-only command";
   return "Run device action";
 }
 
 function jobKindForCapability(capability?: string): AgentJob["kind"] {
   if (capability === "diag.system_info") return "system_info";
+  if (capability === "diag.network_state") return "network_probe";
   return "app_diagnostic";
 }
 
 function sanitizeAppName(s: unknown): string {
   return String(s ?? "").replace(/[^a-zA-Z0-9 _-]/g, "").slice(0, 64);
+}
+
+function sanitizeBinary(s: unknown): string {
+  return String(s ?? "").replace(/[^a-zA-Z0-9_.-]/g, "").slice(0, 32);
+}
+
+// Arguments are kept to single whitespace-free tokens so the audit string in the
+// job record is exactly the argv that will run. The agent re-validates all of
+// this against its own allowlist before executing — this is the outbound half.
+function sanitizeArgv(s: unknown): string {
+  return String(s ?? "")
+    .split(/\s+/)
+    .filter((tok) => tok.length > 0 && tok.length <= 256 && /^[A-Za-z0-9._\-/:@=+,%[\]]+$/.test(tok))
+    .slice(0, 12)
+    .join(" ");
 }
 
 function commandForCapability(
@@ -70,6 +92,14 @@ function commandForCapability(
   if (capability === "diag.app_logs") return `app_event_logs --app "${app}" --limit 15`;
   if (capability === "fix.restart_app") return `restart_app --app "${app}"`;
   if (capability === "fix.clear_app_cache") return `clear_app_cache --app "${app}"`;
+  if (capability === "diag.process_list") return "process_list";
+  if (capability === "diag.network_state") return "network_state";
+  if (capability === "diag.command_output") {
+    const args = sanitizeArgv(
+      Array.isArray(params?.args) ? (params.args as unknown[]).join(" ") : params?.args,
+    );
+    return `command_output --binary "${sanitizeBinary(params?.binary)}" --args "${args}"`;
+  }
   return "toggle_wifi";
 }
 
