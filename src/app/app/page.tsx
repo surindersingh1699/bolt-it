@@ -15,7 +15,7 @@ export default async function AuthedHome() {
 
   return (
     <StateProvider>
-      <div className="bg-neutral-950">
+      <div className="bg-white">
         <AppShell currentUser={user} workspaceName={ws?.displayName ?? "your workspace"} />
       </div>
     </StateProvider>

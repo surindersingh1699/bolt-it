@@ -42,7 +42,7 @@ Key properties, all verified live:
 | LLM drafting + risk judge + verifier (OpenAI-compatible endpoint) | Real |
 | Local device agent — restart app, clear cache (incl. Edge/Chrome), app status, app event logs, system info, adapter cycle (macOS + Windows) | Real execution, with before/after proof |
 | VPN diagnostics, auth-log and Kerberos-log collection on the device | Not implemented — reported as `simulated`, never as done |
-| AD account state (lock/unlock/reset/kerberos) + fleet health | Real state, seeded demo data |
+| AD account state (lock/unlock/reset/kerberos) + fleet health | Real state in our own database |
 | User memory (facts + episodes), LangSmith tracing | Real, in our own database |
 
 
@@ -55,7 +55,7 @@ pnpm dev                     # http://localhost:3000
 
 Env (`.env.local`): `AI_GATEWAY_API_KEY` + `AI_GATEWAY_URL` + `AI_GATEWAY_MODEL` (any OpenAI-compatible endpoint), `LANGSMITH_TRACING/API_KEY/PROJECT`, `LOCAL_AGENT_TOKEN`, InsForge keys.
 
-Sign in at `/login` — seeded IT staff: `morgan@acme.test` / `demo-pass-it`. Seeded broken states ready to fix: `bob` (locked account), `frank` (expired password), `eve` (stale Kerberos).
+Sign in at `/login`. The directory holds one real IT-staff account — there are no fictional colleagues. A fresh database seeds one admin from `SEED_ADMIN_EMAIL` / `SEED_ADMIN_PASSWORD` (see [src/lib/seed.ts](src/lib/seed.ts)); `node scripts/reset-workspace.mjs --yes` puts an existing database back to that state, wiping every ticket, job and workspace.
 
 **Device agent** (the thing that actually touches machines):
 
@@ -63,7 +63,7 @@ Sign in at `/login` — seeded IT staff: `morgan@acme.test` / `demo-pass-it`. Se
 LOCAL_AGENT_TOKEN=<token> node scripts/local-agent.mjs        # on this machine
 ```
 
-For a Windows VM: one-time installer (auto-start at logon, crash recovery, self-updating) — see [WINDOWS_VM_DEMO.md](WINDOWS_VM_DEMO.md). Run **one** device agent at a time.
+For a Windows VM: run [scripts/vm/install-agent.ps1](scripts/vm/install-agent.ps1) once, elevated. After that the machine pulls the current agent from `GET /api/agent/script` (bearer-authenticated) on every start, relaunches it if it exits, and starts at logon — you never copy the file in or start it by hand again. See [WINDOWS_VM_DEMO.md](WINDOWS_VM_DEMO.md). Run **one** device agent at a time.
 
 ## Testing it
 

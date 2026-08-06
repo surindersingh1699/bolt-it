@@ -8,11 +8,10 @@ import {
   useMemo,
   useState,
 } from "react";
-import { Ticket, DeflectionStat } from "@/lib/types";
+import { Ticket } from "@/lib/types";
 
 interface AppState {
   tickets: Ticket[];
-  stats: DeflectionStat;
   selectedTicketId: string | null;
   selectTicket: (id: string | null) => void;
   refresh: () => Promise<void>;
@@ -22,7 +21,6 @@ const Ctx = createContext<AppState | null>(null);
 
 export function StateProvider({ children }: { children: React.ReactNode }) {
   const [tickets, setTickets] = useState<Ticket[]>([]);
-  const [stats, setStats] = useState<DeflectionStat>(emptyStats());
   const [selectedTicketId, setSelectedTicketId] = useState<string | null>(null);
 
   const refresh = useCallback(async () => {
@@ -30,7 +28,6 @@ export function StateProvider({ children }: { children: React.ReactNode }) {
     if (!res.ok) return;
     const data = await res.json();
     setTickets(data.tickets);
-    setStats(data.stats);
     setSelectedTicketId((curr) => {
       if (curr && data.tickets.some((t: Ticket) => t.id === curr)) return curr;
       const firstActive = data.tickets.find(
@@ -53,18 +50,13 @@ export function StateProvider({ children }: { children: React.ReactNode }) {
   const value = useMemo<AppState>(
     () => ({
       tickets,
-      stats,
       selectedTicketId,
       selectTicket: setSelectedTicketId,
       refresh,
     }),
-    [tickets, stats, selectedTicketId, refresh],
+    [tickets, selectedTicketId, refresh],
   );
   return <Ctx.Provider value={value}>{children}</Ctx.Provider>;
-}
-
-function emptyStats(): DeflectionStat {
-  return { totalTickets: 0, aiResolved: 0, escalated: 0, avgResolutionMs: 0, rate: 0 };
 }
 
 export function useAppState(): AppState {

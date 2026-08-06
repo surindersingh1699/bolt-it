@@ -1,4 +1,4 @@
-import { Ticket, PlanStep, DeflectionStat, ADUser, ADGroup, ADAccount, Workspace, AgentJob, CapabilityPrecedent, Device } from "./types";
+import { Ticket, PlanStep, ADUser, ADGroup, ADAccount, Workspace, AgentJob, CapabilityPrecedent, Device } from "./types";
 
 declare global {
   // eslint-disable-next-line no-var
@@ -217,25 +217,6 @@ class ITDB {
     }
     if (tickets > 0 || agentJobs > 0) this.emit();
     return { tickets, agentJobs };
-  }
-
-  deflectionStats(workspaceId?: string): DeflectionStat {
-    const all = this.listTickets(workspaceId);
-    const resolved = all.filter((t) => t.status === "resolved");
-    const aiResolved = resolved.filter((t) => t.resolvedByAi);
-    const escalated = all.filter((t) => t.status === "escalated");
-    const totalTouched = resolved.length + escalated.length;
-    const avgResolutionMs =
-      resolved.length > 0
-        ? resolved.reduce((acc, t) => acc + (t.resolutionTimeMs ?? 0), 0) / resolved.length
-        : 0;
-    return {
-      totalTickets: all.length,
-      aiResolved: aiResolved.length,
-      escalated: escalated.length,
-      avgResolutionMs,
-      rate: totalTouched > 0 ? aiResolved.length / totalTouched : 0,
-    };
   }
 }
 

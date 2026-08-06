@@ -35,22 +35,24 @@ interface RawUser {
 const DAY = 24 * 60 * 60 * 1000;
 const HOUR = 60 * 60 * 1000;
 
+// One real account, no cast of fictional colleagues. Devices are deliberately
+// not seeded either: the only machine that should ever appear in the fleet is
+// one a local agent actually connected from.
 const RAW_USERS: RawUser[] = [
   {
-    email: "morgan@acme.test",
-    name: "Morgan Reilly",
-    password: "demo-pass-it",
+    email: process.env.SEED_ADMIN_EMAIL ?? "sabysurinder@gmail.com",
+    name: process.env.SEED_ADMIN_NAME ?? "Surinder Singh",
+    password: process.env.SEED_ADMIN_PASSWORD ?? "bolt-it",
     team: "IT",
-    title: "IT Operations Lead",
+    title: "IT support",
     groups: ["everyone", "it-staff"],
     isITStaff: true,
     account: {
       status: "active",
       failedLoginCount: 0,
-      passwordChangedDaysAgo: 8,
-      passwordExpiresInDays: 82,
+      passwordChangedDaysAgo: 0,
+      passwordExpiresInDays: 365,
       lastLoginHoursAgo: 0,
-      lastLoginHost: "MORGAN-MBP",
     },
   },
 ];

@@ -22,7 +22,7 @@ export function FleetTab({ currentUser }: { currentUser: PublicUser }) {
 
   return (
     <div className="grid grid-cols-[320px_1fr] h-full min-h-0">
-      <div className="border-r border-neutral-800 min-h-0">
+      <div className="border-r border-neutral-200 min-h-0">
         <FleetList fleet={fleet} selected={selected} onSelect={setSelected} currentUser={currentUser} />
       </div>
       <div className="overflow-y-auto min-h-0">

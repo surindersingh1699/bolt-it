@@ -7,7 +7,6 @@ import {
   ADUser,
   AgentJob,
   Citation,
-  DeflectionStat,
   Device,
   PlanStep,
   Ticket,
@@ -21,6 +20,7 @@ import {
   UserMemory,
   isFactKey,
 } from "./memory";
+import { IncidentCategory, IncidentRecord } from "./incidents";
 
 type DbRow = Record<string, unknown>;
 
@@ -776,25 +776,6 @@ export async function clearTicketsAndJobsForWorkspace(
   return db.clearTicketsForWorkspace(workspaceId);
 }
 
-export async function deflectionStats(workspaceId?: string): Promise<DeflectionStat> {
-  const all = await listTickets(workspaceId);
-  const resolved = all.filter((t) => t.status === "resolved");
-  const aiResolved = resolved.filter((t) => t.resolvedByAi);
-  const escalated = all.filter((t) => t.status === "escalated");
-  const totalTouched = resolved.length + escalated.length;
-  const avgResolutionMs =
-    resolved.length > 0
-      ? resolved.reduce((acc, t) => acc + (t.resolutionTimeMs ?? 0), 0) / resolved.length
-      : 0;
-  return {
-    totalTickets: all.length,
-    aiResolved: aiResolved.length,
-    escalated: escalated.length,
-    avgResolutionMs,
-    rate: totalTouched > 0 ? aiResolved.length / totalTouched : 0,
-  };
-}
-
 // ---- user memory -----------------------------------------------------------
 // New in m12. InsForge-only: there is no in-memory mirror to keep in sync, and
 // memory that vanishes on restart is worse than no memory at all.
@@ -907,5 +888,96 @@ export async function rememberUserEpisode(
     cacheInvalidate(`memory:${workspaceId}:${email.toLowerCase()}`);
   } catch (err) {
     console.warn("[InsForge] rememberUserEpisode failed:", (err as Error).message);
+  }
+}
+
+// ---- incident memory -------------------------------------------------------
+// Cross-user history keyed by problem class, not by person. Same storage
+// posture as user memory: InsForge-only, no in-memory mirror, and every failure
+// degrades to "no history" rather than throwing — a ticket must never fail
+// because we could not read what happened last time.
+
+export async function listIncidents(
+  workspaceId: string,
+  category: IncidentCategory,
+): Promise<IncidentRecord[]> {
+  const ifg = isInsforgeEnabled() ? getInsforge() : null;
+  if (!ifg) return [];
+  const key = `incidents:${workspaceId}:${category}`;
+  const cached = cacheGet<IncidentRecord[]>(key);
+  if (cached) return cached;
+  try {
+    const { data, error } = await ifg.database
+      .from("incident_memory")
+      .select()
+      .eq("workspace_id", workspaceId)
+      .eq("category", category)
+      .order("created_at", { ascending: false })
+      .limit(200);
+    if (error) throw new Error(JSON.stringify(error));
+    const rows = ((data as DbRow[]) ?? []).map(rowToIncident);
+    cacheSet(key, rows);
+    return rows;
+  } catch (err) {
+    console.warn("[InsForge] listIncidents failed:", (err as Error).message);
+    return cacheStale<IncidentRecord[]>(key) ?? [];
+  }
+}
+
+function rowToIncident(r: DbRow): IncidentRecord {
+  const raw = r.capabilities_used;
+  return {
+    id: String(r.id ?? ""),
+    workspaceId: String(r.workspace_id ?? ""),
+    ticketId: String(r.ticket_id ?? ""),
+    category: String(r.category ?? "other") as IncidentCategory,
+    symptom: String(r.symptom ?? ""),
+    tier: Number(r.tier ?? 1),
+    // Stored as a JSON array; tolerate a string in case a row was written by an
+    // older writer, because a parse failure here would poison the whole bucket.
+    capabilitiesUsed: Array.isArray(raw)
+      ? raw.map(String)
+      : typeof raw === "string"
+        ? safeParseArray(raw)
+        : [],
+    resolvedBy: r.resolved_by ? String(r.resolved_by) : undefined,
+    resolved: Boolean(r.resolved),
+    failureKind: r.failure_kind ? String(r.failure_kind) : undefined,
+    at: Number(r.created_at ?? 0),
+  };
+}
+
+function safeParseArray(s: string): string[] {
+  try {
+    const v = JSON.parse(s);
+    return Array.isArray(v) ? v.map(String) : [];
+  } catch {
+    return [];
+  }
+}
+
+/** One row per ticket, written once at the end. Idempotent per ticket. */
+export async function rememberIncident(record: Omit<IncidentRecord, "id">): Promise<void> {
+  const ifg = isInsforgeEnabled() ? getInsforge() : null;
+  if (!ifg) return;
+  try {
+    await ifg.database.from("incident_memory").insert([
+      {
+        id: `${record.workspaceId}:${record.ticketId}`,
+        workspace_id: record.workspaceId,
+        ticket_id: record.ticketId,
+        category: record.category,
+        symptom: record.symptom.slice(0, 300),
+        tier: record.tier,
+        capabilities_used: record.capabilitiesUsed,
+        resolved_by: record.resolvedBy ?? null,
+        resolved: record.resolved,
+        failure_kind: record.failureKind ?? null,
+        created_at: record.at,
+      },
+    ]);
+    cacheInvalidate(`incidents:${record.workspaceId}:`);
+  } catch (err) {
+    console.warn("[InsForge] rememberIncident failed:", (err as Error).message);
   }
 }

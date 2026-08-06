@@ -76,13 +76,28 @@ Server Actions in [tickets.ts](../src/app/actions/tickets.ts) are thin wrappers 
 
 ## 5. The risk gate
 
-[policy.ts](../src/lib/policy.ts) classifies every step, in this order:
+[reviewer.ts](../src/lib/reviewer.ts) rules on every step — at first draft and again at every replan, so a follow-up fix gets no free pass. It returns `allow` / `ask_human` / `block`, and the checks run in this order:
 
-1. **Allowlist.** `ALLOWLIST_LOW` (reads, lookups, notifications) → `low`. `ALLOWLIST_HIGH` (writes to identity or device state) → `high`.
-2. **LLM judge.** Anything unlisted goes to a separate model call with a strict three-tier rubric.
-3. **Fallback.** Judge unavailable or malformed → `high`. Never make this permissive.
+1. **`reply` shortcut.** A reply carries no capability and changes nothing outside the thread → `allow`.
+2. **`ALWAYS_ASK`.** `ad.reset_password` → forced `ask_human`. Checked *before* the model, so ticket text cannot argue past it.
+3. **Target binding.** Any email in the step's params that is not the reporter's → forced `ask_human`. Deterministic; a step acting on someone else is the shape a successful prompt injection takes.
+4. **LLM reviewer.** Everything else goes to `REVIEWER_MODEL` with the ticket body fenced as untrusted data.
+5. **Fail closed.** No provider, timeout, malformed JSON, or an unrecognised verdict → `ask_human` at `high` risk. Never make this permissive.
 
-`high` alone does not mean a human clicks. [governance.ts](../src/lib/governance.ts) tracks per-capability precedent, scoped per workspace. After `PROMOTION_THRESHOLD` (3) clean human approvals of the same capability, it is auto-promoted out of the gate and runs with a visible "trusted · auto" badge. `NEVER_AUTO_PROMOTE` is a hard floor checked *before* the counter, so it cannot be worn down by volume.
+The four verdicts split two ways:
+
+| Verdict | Question it answers | Autonomy may overrule? |
+|---|---|:-:|
+| `allow` | Safe to run unattended | n/a |
+| `ask_human` | Safe to run unattended | Yes |
+| `block` | Should this run at all — does it follow from the ticket? | No |
+| `needs_evidence` | Should this run at all — is its diagnosis established? | No |
+
+`needs_evidence` refuses a *change* whose justification depends on a cause nothing in the executed history observed. Read-only steps are never refused this way: gathering the evidence is exactly how the assumption gets tested. A refused step is marked `failed` with a `failure.kind` of `policy_block` or `unsupported_assumption` before anything runs.
+
+The old static allowlist (`policy.ts`) and the precedent-promotion machinery (`governance.ts`) are both deleted. There is no path by which repeated approvals promote a capability out of the gate.
+
+Under `AUTONOMY=full` every `ask_human` becomes `auto`, including steps 2 and 3 — the bypass is logged per step, so it is auditable. A `block` is never bypassed: there is no human to route it to, so bypassing would not remove a wait, it would just run the step the reviewer identified as not belonging to this problem.
 
 ---
 
@@ -92,10 +107,12 @@ All in [src/lib/integrations/](../src/lib/integrations/). Every execution adapte
 
 | Adapter | Real backend | Notes |
 |---|---|---|
-| [ai-gateway.ts](../src/lib/integrations/ai-gateway.ts) | Yes | Drafting, verifier, reply synthesis, conversational replies, memory extraction |
+| [ai-gateway.ts](../src/lib/integrations/ai-gateway.ts) | Yes | Tiered drafting, verifier, service-desk voice, reply synthesis, memory extraction |
 | [memory.ts](../src/lib/memory.ts) | Yes | Per-user facts + episodes in the `user_memory` table |
 | [directory.ts](../src/lib/integrations/directory.ts) | Yes | AD reads/writes against seeded state. Every branch touches real rows |
-| [sandbox.ts](../src/lib/integrations/sandbox.ts) | Gated | Read-only log inspection with secret redaction |
+| [knowledge.ts](../src/lib/integrations/knowledge.ts) | Yes | `kb.*` external lookup, tier 2+. Results are fenced as evidence, never instructions |
+
+Device work has no adapter here by design: it goes through [agent-jobs.ts](../src/lib/agent-jobs.ts) to the local agent, and the machine's own before/after probe is the verdict.
 
 Anything without a real backend appends `· simulated` to its log lines. **Output labeled simulated can never justify a "resolved" verdict** — the verifier enforces this.
 

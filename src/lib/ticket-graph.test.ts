@@ -16,4 +16,15 @@ describe("ticket graph wiring", () => {
     expect(nodes).toContain("verifyOutcome");
     expect(nodes).toContain("runNextStep");
   });
+
+  it("terminates at a human handoff rather than a resolved-looking finalize", async () => {
+    const { ticketGraph } = await import("./ticket-graph");
+    const nodes = Object.keys((await ticketGraph.getGraphAsync()).nodes);
+
+    // Tier 4 is a distinct terminal node, not a branch of finalizeExecution:
+    // finalize marks awaiting_confirmation, which would tell the employee the
+    // problem was solved when nobody solved it.
+    expect(nodes).toContain("humanHandoff");
+    expect(nodes).toContain("finalizeExecution");
+  });
 });

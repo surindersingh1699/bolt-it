@@ -1,10 +1,21 @@
 import { Citation, PlanStep } from "../types";
 import { FACT_KEYS, UserFact, UserMemory, memoryAsContext } from "../memory";
-import { DraftInput, DraftResult, normalizeKind } from "./draft";
+import { incidentsAsContext } from "../incidents";
+import { CapabilityRequest, DraftInput, DraftResult, RejectedHypothesis, normalizeKind } from "./draft";
 import { extractJsonObject } from "./json";
-import { Tier, VERIFIER_MODEL, capabilityAllowed, tierSpec, tierSystemPrompt } from "../tiers";
+import { gatewayChat } from "./gateway";
+import {
+  COMMUNICATOR_MODEL,
+  COMMUNICATOR_PROMPT,
+  CommunicationMoment,
+  Tier,
+  VERIFIER_MODEL,
+  capabilityAllowed,
+  momentInstruction,
+  tierSpec,
+  tierSystemPrompt,
+} from "../tiers";
 
-const AI_GATEWAY_URL = process.env.AI_GATEWAY_URL || "https://ai-gateway.vercel.sh/v1";
 const AI_GATEWAY_MODEL = process.env.AI_GATEWAY_MODEL || "anthropic/claude-haiku-4-5";
 // Conversational replies in the Slack thread; defaults to the same model the
 // planner uses (the endpoint decides valid ids — plain "gpt-4o-mini" against
@@ -36,51 +47,23 @@ ${input.priorFindings.map((f, i) => `- attempt ${i + 1}: ${f}`).join("\n")}`
 Subject: ${input.subject}
 Body: ${input.body}
 Reporter: ${input.reporter} <${input.reporterEmail}> (first name: ${firstName})
-Customer: ${input.customerOrg}${memoryContext}${priorContext}
+Customer: ${input.customerOrg}${memoryContext}${incidentsAsContext(input.incidents ?? null)}${priorContext}
 
 Produce the JSON object.`;
 
-  const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), 25_000);
-  let res: Response;
-  try {
-    res = await fetch(`${AI_GATEWAY_URL}/chat/completions`, {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${process.env.AI_GATEWAY_API_KEY}`,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({
-        model: spec.model,
-        messages: [
-          { role: "system", content: systemPrompt },
-          { role: "user", content: userPrompt },
-        ],
-        temperature: 0.2,
-      }),
-      signal: controller.signal,
-    });
-  } catch (err) {
-    console.warn("[AIGateway] fetch failed:", (err as Error).message);
-    return null;
-  } finally {
-    clearTimeout(timeoutId);
-  }
+  const content = await gatewayChat({
+    model: spec.model,
+    system: systemPrompt,
+    user: userPrompt,
+    temperature: 0.2,
+    // A deep tier is allowed to think for longer; that budget is the tier's.
+    timeoutMs: Math.max(25_000, spec.budgetMs),
+    call: "draft",
+    ticketId: input.ticketId,
+    tier: input.tier,
+  });
+  if (!content) return null;
 
-  if (!res.ok) {
-    console.warn(`[AIGateway] returned ${res.status}`);
-    return null;
-  }
-
-  let data: { choices?: Array<{ message?: { content?: string } }> };
-  try {
-    data = await res.json();
-  } catch {
-    console.warn("[AIGateway] response not JSON");
-    return null;
-  }
-
-  const content = data?.choices?.[0]?.message?.content ?? "";
   const jsonStr = extractJsonObject(content);
   if (!jsonStr) {
     console.warn("[AIGateway] no parsable JSON in response");
@@ -94,6 +77,9 @@ Produce the JSON object.`;
     customer_summary?: string;
     escalate?: boolean;
     escalate_reason?: string;
+    capability_request?: unknown;
+    rejected_hypotheses?: unknown;
+    capabilities_considered?: unknown;
     plan?: Array<{
       kind?: string;
       description?: string;
@@ -154,7 +140,115 @@ Produce the JSON object.`;
     escalate,
     escalateReason,
     hypothesis: parsed.hypothesis ?? "",
+    rejectedHypotheses: parseRejectedHypotheses(parsed.rejected_hypotheses),
+    capabilitiesConsidered: Array.isArray(parsed.capabilities_considered)
+      ? parsed.capabilities_considered.map((c) => String(c)).filter(Boolean).slice(0, 12)
+      : [],
+    capabilityRequest: parseCapabilityRequest(parsed.capability_request),
   };
+}
+
+/**
+ * A rejected hypothesis with no stated reason is not a decision record, it is
+ * noise — the whole value is in what ruled it out, so those are dropped.
+ */
+function parseRejectedHypotheses(raw: unknown): RejectedHypothesis[] {
+  if (!Array.isArray(raw)) return [];
+  const out: RejectedHypothesis[] = [];
+  for (const item of raw.slice(0, 6)) {
+    if (!item || typeof item !== "object") continue;
+    const r = item as Record<string, unknown>;
+    const hypothesis = typeof r.hypothesis === "string" ? r.hypothesis.trim() : "";
+    const ruledOutBy = typeof r.ruled_out_by === "string" ? r.ruled_out_by.trim() : "";
+    if (!hypothesis || !ruledOutBy) continue;
+    out.push({ hypothesis: hypothesis.slice(0, 200), ruledOutBy: ruledOutBy.slice(0, 200) });
+  }
+  return out;
+}
+
+export function parseCapabilityRequest(raw: unknown): CapabilityRequest | null {
+  if (!raw || typeof raw !== "object") return null;
+  const r = raw as Record<string, unknown>;
+  const name = typeof r.name === "string" ? r.name.trim() : "";
+  const command = typeof r.command === "string" ? r.command.trim() : "";
+  // Without a name and a command there is nothing a human could act on.
+  if (!name || !command) return null;
+  const probeFields = Array.isArray(r.probe_fields)
+    ? r.probe_fields.map((f) => String(f)).filter(Boolean)
+    : [];
+  return {
+    name: name.slice(0, 80),
+    kind: typeof r.kind === "string" ? r.kind : "device",
+    why: typeof r.why === "string" ? r.why.slice(0, 300) : "",
+    command: command.slice(0, 300),
+    probeFields,
+    expectsChange: r.expects_change !== false,
+    reversible: typeof r.reversible === "string" ? r.reversible.slice(0, 300) : "",
+    // Unstated risk resolves to "high", matching the reviewer's fail-closed
+    // posture: an unclassified new mutation is not treated as a safe one.
+    risk: r.risk === "low" || r.risk === "medium" || r.risk === "high" ? r.risk : "high",
+    expectedEffect: typeof r.expected_effect === "string" ? r.expected_effect.slice(0, 300) : "",
+  };
+}
+
+/**
+ * The service-desk voice. Tier 1 owns every word the employee sees, for the
+ * whole life of the ticket — including work done by tiers 2 and 3. It runs on
+ * the cheap fast model so it can speak while a slow tier is still thinking.
+ *
+ * It composes and formats; it does not interpret. The technical claim is
+ * authored by the tier that held the evidence and arrives here as tierSummary,
+ * which the prompt forbids strengthening.
+ */
+export async function communicate(args: {
+  moment: CommunicationMoment;
+  tier: Tier;
+  reporterFirstName: string;
+  subject: string;
+  body: string;
+  /** The tier's own customer_summary — carried across, never strengthened. */
+  tierSummary?: string;
+  /** What is about to run, in human terms. */
+  plannedSteps?: string[];
+  /** What has actually been observed so far. */
+  evidence?: ReplyEvidence[];
+  /** Per-attempt findings accumulated across tiers. */
+  findings?: string[];
+  /** Which ticket to bill this call to. */
+  ticketId?: string;
+}): Promise<string | null> {
+  const sections = [
+    `Employee first name: ${args.reporterFirstName}`,
+    `Their original message subject: ${args.subject}`,
+    `Their original message body: ${args.body}`,
+    `Work is currently at tier ${args.tier} (${tierSpec(args.tier).label}).`,
+  ];
+  if (args.tierSummary) {
+    sections.push(`\nWhat the engineer working it reported (carry this meaning across faithfully; you may make it clearer, not stronger):\n${args.tierSummary}`);
+  }
+  if (args.plannedSteps?.length) {
+    sections.push(`\nAbout to run:\n${args.plannedSteps.map((s) => `- ${s}`).join("\n")}`);
+  }
+  if (args.findings?.length) {
+    sections.push(`\nFindings so far:\n${args.findings.map((f, i) => `- attempt ${i + 1}: ${f}`).join("\n")}`);
+  }
+  if (args.evidence?.length) {
+    sections.push(`\nWhat actually ran and what it returned:\n${args.evidence.map((e, i) => renderEvidence(e, i, 25, 1200)).join("\n\n")}`);
+  }
+
+  const text = await gatewayChat({
+    model: COMMUNICATOR_MODEL,
+    system: `${COMMUNICATOR_PROMPT}\n\n${momentInstruction(args.moment, args.tier)}`,
+    user: sections.join("\n"),
+    temperature: 0.3,
+    // Short on purpose: the desk must stay fast enough to speak while a slow
+    // tier is still thinking. A late reassurance is worth less than none.
+    timeoutMs: 15_000,
+    call: "communicate",
+    ticketId: args.ticketId,
+    tier: args.tier,
+  });
+  return text ? text.slice(0, 1800) : null;
 }
 
 export interface ReplyEvidence {
@@ -206,9 +300,15 @@ export async function verifyAndReplan(args: {
   memory?: UserMemory;
   /** Bounds which capabilities the next round may propose. */
   tier: Tier;
+  /** Which ticket to bill this call to. */
+  ticketId?: string;
+  /**
+   * Confidence assigned so far, oldest first. The verifier is asked to move
+   * this number in light of new evidence rather than to invent a fresh one,
+   * which is what stops a mediocre round from reading as a confident restart.
+   */
+  confidenceTrail?: number[];
 }): Promise<VerdictResult | null> {
-  if (!process.env.AI_GATEWAY_API_KEY) return null;
-
   const evidenceText = args.evidence.map((e, i) => renderEvidence(e, i, 25, 1500)).join("\n\n");
 
   const systemPrompt = `You are the reasoning loop of an IT support agent, acting like an experienced technician.
@@ -227,6 +327,19 @@ Every step carries a "Device evidence" line, computed from probes the agent took
 - "VERIFIED CHANGE — <field before → after>": the machine really changed. This is the only evidence that can support resolved=true.
 - "NO EFFECT": the commands ran but the machine is byte-for-byte the same. The fix did not land. Treat it as a failed attempt and try something different — never repeat the identical step.
 - "FAILED": the command errored on the device; read the exit code and stderr in the logs before choosing the next step.
+
+CONFIDENCE IS AN UPDATE, NOT A FRESH GUESS
+${
+  args.confidenceTrail?.length
+    ? `Confidence assigned so far, oldest first: ${args.confidenceTrail
+        .map((c) => Math.round(c * 100) + "%")
+        .join(" → ")}. Move that number in light of what this round actually returned. State plainly which way you moved it and why in your reasoning.
+- Evidence that CONFIRMS the working hypothesis raises it.
+- NO EFFECT or a failed fix lowers it — the plan was wrong about the cause, and a fix that changed nothing is evidence against the diagnosis, not neutral.
+- Evidence that neither confirms nor kills anything leaves it roughly where it was. Do not reward a wasted round with a higher number.
+A confidence that only ever rises is not tracking anything. Falling is the useful signal: it is what tells the system to escalate rather than to try harder at the same wrong idea.`
+    : "No prior confidence — this is the first judgement on this ticket."
+}
 
 Return ONLY JSON:
 {
@@ -266,29 +379,18 @@ ${args.priorFindings.length ? args.priorFindings.map((f, i) => `- attempt ${i + 
 What ran in THIS attempt and what it returned:
 ${evidenceText || "(nothing executed)"}`;
 
-  try {
-    const res = await fetch(`${AI_GATEWAY_URL}/chat/completions`, {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${process.env.AI_GATEWAY_API_KEY}`,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({
-        // Deliberately NOT the drafting tier's model — see VERIFIER_MODEL in tiers.ts.
-        model: VERIFIER_MODEL,
-        messages: [
-          { role: "system", content: systemPrompt },
-          { role: "user", content: userPrompt },
-        ],
-        temperature: 0.2,
-      }),
+  {
+    const text = await gatewayChat({
+      // Deliberately NOT the drafting tier's model — see VERIFIER_MODEL in tiers.ts.
+      model: VERIFIER_MODEL,
+      system: systemPrompt,
+      user: userPrompt,
+      temperature: 0.2,
+      call: "verify",
+      ticketId: args.ticketId,
+      tier: args.tier,
     });
-    if (!res.ok) {
-      console.warn(`[AIGateway] verifyAndReplan returned ${res.status}`);
-      return null;
-    }
-    const data = (await res.json()) as { choices?: Array<{ message?: { content?: string } }> };
-    const text = data.choices?.[0]?.message?.content ?? "";
+    if (!text) return null;
     // extractJsonObject returns the JSON *string* — it still needs parsing.
     const jsonStr = extractJsonObject(text);
     if (!jsonStr) return null;
@@ -327,9 +429,6 @@ ${evidenceText || "(nothing executed)"}`;
       hypothesis: parsed.hypothesis ?? "",
       nextSteps,
     };
-  } catch (err) {
-    console.warn("[AIGateway] verifyAndReplan threw:", (err as Error).message);
-    return null;
   }
 }
 
@@ -344,8 +443,9 @@ export async function synthesizeReply(args: {
   subject: string;
   body: string;
   evidence: ReplyEvidence[];
+  /** Which ticket to bill this call to. */
+  ticketId?: string;
 }): Promise<string | null> {
-  if (!process.env.AI_GATEWAY_API_KEY) return null;
   if (args.evidence.length === 0) return null;
 
   const evidenceText = args.evidence.map((e, i) => renderEvidence(e, i, 30, 2000)).join("\n\n");
@@ -371,44 +471,16 @@ ${evidenceText}
 
 Write the Slack reply.`;
 
-  const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), 15_000);
-  let res: Response;
-  try {
-    res = await fetch(`${AI_GATEWAY_URL}/chat/completions`, {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${process.env.AI_GATEWAY_API_KEY}`,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({
-        model: AI_GATEWAY_MODEL,
-        messages: [
-          { role: "system", content: systemPrompt },
-          { role: "user", content: userPrompt },
-        ],
-        temperature: 0.3,
-      }),
-      signal: controller.signal,
-    });
-  } catch (err) {
-    console.warn("[AIGateway] synthesizeSlackReply fetch failed:", (err as Error).message);
-    return null;
-  } finally {
-    clearTimeout(timeoutId);
-  }
-
-  if (!res.ok) {
-    console.warn(`[AIGateway] synthesizeSlackReply returned ${res.status}`);
-    return null;
-  }
-
-  const data = (await res.json().catch(() => ({}))) as {
-    choices?: Array<{ message?: { content?: string } }>;
-  };
-  const text = data?.choices?.[0]?.message?.content?.trim();
-  if (!text) return null;
-  return text.slice(0, 1800);
+  const text = await gatewayChat({
+    model: AI_GATEWAY_MODEL,
+    system: systemPrompt,
+    user: userPrompt,
+    temperature: 0.3,
+    timeoutMs: 15_000,
+    call: "reply",
+    ticketId: args.ticketId,
+  });
+  return text ? text.trim().slice(0, 1800) : null;
 }
 
 /**
@@ -420,34 +492,21 @@ export async function conversationalReply(args: {
   userMessage: string;
   firstName: string;
   ticketSummary: string;
+  /** Which ticket to bill this call to. */
+  ticketId?: string;
 }): Promise<{ reply: string; newIssue: boolean } | null> {
-  if (!process.env.AI_GATEWAY_API_KEY) return null;
+  const content = await gatewayChat({
+    model: AI_GATEWAY_CHAT_MODEL,
+    system: `You are an in-house IT support agent chatting with an employee in Slack about their ticket. Warm, concise (1-4 sentences), plain text. Answer ONLY from the ticket record — what ran, what was found, current status. Never invent results. If you lack the data, say so and offer to escalate. If their message is actually a NEW unrelated IT problem, set new_issue=true and leave reply empty. Return ONLY JSON: {"reply":"...","new_issue":false}`,
+    user: `Employee first name: ${args.firstName}\n\nTicket record:\n${args.ticketSummary}\n\nEmployee's message: ${args.userMessage}`,
+    temperature: 0.3,
+    call: "communicate",
+    ticketId: args.ticketId,
+  });
+  if (!content) return null;
+  const jsonStr = extractJsonObject(content);
+  if (!jsonStr) return null;
   try {
-    const res = await fetch(`${AI_GATEWAY_URL}/chat/completions`, {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${process.env.AI_GATEWAY_API_KEY}`,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({
-        model: AI_GATEWAY_CHAT_MODEL,
-        temperature: 0.3,
-        messages: [
-          {
-            role: "system",
-            content: `You are an in-house IT support agent chatting with an employee in Slack about their ticket. Warm, concise (1-4 sentences), plain text. Answer ONLY from the ticket record — what ran, what was found, current status. Never invent results. If you lack the data, say so and offer to escalate. If their message is actually a NEW unrelated IT problem, set new_issue=true and leave reply empty. Return ONLY JSON: {"reply":"...","new_issue":false}`,
-          },
-          {
-            role: "user",
-            content: `Employee first name: ${args.firstName}\n\nTicket record:\n${args.ticketSummary}\n\nEmployee's message: ${args.userMessage}`,
-          },
-        ],
-      }),
-    });
-    if (!res.ok) return null;
-    const data = (await res.json()) as { choices?: Array<{ message?: { content?: string } }> };
-    const jsonStr = extractJsonObject(data.choices?.[0]?.message?.content ?? "");
-    if (!jsonStr) return null;
     const parsed = JSON.parse(jsonStr) as { reply?: string; new_issue?: boolean };
     return { reply: parsed.reply ?? "", newIssue: Boolean(parsed.new_issue) };
   } catch {
@@ -472,9 +531,9 @@ export async function extractUserMemory(args: {
   body: string;
   outcome: string;
   knownFacts: UserFact[];
+  /** Which ticket to bill this call to. */
+  ticketId?: string;
 }): Promise<ExtractedMemory | null> {
-  if (!process.env.AI_GATEWAY_API_KEY) return null;
-
   const systemPrompt = `You maintain a small, durable memory profile for an IT support user — the things a good helpdesk colleague would remember about them.
 
 Return ONLY JSON:
@@ -504,36 +563,18 @@ Outcome: ${args.outcome}
 
 Produce the JSON.`;
 
-  const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), 12_000);
-  let res: Response;
-  try {
-    res = await fetch(`${AI_GATEWAY_URL}/chat/completions`, {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${process.env.AI_GATEWAY_API_KEY}`,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({
-        model: AI_GATEWAY_MODEL,
-        messages: [
-          { role: "system", content: systemPrompt },
-          { role: "user", content: userPrompt },
-        ],
-        temperature: 0,
-      }),
-      signal: controller.signal,
-    });
-  } catch (err) {
-    console.warn("[AIGateway] memory extraction failed:", (err as Error).message);
-    return null;
-  } finally {
-    clearTimeout(timeoutId);
-  }
-  if (!res.ok) return null;
+  const content = await gatewayChat({
+    model: AI_GATEWAY_MODEL,
+    system: systemPrompt,
+    user: userPrompt,
+    temperature: 0,
+    timeoutMs: 12_000,
+    call: "memory",
+    ticketId: args.ticketId,
+  });
+  if (!content) return null;
 
-  const data: { choices?: Array<{ message?: { content?: string } }> } = await res.json().catch(() => ({}));
-  const jsonStr = extractJsonObject(data?.choices?.[0]?.message?.content ?? "");
+  const jsonStr = extractJsonObject(content);
   if (!jsonStr) return null;
 
   try {

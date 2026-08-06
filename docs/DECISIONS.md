@@ -129,3 +129,130 @@ for search and is lost on restart, which would have meant two memory systems.
 With ~10 real capabilities the judge was a moving part that could be wrong,
 unavailable, or prompt-injected. `policy.ts` is now a lookup across low/medium/
 high sets; anything unlisted is high risk and needs a human.
+
+## 2026-08-05 — UI rebuilt as a light, two-audience surface; demo cast deleted
+
+The dark console showed one screen to everybody and led with the graph's own
+vocabulary — Console/Chat/Runbooks tabs, an autonomy metrics strip, a LangGraph
+node diagram, per-step risk badges. That is the debugging view, not the product.
+
+Two surfaces replaced it, split by who is reading:
+
+- **IT staff — [InboxView](../src/app/components/InboxView.tsx) +
+  [TicketDetail](../src/app/components/TicketDetail.tsx).** Nav by what the
+  ticket needs ("Needs your approval", "Working now", …), then list, then
+  detail. The `interrupt()` gate renders as one blue card with two buttons, in
+  the same place every time.
+- **Everyone else — [MyTicketView](../src/app/components/MyTicketView.tsx).** A
+  vertical stepper answering one question: who is waiting on what, and when am
+  I unblocked. One composer files, replies, and confirms.
+
+Both read [ticket-view.ts](../src/app/components/ticket-view.ts), so the same
+state is worded the same way on both. Proof-of-effect is now a sentence a human
+reads ("Ran cleanly, but nothing on the machine changed"), not a log prefix.
+
+Deleted, not restyled: `Console`, `TicketQueue`, `ActiveTicket`,
+`KnowledgeSidebar`, `DeflectionDashboard`, `AgentGraphView`, `AgentTracePanel`,
+`SlackChat`, and the whole `DeflectionStat` path from `/api/state` through
+`data.ts` and `db.ts` — it fed a metrics strip that no longer exists and was
+recomputed on every 600ms poll. Node names, capability ids, risk tiers and the
+graph trace survive behind a "Technical detail" disclosure in `TicketDetail`;
+they are still the fastest way to debug a bad run, they just no longer lead.
+
+The seeded cast (Alice, Bob, Carol, Dan, Eve, Frank, Priya, Morgan, Sam), their
+one-click login panel, 65 leftover `demo-*` workspaces and every ticket in the
+database were deleted. `seed.ts` now creates exactly one IT-staff account and no
+device: the only machine that should appear in the fleet is one a local agent
+actually connected from.
+
+## 2026-08-05 — Incident memory is a closed category set, not a vector index
+
+**What.** Added `incident_memory` (m15): one row per ticket, keyed by an
+`IncidentCategory` assigned by `classifyIncident()` — a pure keyword function of
+the ticket text. Retrieval is an equality match on that category. No embeddings,
+no pgvector, no similarity threshold.
+
+**Why.** The obvious design was semantic search over past tickets. Three reasons
+it lost:
+
+1. **Write and read must agree.** The category is needed *before* drafting (to
+   retrieve) and again at the end (to store). Any model-assigned label can
+   assign two different buckets to the same ticket, which breaks retrieval
+   silently — the bucket looks empty and nobody notices. A pure function cannot
+   disagree with itself.
+2. **Latency on the critical path.** An embedding call sits between the employee
+   filing and the agent starting. The keyword pass costs nothing.
+3. **Explainability.** "We looked at 27 past VPN tickets" is auditable. "Cosine
+   similarity 0.92" is not something an IT manager can check.
+
+**The cost, stated plainly.** Coarse buckets miss cross-category patterns, and
+"other" is a real bucket that will collect genuine problems. Revisit if a
+category's volume makes it useless — the fix is splitting a category, not
+reaching for embeddings.
+
+**Success rates are earned, not estimated.** `summarizeIncidents` credits a
+capability only where it was the `resolvedBy` — the step that moved the machine
+per before/after probes. A diagnostic that merely ran in a ticket that later
+resolved gets no credit; counting it would inflate every probe to near-100% and
+send the next planner at a step that changes nothing. This is why the rates can
+be trusted more than asking a model for a success probability, which was the
+alternative considered and rejected.
+
+## 2026-08-05 — Reviewer gained a fourth verdict, and the verdicts split two ways
+
+**What.** `needs_evidence` joins `allow` / `ask_human` / `block`. It refuses a
+*change* whose justification rests on a cause nothing in the executed history
+established. Read-only steps are exempt by construction — gathering evidence on
+a hunch is correct.
+
+**Why the split matters.** `allow` / `ask_human` answer *is this safe to run
+unattended* — a scheduling question, which `AUTONOMY=full` may overrule.
+`block` / `needs_evidence` answer *should this run at all* — and autonomy never
+overrules those. There is no human to route a refusal to under full autonomy, so
+bypassing would not remove a wait; it would just run the step the reviewer
+identified as wrong.
+
+**Cost.** One more way for a correct plan to be refused, and it is an LLM
+judgement so it will sometimes be wrong. Mitigated by the read-only exemption
+and by the refusal landing in the handoff artifact with its reason, so a
+false refusal is visible rather than silent.
+
+## 2026-08-05 — One gateway helper; failure is `null`, always
+
+**What.** Six near-duplicate `fetch` blocks collapsed into `gatewayChat`
+([src/lib/integrations/gateway.ts](../src/lib/integrations/gateway.ts)). It owns
+transport, timeout, response shape and token accounting.
+
+**Why.** The copies had already drifted in their timeouts and their logging, and
+adding cost accounting would have meant editing all six identically and hoping.
+The contract is deliberately narrow: `string | null`, where null always means
+"no usable answer" regardless of cause. That single meaning is what lets every
+caller fail closed with one check instead of enumerating failure modes.
+
+**Cost.** Callers lose the ability to distinguish a timeout from a 500. Nothing
+upstream branched on that distinction, and the usage ledger records it anyway.
+
+## 2026-08-05 — Execution moved out of the orchestrator into a registry
+
+**What.** The four-branch `if/else` inside the graph's execute node became
+`EXECUTORS: Record<ActionKind, StepExecutor>` in
+[src/lib/executors.ts](../src/lib/executors.ts). `executeStepAndPersist` now
+does lifecycle only: mark running, dispatch, record.
+
+**Why.** The graph decides WHAT to do and in what order; that is orchestration.
+Deciding HOW a command reaches a machine is a different concern with a different
+rate of change — the plan shape has been stable, while the execution surfaces
+(SSH, Intune, SCCM, a REST endpoint) are exactly what a deployment will want to
+vary. Mixing them meant every new surface was an edit to the file that owns the
+approval `interrupt()`, which is the single worst place in this codebase to
+invite unrelated churn.
+
+**The safety argument, explicitly.** `runNextStep` applies the approval gate and
+*then* calls the dispatcher. Because executors are reached only through that
+dispatcher, a new executor cannot introduce a path to a high-risk step that
+bypasses the gate — it is structurally downstream of it. Adding a branch inside
+the old `if/else` had no such guarantee beyond care.
+
+**Contract, kept from the old code.** Executors never throw and always name a
+`StepFailureKind` on failure. The dispatcher still catches as a backstop, but an
+executor relying on that backstop is a bug.

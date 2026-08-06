@@ -9,19 +9,34 @@ import {
   getUserMemory,
   rememberUserFact,
   rememberUserEpisode,
+  listIncidents,
+  rememberIncident,
 } from "@/lib/data";
-import { Citation, PlanStep, Ticket } from "@/lib/types";
+import { Citation, PlanStep, StepFailure, Ticket } from "@/lib/types";
 import { UserMemory, EMPTY_MEMORY, preferredName } from "@/lib/memory";
-import { DraftResult } from "@/lib/integrations/draft";
+import { DraftResult, RejectedHypothesis } from "@/lib/integrations/draft";
 import { REVIEWER_MODEL, reviewPlan } from "@/lib/reviewer";
-import { directoryInvoke } from "@/lib/integrations/directory";
-import { knowledgeInvoke } from "@/lib/integrations/knowledge";
-import { aiGatewayDraft, synthesizeReply, verifyAndReplan, extractUserMemory } from "@/lib/integrations/ai-gateway";
-import { enqueueAgentJob, isAgentJobCapability } from "@/lib/agent-jobs";
-import { formatProofLines, isRealSuccess } from "@/lib/evidence";
+import {
+  aiGatewayDraft,
+  communicate,
+  synthesizeReply,
+  verifyAndReplan,
+  extractUserMemory,
+  type ReplyEvidence,
+} from "@/lib/integrations/ai-gateway";
+import { isAgentJobCapability } from "@/lib/agent-jobs";
 import { appendTrace } from "@/lib/trace";
 import { readHeartbeat, HEARTBEAT_CONNECTED_WINDOW_MS } from "@/lib/agent-heartbeat";
-import { Tier, nextTier, tierSpec } from "@/lib/tiers";
+import { CommunicationMoment, Tier, nextTier, tierSpec } from "@/lib/tiers";
+import { EXECUTORS } from "@/lib/executors";
+import {
+  EMPTY_STATS,
+  IncidentCategory,
+  IncidentStats,
+  MIN_SAMPLES,
+  classifyIncident,
+  summarizeIncidents,
+} from "@/lib/incidents";
 import {
   buildReplyEvidence,
   firstNameOf,
@@ -29,16 +44,39 @@ import {
   postUpdate,
   substituteParams,
   waitForAgentJobs,
-  waitForJob,
 } from "@/lib/ticket-helpers";
-
-// How long a step will wait for the user's machine to report back before
-// treating the work as not done.
-const AGENT_JOB_TIMEOUT_MS = 45_000;
 
 export interface Approver {
   name: string;
   email: string;
+}
+
+/**
+ * What one tier concluded, in structure rather than prose. Written once per tier
+ * that drafts, and read only at handoff — a technician inheriting the ticket
+ * gets the case in the order a colleague would tell it: what each tier thought,
+ * what it ruled out, and why it let go.
+ *
+ * This is a decision record, never chain of thought. `rejected` holds
+ * conclusions the tier reached and the observation that killed each one.
+ */
+export interface TierDecision {
+  tier: Tier;
+  hypothesis: string;
+  rejected: RejectedHypothesis[];
+  capabilitiesConsidered: string[];
+  /** How this tier's turn ended, in a few words. */
+  outcome: string;
+}
+
+function decisionFrom(draft: DraftResult, outcome: string): TierDecision {
+  return {
+    tier: draft.tier,
+    hypothesis: draft.hypothesis || draft.reasoning,
+    rejected: draft.rejectedHypotheses,
+    capabilitiesConsidered: draft.capabilitiesConsidered,
+    outcome,
+  };
 }
 
 const DRAFT_TIMEOUT_MS = 30_000;
@@ -57,6 +95,9 @@ const TicketGraphState = Annotation.Root({
   profile: Annotation<string | null>({ reducer: overwrite, default: () => null }),
   memory: Annotation<UserMemory>({ reducer: overwrite, default: () => EMPTY_MEMORY }),
   deviceContext: Annotation<string | null>({ reducer: overwrite, default: () => null }),
+  // Problem class + what has actually worked on it before, across everyone.
+  incidentCategory: Annotation<IncidentCategory>({ reducer: overwrite, default: () => "other" }),
+  incidents: Annotation<IncidentStats>({ reducer: overwrite, default: () => EMPTY_STATS("other") }),
   draft: Annotation<DraftResult | null>({ reducer: overwrite, default: () => null }),
   citations: Annotation<Citation[]>({ reducer: overwrite, default: () => [] }),
   classifiedPlan: Annotation<PlanStep[]>({ reducer: overwrite, default: () => [] }),
@@ -64,11 +105,77 @@ const TicketGraphState = Annotation.Root({
   // Escalation depth. Every ticket starts at first-line and only ever moves down.
   tier: Annotation<Tier>({ reducer: overwrite, default: () => 1 }),
   findings: Annotation<string[]>({ reducer: (cur, upd) => cur.concat(upd), default: () => [] }),
+  /**
+   * Every confidence this ticket has been assigned, oldest first: the drafting
+   * tier's, then one per verification round. Kept as a trail rather than a
+   * single number because the SHAPE carries the information — 0.8 → 0.4 means
+   * the evidence contradicted a confident plan, which is a different situation
+   * from 0.4 → 0.4, and only the first is worth escalating on.
+   */
+  confidenceTrail: Annotation<number[]>({ reducer: (cur, upd) => cur.concat(upd), default: () => [] }),
+  // One record per tier that reasoned about this ticket. `findings` is prose for
+  // the next model to read; this is structure for a human to read.
+  decisions: Annotation<TierDecision[]>({ reducer: (cur, upd) => cur.concat(upd), default: () => [] }),
   pendingStepId: Annotation<string | null>({ reducer: overwrite, default: () => null }),
   approver: Annotation<Approver | null>({ reducer: overwrite, default: () => null }),
 });
 
 type TState = typeof TicketGraphState.State;
+
+// ---- the service desk ------------------------------------------------------
+// Tier 1 owns every word the employee sees, for the whole life of the ticket —
+// including work done by tiers 2 and 3, which have no reply capability at all.
+// One voice start to finish, so an escalation reads as the problem being taken
+// more seriously rather than as being passed between strangers.
+//
+// Always posts something. If the desk model is unavailable the deterministic
+// fallback goes out instead: silence during a slow tier is the failure mode this
+// whole arrangement exists to prevent.
+async function say(
+  ticket: Ticket,
+  memory: UserMemory,
+  tier: Tier,
+  moment: CommunicationMoment,
+  fallback: string,
+  extras: {
+    tierSummary?: string;
+    plannedSteps?: string[];
+    evidence?: ReplyEvidence[];
+    findings?: string[];
+  } = {},
+): Promise<void> {
+  const text = await communicate({
+    ticketId: ticket.id,
+    moment,
+    tier,
+    reporterFirstName: preferredName(memory, firstNameOf(ticket.reporter)),
+    subject: ticket.subject,
+    body: ticket.body,
+    ...extras,
+  }).catch(() => null);
+  await postUpdate(ticket, text ?? fallback);
+}
+
+// A fix a tier needed and did not have. It cannot be registered at runtime — a
+// handler with no probe produces no before/after facts, so it could never be
+// verified — but it is exactly the spec a human needs to add one, so it rides
+// along in the findings and lands in the handoff artifact.
+function noteCapabilityRequest(ticketId: string, draft: DraftResult): string | null {
+  const req = draft.capabilityRequest;
+  if (!req) return null;
+  appendTrace(
+    ticketId,
+    "capabilityRequest",
+    "completed",
+    `tier ${draft.tier} asked for a new capability "${req.name}": ${req.why || "(no reason given)"}`,
+  );
+  return (
+    `tier ${draft.tier} requested a capability it does not have — ${req.name} (${req.risk} risk): ${req.why}. ` +
+    `Proposed command: ${req.command}. Expected effect: ${req.expectedEffect || "(not stated)"}. ` +
+    `Verify via: ${req.probeFields.join(", ") || "(no probe proposed)"}. ` +
+    `Reversible by: ${req.reversible || "(not stated)"}.`
+  );
+}
 
 // ---- context gathering: three unconditional parallel branches from START.
 
@@ -118,6 +225,29 @@ async function gatherDeviceContext(state: TState) {
   return { deviceContext: device ? detail : null };
 }
 
+// What happened the last time this KIND of problem came in, across everyone.
+// Runs on the same parallel fan-out as the other context branches: the category
+// is a pure function of the ticket text, so this costs one read and no model
+// call. Degrades to empty stats — never to a thrown error.
+async function gatherIncidentHistory(state: TState) {
+  const t0 = Date.now();
+  const ticket = await getTicket(state.ticketId);
+  if (!ticket) return {};
+  const category = classifyIncident(ticket.subject, ticket.body);
+  const rows = await listIncidents(ticket.workspaceId, category).catch(() => []);
+  const stats = summarizeIncidents(category, rows);
+  const best = stats.capabilities.find((c) => c.attempts >= MIN_SAMPLES && c.successRate > 0);
+  appendTrace(
+    state.ticketId,
+    "gatherIncidentHistory",
+    "completed",
+    `classed as "${category}" · ${stats.total} past ticket(s), ${stats.resolved} resolved` +
+      (best ? ` · best so far: ${best.capability} at ${Math.round(best.successRate * 100)}%` : ""),
+    Date.now() - t0,
+  );
+  return { incidentCategory: category, incidents: stats };
+}
+
 /**
  * One tier's attempt at the problem. Shared by the first-line draft node and by
  * escalateTier, so a deeper tier reasons through exactly the same path — same
@@ -131,6 +261,7 @@ async function draftAtTier(
   const spec = tierSpec(tier);
   return withTimeout(
     aiGatewayDraft({
+      ticketId: ticket.id,
       subject: ticket.subject,
       body: ticket.body,
       reporter: ticket.reporter,
@@ -140,6 +271,7 @@ async function draftAtTier(
       memory: state.memory,
       tier,
       priorFindings: state.findings,
+      incidents: state.incidents,
     }),
     Math.max(DRAFT_TIMEOUT_MS, spec.budgetMs),
     `draftPlan:tier${tier}`,
@@ -173,7 +305,8 @@ async function draftPlanNode(state: TState) {
           (draft.hypothesis ? ` · hypothesis: ${draft.hypothesis}` : ""),
       Date.now() - t0,
     );
-    return { draft };
+    const capabilityNote = noteCapabilityRequest(state.ticketId, draft);
+    return capabilityNote ? { draft, findings: [capabilityNote] } : { draft };
   } catch (err) {
     console.warn(`[draftPlanNode] ${state.ticketId} failed (${(err as Error).message}); using minimal fallback`);
     appendTrace(
@@ -199,6 +332,11 @@ async function draftPlanNode(state: TState) {
       escalate: false,
       escalateReason: "",
       hypothesis: "",
+      // Nothing reasoned about this ticket, so there are no discarded
+      // explanations and no capability to ask for.
+      rejectedHypotheses: [],
+      capabilitiesConsidered: [],
+      capabilityRequest: null,
     };
     return { draft: fallback };
   }
@@ -269,11 +407,18 @@ async function persistPlan(state: TState) {
 
   const updatedForSlack = await getTicket(state.ticketId);
   if (updatedForSlack) {
-    const firstName = firstNameOf(ticket.reporter);
+    const firstName = preferredName(state.memory, firstNameOf(ticket.reporter));
     const planLines = state.classifiedPlan.map((s, i) => `   ${i + 1}. ${humanStepLabel(s)}`).join("\n");
-    await postUpdate(
+    await say(
       updatedForSlack,
-      `🔎 Hi ${firstName} — here's my plan:\n${planLines}\n\n_Ticket ${state.ticketId} · saved for future reference_`,
+      state.memory,
+      state.tier,
+      "intake",
+      `Hi ${firstName} — here's what I'm going to check:\n${planLines}\n\n_Ticket ${state.ticketId}_`,
+      {
+        tierSummary: state.draft.response || undefined,
+        plannedSteps: state.classifiedPlan.map((s) => humanStepLabel(s)),
+      },
     );
   }
   return {};
@@ -289,9 +434,13 @@ function tierGate(state: TState) {
   const spec = tierSpec(state.tier);
 
   if (draft.escalate) {
+    const reason = draft.escalateReason || draft.reasoning;
     return new Command({
       goto: "escalateTier",
-      update: { findings: [`tier ${state.tier} declined: ${draft.escalateReason || draft.reasoning}`] },
+      update: {
+        findings: [`tier ${state.tier} declined: ${reason}`],
+        decisions: [decisionFrom(draft, `declined and escalated: ${reason}`)],
+      },
     });
   }
 
@@ -312,6 +461,14 @@ function tierGate(state: TState) {
         findings: [
           `tier ${state.tier} was only ${Math.round(draft.confidence * 100)}% confident: ${draft.reasoning}`,
         ],
+        decisions: [
+          decisionFrom(
+            draft,
+            `escalated on confidence — ${Math.round(draft.confidence * 100)}% against a ${Math.round(
+              spec.confidenceFloor * 100,
+            )}% floor`,
+          ),
+        ],
       },
     });
   }
@@ -319,11 +476,20 @@ function tierGate(state: TState) {
   if (state.classifiedPlan.length === 0) {
     return new Command({
       goto: "escalateTier",
-      update: { findings: [`tier ${state.tier} produced no runnable steps`] },
+      update: {
+        findings: [`tier ${state.tier} produced no runnable steps`],
+        decisions: [decisionFrom(draft, "produced no runnable steps")],
+      },
     });
   }
 
-  return new Command({ goto: "persistPlan" });
+  return new Command({
+    goto: "persistPlan",
+    update: {
+      decisions: [decisionFrom(draft, `took the ticket with ${state.classifiedPlan.length} step(s)`)],
+      confidenceTrail: [draft.confidence],
+    },
+  });
 }
 
 // Hand the problem to the next tier down: stronger model, wider capability set,
@@ -342,7 +508,7 @@ async function escalateTier(state: TState) {
       "completed",
       `tier ${state.tier} is the deepest tier — handing to a human technician with findings`,
     );
-    return new Command({ goto: "finalizeExecution" });
+    return new Command({ goto: "humanHandoff" });
   }
 
   const spec = tierSpec(next);
@@ -364,7 +530,7 @@ async function escalateTier(state: TState) {
       "no drafting provider available — handing to a human",
       Date.now() - t0,
     );
-    return new Command({ goto: "finalizeExecution", update: { tier: next } });
+    return new Command({ goto: "humanHandoff", update: { tier: next } });
   }
 
   if (draft.escalate || draft.plan.length === 0) {
@@ -383,6 +549,9 @@ async function escalateTier(state: TState) {
         tier: next,
         attempt: 1,
         findings: [`tier ${next} declined: ${draft.escalateReason || draft.reasoning}`],
+        decisions: [
+          decisionFrom(draft, `declined: ${draft.escalateReason || "produced no runnable steps"}`),
+        ],
       },
     });
   }
@@ -409,101 +578,85 @@ async function escalateTier(state: TState) {
     Date.now() - t0,
   );
 
-  const firstName = firstNameOf(ticket.reporter);
-  await postUpdate(
+  const firstName = preferredName(state.memory, firstNameOf(ticket.reporter));
+  await say(
     ticket,
-    `⏫ Hi ${firstName} — this needs deeper diagnostics than the first pass could give it, so I've brought in more capable tooling. ` +
+    state.memory,
+    next,
+    "escalation",
+    `Hi ${firstName} — this one needs deeper diagnostics than the first pass could give it, so I've brought in more capable tooling. ` +
       `Next: ${classified.map((s) => humanStepLabel(s)).join(", ")}.`,
+    {
+      tierSummary: draft.response || undefined,
+      plannedSteps: classified.map((s) => humanStepLabel(s)),
+      findings: state.findings,
+    },
   );
+
+  const capabilityNote = noteCapabilityRequest(state.ticketId, draft);
 
   return new Command({
     goto: "runNextStep",
-    update: { tier: next, attempt: 1, draft, classifiedPlan: classified },
+    update: {
+      tier: next,
+      attempt: 1,
+      draft,
+      classifiedPlan: classified,
+      ...(capabilityNote ? { findings: [capabilityNote] } : {}),
+      decisions: [decisionFrom(draft, `took the ticket with ${classified.length} step(s)`)],
+    },
   });
 }
 
-// Shared step dispatcher: one branch per kind, no vendor branding.
-async function executeStepAndPersist(ticket: Ticket, step: PlanStep): Promise<{ ok: boolean }> {
+/**
+ * Run one step and persist its outcome.
+ *
+ * The graph's only job here is lifecycle: mark running, dispatch, record. HOW a
+ * step runs lives in the executor registry, so a new execution surface never
+ * touches this function and never gets a chance to slip past the approval gate
+ * that runNextStep applies before calling it.
+ */
+async function executeStepAndPersist(
+  ticket: Ticket,
+  step: PlanStep,
+): Promise<{ ok: boolean; failure?: StepFailure }> {
   await updateStep(ticket.id, step.id, { status: "running", startedAt: Date.now() });
   if (step.kind !== "reply") {
     await postUpdate(ticket, `\u{1F527} ${humanStepLabel(step)}\u2026`);
   }
 
-  let ok = true;
-  let log: string[] = [];
+  let ok: boolean;
+  let log: string[];
+  // Why it failed, not just that it did. Set on every path that clears `ok`.
+  let failure: StepFailure | undefined;
 
   try {
-    if (step.kind === "backend") {
-      const r = await directoryInvoke(step, ticket.reporterEmail);
-      ok = r.ok;
-      log = r.log;
-    } else if (step.kind === "knowledge") {
-      // External lookup. Everything it returns is fenced as evidence — the tier
-      // prompts forbid acting on instructions found inside a fetched page.
-      const r = await knowledgeInvoke(step);
-      ok = r.ok;
-      log = r.log;
-    } else if (step.kind === "device") {
-      // Work on the user's machine is decided by the machine. No parallel
-      // narration from the cloud — the before/after evidence is the verdict.
-      const job = await enqueueAgentJob(ticket, step);
-      log.push(`[Agent Queue] Job ${job.id} dispatched to the device agent`);
-      log.push(`[Agent Queue] ${job.allowlistedCommand}`);
-
-      const finished = await waitForJob(job.id, AGENT_JOB_TIMEOUT_MS);
-      if (!finished) {
-        ok = false;
-        log.push(
-          `[Local Agent] No result within ${AGENT_JOB_TIMEOUT_MS / 1000}s — the device agent is offline or busy. ` +
-            `Nothing was done on the user's machine.`,
-        );
-      } else {
-        log = [...log, ...formatProofLines(finished)];
-        ok = isRealSuccess(finished.status);
-        if (finished.status === "no_effect") {
-          log.push(`[Local Agent] Step marked failed: the fix ran but the device did not change.`);
-        }
-      }
-    } else if (step.kind === "reply") {
-      log = [`[Reply] Waiting for any pending device jobs before composing reply`];
-      await waitForAgentJobs(ticket.id, 20_000);
-
-      const fresh = await getTicket(ticket.id);
-      const stepsBeforeReply = (fresh?.plan ?? []).filter((s) => s.id !== step.id);
-      const allJobs = await listAgentJobs(ticket.workspaceId);
-      const jobsForTicket = allJobs.filter((j) => j.ticketId === ticket.id);
-
-      const evidence = buildReplyEvidence(stepsBeforeReply, jobsForTicket);
-      log.push(`[Reply] Synthesizing reply from ${evidence.length} executed step(s)`);
-
-      const firstName = firstNameOf(ticket.reporter);
-      const synthesized = await synthesizeReply({
-        reporterFirstName: firstName,
-        subject: ticket.subject,
-        body: ticket.body,
-        evidence,
-      }).catch(() => null);
-
-      const replyText =
-        synthesized ?? ticket.draftResponse ?? `Hi ${firstName} — your IT ticket ${ticket.id} has been updated.`;
-      log.push(
-        synthesized
-          ? `[Reply] Composed from real step results`
-          : `[Reply] Synthesizer unavailable — falling back to initial draft`,
-      );
-      await postUpdate(ticket, replyText);
-    }
+    const result = await EXECUTORS[step.kind](ticket, step);
+    ok = result.ok;
+    log = result.log;
+    failure = result.failure;
   } catch (err) {
+    // Executors are contracted not to throw. This is the backstop for the one
+    // that does anyway — an escalated ticket, never a crashed graph.
     ok = false;
+    failure = { kind: "execution", detail: (err as Error).message };
     log = [`[Error] ${(err as Error).message}`];
+  }
+
+  if (!ok) {
+    // Belt and braces: a `failed` step with no taxonomy entry is exactly the
+    // uninformative record this exists to prevent.
+    failure ??= { kind: "execution", detail: "step did not complete; no adapter detail was returned" };
+    log.push(`[Failure] ${failure.kind}: ${failure.detail}`);
   }
 
   await updateStep(ticket.id, step.id, {
     status: ok ? "succeeded" : "failed",
     log,
     finishedAt: Date.now(),
+    ...(failure ? { failure } : {}),
   });
-  return { ok };
+  return { ok, failure };
 }
 
 // Self-looping execute node. Auto steps run immediately; only a step whose
@@ -520,19 +673,37 @@ async function runNextStep(state: TState) {
   }
 
   const t0 = Date.now();
-  const { ok } = await executeStepAndPersist(ticket, step);
+  const { ok, failure } = await executeStepAndPersist(ticket, step);
   appendTrace(
     state.ticketId,
     `execute:${step.capability ?? step.kind}`,
     ok ? "completed" : "failed",
-    `${humanStepLabel(step)} · reviewer cleared this step to run unattended`,
+    ok
+      ? `${humanStepLabel(step)} · reviewer cleared this step to run unattended`
+      : `${humanStepLabel(step)} · ${failure?.kind ?? "execution"}: ${failure?.detail ?? "no detail"}`,
     Date.now() - t0,
   );
 
   if (!ok) {
-    await updateTicket(state.ticketId, { status: "escalated" });
-    appendTrace(state.ticketId, "escalate", "completed", "step failed — fail-fast, no retry, escalated to human");
-    return new Command({ goto: END });
+    // Fail fast — no retry of a step the evidence says did not work. It routes
+    // through humanHandoff rather than ending here so the technician who picks
+    // this up gets the artifact: what ran, what the machine said, why it failed.
+    appendTrace(
+      state.ticketId,
+      "escalate",
+      "completed",
+      `step failed (${failure?.kind ?? "execution"}) — fail-fast, no retry, handing to a human`,
+    );
+    return new Command({
+      goto: "humanHandoff",
+      update: {
+        findings: [
+          `tier ${state.tier}: ${humanStepLabel(step)} failed — ${failure?.kind ?? "execution"}: ${
+            failure?.detail ?? "no detail"
+          }`,
+        ],
+      },
+    });
   }
 
   return new Command({ goto: "runNextStep" });
@@ -614,6 +785,8 @@ async function verifyOutcome(state: TState) {
   const maxAttempts = tierSpec(state.tier).maxAttempts;
 
   const verdict = await verifyAndReplan({
+    ticketId: state.ticketId,
+    confidenceTrail: state.confidenceTrail,
     subject: ticket.subject,
     body: ticket.body,
     attempt: state.attempt,
@@ -643,7 +816,10 @@ async function verifyOutcome(state: TState) {
   );
 
   if (verdict.resolved) {
-    return new Command({ goto: "finalizeExecution", update: { findings: [finding] } });
+    return new Command({
+      goto: "finalizeExecution",
+      update: { findings: [finding], confidenceTrail: [verdict.confidence] },
+    });
   }
 
   const outOfAttempts = state.attempt >= maxAttempts;
@@ -662,7 +838,10 @@ async function verifyOutcome(state: TState) {
           ? `tier ${state.tier} has no next step within its capabilities — escalating`
           : `tier ${state.tier} used its ${maxAttempts} attempt(s) without a fix — escalating`,
       );
-      return new Command({ goto: "escalateTier", update: { findings: [finding] } });
+      return new Command({
+        goto: "escalateTier",
+        update: { findings: [finding], confidenceTrail: [verdict.confidence] },
+      });
     }
     appendTrace(
       state.ticketId,
@@ -670,10 +849,20 @@ async function verifyOutcome(state: TState) {
       "completed",
       `no fix after tier ${state.tier} — handing to a human with findings`,
     );
-    return new Command({ goto: "finalizeExecution", update: { findings: [finding] } });
+    return new Command({
+      goto: "humanHandoff",
+      update: { findings: [finding], confidenceTrail: [verdict.confidence] },
+    });
   }
 
-  return new Command({ goto: "replan", update: { findings: [finding], classifiedPlan: verdict.nextSteps } });
+  return new Command({
+    goto: "replan",
+    update: {
+      findings: [finding],
+      classifiedPlan: verdict.nextSteps,
+      confidenceTrail: [verdict.confidence],
+    },
+  });
 }
 
 // Classify the newly proposed steps (same risk gate as round one — a follow-up
@@ -705,12 +894,19 @@ async function replan(state: TState) {
     Date.now() - t0,
   );
 
-  const firstName = firstNameOf(ticket.reporter);
-  await postUpdate(
+  const firstName = preferredName(state.memory, firstNameOf(ticket.reporter));
+  await say(
     ticket,
-    `🔁 Hi ${firstName} — first approach didn't resolve it. Trying attempt ${nextAttempt}: ${classified
+    state.memory,
+    state.tier,
+    "heartbeat",
+    `Hi ${firstName} — the first approach didn't resolve it. Trying: ${classified
       .map((s) => humanStepLabel(s))
       .join(", ")}`,
+    {
+      plannedSteps: classified.map((s) => humanStepLabel(s)),
+      findings: state.findings,
+    },
   );
 
   return new Command({ goto: "runNextStep", update: { attempt: nextAttempt } });
@@ -739,6 +935,10 @@ async function finalizeExecution(state: TState) {
   );
 
   await updateUserMemory(state, finishedTicket, summary);
+  // The agent believes this worked, but the employee has not confirmed yet, so
+  // the incident is filed as resolved on the strength of the device evidence
+  // that got us here — the same evidence the verifier used.
+  await recordIncident(state, finishedTicket, true);
 
   {
     const firstName = preferredName(state.memory, firstNameOf(finishedTicket.reporter));
@@ -751,14 +951,30 @@ async function finalizeExecution(state: TState) {
       const allJobs = await listAgentJobs(finishedTicket.workspaceId);
       const jobsForTicket = allJobs.filter((j) => j.ticketId === state.ticketId);
       const evidence = buildReplyEvidence(stepsForSynth, jobsForTicket);
-      const synthesized = await synthesizeReply({
+      // The desk explains the outcome, whichever tier actually did the work.
+      const synthesized = await communicate({
+        ticketId: state.ticketId,
+        moment: "resolution",
+        tier: state.tier,
         reporterFirstName: firstName,
         subject: finishedTicket.subject,
         body: finishedTicket.body,
+        tierSummary: state.draft?.response || undefined,
         evidence,
+        findings: state.findings,
       }).catch(() => null);
-      if (synthesized) {
-        await postUpdate(finishedTicket, synthesized);
+      // Falls back to the older evidence-only writer rather than going silent.
+      const text =
+        synthesized ??
+        (await synthesizeReply({
+          ticketId: state.ticketId,
+          reporterFirstName: firstName,
+          subject: finishedTicket.subject,
+          body: finishedTicket.body,
+          evidence,
+        }).catch(() => null));
+      if (text) {
+        await postUpdate(finishedTicket, text);
       }
     }
 
@@ -770,11 +986,191 @@ async function finalizeExecution(state: TState) {
   return {};
 }
 
+/**
+ * Tier 4. Not a model and not an `interrupt()` — interrupt is pause-and-resume
+ * on this thread for a decision the graph needs in order to continue. A handoff
+ * is asynchronous and terminal: a technician may pick it up hours later and act
+ * entirely outside this system. So it writes the artifact and ends.
+ */
+async function humanHandoff(state: TState) {
+  const ticket = await getTicket(state.ticketId);
+  if (!ticket) return new Command({ goto: END });
+
+  await waitForAgentJobs(state.ticketId, 20_000);
+  const fresh = await getTicket(state.ticketId);
+  const allJobs = await listAgentJobs(ticket.workspaceId);
+  const jobsForTicket = allJobs.filter((j) => j.ticketId === state.ticketId);
+  const evidence = buildReplyEvidence(fresh?.plan ?? [], jobsForTicket);
+
+  const artifact = buildHandoffArtifact(state, fresh ?? ticket, evidence);
+
+  await updateTicket(state.ticketId, {
+    status: "escalated",
+    troubleshootingSummary: artifact,
+    attempts: state.attempt,
+    tier: state.tier,
+  });
+  appendTrace(
+    state.ticketId,
+    "humanHandoff",
+    "completed",
+    `tier ${state.tier} exhausted — handed to a human with ${state.findings.length} finding(s)`,
+  );
+
+  await updateUserMemory(state, ticket, artifact);
+  await recordIncident(state, fresh ?? ticket, false);
+
+  const firstName = preferredName(state.memory, firstNameOf(ticket.reporter));
+  await say(
+    ticket,
+    state.memory,
+    state.tier,
+    "handoff",
+    `Hi ${firstName} — I wasn't able to get to the bottom of this one. I'm handing it to the IT team ` +
+      `with everything I checked so they don't have to start over. Ticket ${state.ticketId}.`,
+    { findings: state.findings, evidence },
+  );
+
+  return new Command({ goto: END });
+}
+
+/** The note a technician actually reads. state.findings carries most of it. */
+function buildHandoffArtifact(state: TState, ticket: Ticket, evidence: ReplyEvidence[]): string {
+  const lines: string[] = [
+    `Ticket ${ticket.id} — escalated to a human after ${state.attempt} attempt(s), reaching tier ${state.tier}.`,
+    "",
+    `Problem as reported: ${ticket.subject}`,
+    `Employee: ${ticket.reporter} <${ticket.reporterEmail}>${state.profile ? ` · ${state.profile}` : ""}`,
+    `Device: ${state.deviceContext ?? "no registered device"}`,
+  ];
+
+  if (state.draft?.hypothesis) {
+    lines.push(`Leading hypothesis: ${state.draft.hypothesis}`);
+  }
+
+  // The shape of this line is the point. A trail that falls says the evidence
+  // argued against the plan; one that never moves says the rounds bought no
+  // information, which is a different conversation to have with the system.
+  if (state.confidenceTrail.length > 0) {
+    const trail = state.confidenceTrail.map((c) => `${Math.round(c * 100)}%`).join(" → ");
+    const first = state.confidenceTrail[0];
+    const last = state.confidenceTrail[state.confidenceTrail.length - 1];
+    const drift =
+      state.confidenceTrail.length < 2
+        ? ""
+        : last < first - 0.05
+          ? " (fell — the evidence argued against the original diagnosis)"
+          : last > first + 0.05
+            ? " (rose — evidence supported it, but not enough to close)"
+            : " (flat — the rounds bought no new information)";
+    lines.push(`Confidence over time: ${trail}${drift}`);
+  }
+
+  // The case in the order a colleague would tell it: each tier's read, what it
+  // eliminated, and why it let go. Read this before the raw findings — it is the
+  // part that tells you where NOT to start.
+  if (state.decisions.length > 0) {
+    lines.push("", "How the case developed:");
+    for (const d of state.decisions) {
+      lines.push(`  Tier ${d.tier} (${tierSpec(d.tier).label})`);
+      lines.push(`    Thought: ${d.hypothesis || "(no hypothesis stated)"}`);
+      for (const r of d.rejected) {
+        lines.push(`    Ruled out: ${r.hypothesis} — ${r.ruledOutBy}`);
+      }
+      if (d.capabilitiesConsidered.length > 0) {
+        lines.push(`    Weighed: ${d.capabilitiesConsidered.join(", ")}`);
+      }
+      lines.push(`    Outcome: ${d.outcome}`);
+    }
+  }
+
+  if (state.findings.length > 0) {
+    lines.push("", "Findings in full:");
+    state.findings.forEach((f, i) => lines.push(`  ${i + 1}. ${f}`));
+  }
+
+  if (evidence.length > 0) {
+    lines.push("", "What ran, with the device's own verdict:");
+    for (const e of evidence) {
+      lines.push(
+        `  - ${e.capability ?? e.stepDescription} → ${e.status.toUpperCase()}` +
+          (e.deviceEffect ? `: ${e.deviceEffect}` : ""),
+      );
+    }
+  } else {
+    lines.push("", "Nothing was executed on the employee's machine.");
+  }
+
+  // Failure kinds, not just failure counts. "2 steps failed" sends a technician
+  // to the wrong place; "1 timeout, 1 no_effect" tells them the agent was
+  // offline for one and the fix silently did nothing for the other.
+  const failures = ticket.plan.filter((s) => s.failure);
+  if (failures.length > 0) {
+    lines.push("", "Why steps failed:");
+    for (const s of failures) {
+      lines.push(`  - ${s.capability ?? s.description} → ${s.failure!.kind}: ${s.failure!.detail}`);
+    }
+  }
+
+  lines.push(
+    "",
+    "Note: any capability the agent asked for and did not have is listed in the findings above, " +
+      "with its risk, the command it proposed, the effect it expected, and the probe fields that " +
+      "would verify it.",
+  );
+
+  return lines.join("\n");
+}
+
+/**
+ * Record this ticket in the cross-user track record for its problem class.
+ *
+ * `resolvedBy` is the capability that actually moved the machine — the last
+ * step that both succeeded and was not a read. That is a deliberately strict
+ * reading: a diagnostic that merely ran in a ticket which later resolved did
+ * not fix anything, and crediting it would inflate every probe in the set to a
+ * near-perfect score and send the next planner straight at it.
+ *
+ * Best-effort, like every other memory write: it must never fail a ticket.
+ */
+async function recordIncident(state: TState, ticket: Ticket, resolved: boolean): Promise<void> {
+  const steps = ticket.plan.filter((s) => s.kind !== "reply");
+  const capabilitiesUsed = steps.map((s) => s.capability).filter((c): c is string => Boolean(c));
+
+  const fixer = [...steps]
+    .reverse()
+    .find((s) => s.status === "succeeded" && s.capability?.startsWith("fix."));
+
+  const failed = steps.find((s) => s.failure);
+
+  await rememberIncident({
+    workspaceId: ticket.workspaceId,
+    ticketId: ticket.id,
+    category: state.incidentCategory,
+    symptom: ticket.subject,
+    tier: state.tier,
+    capabilitiesUsed,
+    resolvedBy: resolved ? fixer?.capability : undefined,
+    resolved,
+    failureKind: resolved ? undefined : failed?.failure?.kind,
+    at: Date.now(),
+  }).catch(() => {});
+
+  appendTrace(
+    state.ticketId,
+    "recordIncident",
+    "completed",
+    `filed under "${state.incidentCategory}" · ${resolved ? "resolved" : "not resolved"}` +
+      (resolved && fixer?.capability ? ` by ${fixer.capability}` : ""),
+  );
+}
+
 // Learn from the ticket we just handled: durable facts about the person, plus
 // one line of history. Best-effort — a memory write must never fail a ticket.
 async function updateUserMemory(state: TState, ticket: Ticket, outcome: string): Promise<void> {
   const t0 = Date.now();
   const extracted = await extractUserMemory({
+    ticketId: ticket.id,
     subject: ticket.subject,
     body: ticket.body,
     outcome,
@@ -809,15 +1205,21 @@ function buildGraph() {
     .addNode("gatherProfile", gatherProfile)
     .addNode("gatherMemory", gatherMemory)
     .addNode("gatherDeviceContext", gatherDeviceContext)
+    .addNode("gatherIncidentHistory", gatherIncidentHistory)
     .addNode("draftPlan", draftPlanNode)
     .addNode("classifyRisk", classifyRisk)
     .addNode("tierGate", tierGate, { ends: ["persistPlan", "escalateTier"] })
     .addNode("escalateTier", escalateTier, {
-      ends: ["runNextStep", "escalateTier", "finalizeExecution", END],
+      ends: ["runNextStep", "escalateTier", "humanHandoff", END],
     })
+    .addNode("humanHandoff", humanHandoff, { ends: [END] })
     .addNode("persistPlan", persistPlan)
-    .addNode("runNextStep", runNextStep, { ends: ["runNextStep", "markAwaitingApproval", "verifyOutcome", END] })
-    .addNode("verifyOutcome", verifyOutcome, { ends: ["replan", "escalateTier", "finalizeExecution", END] })
+    .addNode("runNextStep", runNextStep, {
+      ends: ["runNextStep", "markAwaitingApproval", "verifyOutcome", "humanHandoff", END],
+    })
+    .addNode("verifyOutcome", verifyOutcome, {
+      ends: ["replan", "escalateTier", "finalizeExecution", "humanHandoff", END],
+    })
     .addNode("replan", replan, { ends: ["runNextStep", END] })
     .addNode("markAwaitingApproval", markAwaitingApproval)
     .addNode("awaitApproval", awaitApproval, { ends: ["runNextStep"] })
@@ -825,9 +1227,13 @@ function buildGraph() {
     .addEdge(START, "gatherProfile")
     .addEdge(START, "gatherMemory")
     .addEdge(START, "gatherDeviceContext")
-    .addEdge("gatherMemory", "draftPlan")
-    // Barrier join: classifyRisk must run exactly once, after ALL three
-    // branches. Separate addEdge calls would fire it per-predecessor.
+    .addEdge(START, "gatherIncidentHistory")
+    // draftPlan needs both memories: what we know about this person, and what
+    // has worked on this class of problem. Barrier join, so it fires once with
+    // both in hand rather than twice with half.
+    .addEdge(["gatherMemory", "gatherIncidentHistory"], "draftPlan")
+    // Barrier join: classifyRisk must run exactly once, after ALL branches.
+    // Separate addEdge calls would fire it per-predecessor.
     .addEdge(["gatherProfile", "gatherDeviceContext", "draftPlan"], "classifyRisk")
     .addEdge("classifyRisk", "tierGate")
     .addEdge("persistPlan", "runNextStep")

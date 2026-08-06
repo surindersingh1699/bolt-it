@@ -18,6 +18,36 @@ export type StepRisk = "low" | "medium" | "high";
 export type StepApprovalMode = "auto" | "human";
 export type RiskSource = "allowlist" | "judge" | "fallback";
 
+/**
+ * Why a step failed. `failed` alone tells an operator nothing actionable: a
+ * refused step, an offline agent and a fix that landed on an unchanged machine
+ * are three different problems with three different owners. Every path that
+ * sets `status: "failed"` must also set one of these.
+ */
+export type StepFailureKind =
+  /** The command did not complete — adapter returned not-ok, or threw. */
+  | "execution"
+  /** The device agent never reported back inside the job window. */
+  | "timeout"
+  /** Ran cleanly; the machine's before/after probes are identical. */
+  | "no_effect"
+  /** The safety reviewer refused the step outright. */
+  | "policy_block"
+  /** The step asserted a diagnosis nothing in the evidence supports. */
+  | "unsupported_assumption"
+  /** The fix needs a capability no tier holds. */
+  | "capability_missing"
+  /** A provider we depend on (gateway, reviewer, directory) was unavailable. */
+  | "dependency_unavailable"
+  /** Evidence gathered points two ways at once and cannot select a fix. */
+  | "conflicting_evidence";
+
+export interface StepFailure {
+  kind: StepFailureKind;
+  /** One concrete sentence naming what was observed, for the handoff artifact. */
+  detail: string;
+}
+
 export interface Citation {
   source: "memory";
   title: string;
@@ -40,6 +70,8 @@ export interface PlanStep {
   riskReason?: string;
   riskSource?: RiskSource;
   governancePromoted?: boolean;
+  /** Set on every step that reaches `status: "failed"`. */
+  failure?: StepFailure;
 }
 
 export interface CapabilityPrecedent {
@@ -166,6 +198,8 @@ export interface Ticket {
   trace?: import("./trace").TraceEvent[];
   /** Populated by /api/state from the in-memory chat transcript (not persisted). */
   chat?: import("./chat").ChatMsg[];
+  /** Populated by /api/state from the in-memory cost ledger (not persisted). */
+  usage?: import("./usage").UsageTotals;
 }
 
 export interface UserContext {
@@ -174,14 +208,6 @@ export interface UserContext {
   team: string;
   recentApps: string[];
   calendarBusyUntil?: number;
-}
-
-export interface DeflectionStat {
-  totalTickets: number;
-  aiResolved: number;
-  escalated: number;
-  avgResolutionMs: number;
-  rate: number;
 }
 
 export type ADAccountStatus = "active" | "locked" | "disabled" | "password_expired" | "stale_kerberos";

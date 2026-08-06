@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { reviewStep, reviewPlan } from "./reviewer";
 import { PlanStep, Ticket } from "./types";
 
@@ -158,5 +158,62 @@ describe("AUTONOMY=full", () => {
     );
     expect(out.status).toBe("pending");
     expect(out.log?.join("\n")).not.toContain("BLOCKED");
+  });
+});
+
+// The refusing verdicts need a live reviewer to reach, so these stub the gateway
+// response. What is being pinned is reviewPlan's mapping from verdict to step
+// annotation — the part the graph reads — not the model's judgement.
+describe("refusing verdicts", () => {
+  const stubVerdict = (verdict: string, reason: string) => {
+    process.env.AI_GATEWAY_API_KEY = "test-key";
+    vi.stubGlobal("fetch", async () => ({
+      ok: true,
+      json: async () => ({
+        choices: [{ message: { content: JSON.stringify({ verdict, risk: "medium", reason }) } }],
+      }),
+    }));
+  };
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it("fails a blocked step so it can never be picked up as pending", async () => {
+    // Not ad.reset_password: ALWAYS_ASK is checked before the model, so that
+    // capability never reaches the reviewer and could not exercise this mapping.
+    stubVerdict("block", "unlocking an account does not follow from a slow app");
+    const [out] = await reviewPlan([step({ kind: "backend", capability: "ad.unlock_account" })], ticket());
+    expect(out.status).toBe("failed");
+    expect(out.failure?.kind).toBe("policy_block");
+    expect(out.log?.join("\n")).toContain("BLOCKED");
+  });
+
+  it("fails a step whose diagnosis nothing established, and says so in the taxonomy", async () => {
+    stubVerdict("needs_evidence", "nothing has established that the profile is corrupted");
+    const [out] = await reviewPlan(
+      [step({ kind: "device", capability: "fix.clear_app_cache", params: { app: "Outlook" } })],
+      ticket(),
+    );
+    expect(out.status).toBe("failed");
+    expect(out.failure?.kind).toBe("unsupported_assumption");
+    expect(out.failure?.detail).toContain("profile is corrupted");
+    expect(out.log?.join("\n")).toContain("unsupported assumption");
+  });
+
+  it("does not let AUTONOMY=full run a needs_evidence step", async () => {
+    process.env.AUTONOMY = "full";
+    stubVerdict("needs_evidence", "the cause is assumed, not observed");
+    const [out] = await reviewPlan([step({ capability: "fix.restart_app" })], ticket());
+    expect(out.status).toBe("failed");
+    expect(out.approvalMode).toBe("human");
+  });
+
+  it("still fails closed when the model returns a verdict we do not know", async () => {
+    stubVerdict("probably_fine", "made up verdict");
+    const [out] = await reviewPlan([step()], ticket());
+    expect(out.status).toBe("pending");
+    expect(out.approvalMode).toBe("human");
+    expect(out.riskReason).toContain("unavailable");
   });
 });

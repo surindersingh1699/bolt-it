@@ -64,21 +64,37 @@ Verify from inside the VM (PowerShell): `Invoke-WebRequest http://192.168.217.1:
 winget install OpenJS.NodeJS.LTS
 ```
 
-## 5. Copy the agent script into the VM
+## 5. Install the agent once — it then updates and starts itself
 
-`scripts/local-agent.mjs` has zero dependencies beyond Node's stdlib — you only need that one file, not the whole repo. Easiest transfer: UTM's shared folder (enable in VM settings → Sharing), or just paste the file contents into a new `.mjs` file via Notepad inside the VM. There is no self-update: re-copy the file when it changes.
+Copy [scripts/vm/install-agent.ps1](scripts/vm/install-agent.ps1) into the VM (UTM/Fusion shared folder, or paste it into Notepad). This is the **only** file you ever move by hand, and only once.
 
-## 6. Run the agent inside the VM
+In an **elevated** PowerShell inside the VM:
 
 ```powershell
-$env:LOCAL_AGENT_TOKEN = "<same value as LOCAL_AGENT_TOKEN in .env.local on the Mac>"
-$env:IT_SUPPORT_APP_URL = "http://10.0.2.2:3000"
-node local-agent.mjs
+.\install-agent.ps1 -Token "<LOCAL_AGENT_TOKEN from .env.local>" -AppUrl "http://10.0.2.2:3000"
 ```
 
-The token must match `.env.local`'s `LOCAL_AGENT_TOKEN` on the Mac (already set there) — it's the shared bearer secret the `/api/agent/*` routes check. Do not commit it or paste it into chat/screen share.
+Use `http://192.168.217.1:3000` instead on VMware Fusion — see section 3. Elevation matters: `fix.toggle_wifi` cannot cycle an adapter without it.
 
-You should see the same `LOCAL SANDBOX AGENT — STARTED` banner as the Mac version, now reporting a Windows hostname/OS in the heartbeat, and the console's `local agent: offline` indicator should flip to connected within ~10s (`CONNECTED_WINDOW_MS` in `heartbeat/route.ts`).
+What it sets up:
+
+- `C:\ProgramData\BoltIt\config.json` — the token and app URL, in a directory ACL'd to Administrators and SYSTEM only.
+- `C:\ProgramData\BoltIt\run-agent.ps1` — pulls the current `scripts/local-agent.mjs` from `GET /api/agent/script` (bearer-authenticated, same token as every other `/api/agent/*` route), runs it, and relaunches it 5s after any exit. If the Mac is unreachable it runs the copy it pulled last time rather than sitting idle.
+- A scheduled task, **Bolt-it agent**, triggered at logon and running with highest privileges.
+
+This replaces the old copy-the-file-in-by-hand step. It is not the deleted `public/setup.ps1`: that was served unauthenticated with the shared token baked into the response body. Here the token only ever lives in the VM's own config, and the endpoint refuses anyone who cannot already present it.
+
+## 6. Day-to-day: you no longer touch the VM
+
+| You want to | Do this |
+|---|---|
+| Start the agent | Nothing. It starts at logon. |
+| Ship an agent edit | Save `scripts/local-agent.mjs` on the Mac, then in the VM: `schtasks /end /tn "Bolt-it agent"; schtasks /run /tn "Bolt-it agent"` |
+| See it connect | The app header shows "Connected to `<hostname>`" |
+| Watch what it ran | `Get-Content C:\ProgramData\BoltIt\journal\*.jsonl -Wait -Tail 5` |
+| Remove it | `schtasks /delete /tn "Bolt-it agent" /f; Remove-Item -Recurse C:\ProgramData\BoltIt` |
+
+Run **one** agent at a time — the app keeps a single global heartbeat, so a second one just fights the first for jobs.
 
 ## 7. Rehearsed demo script
 

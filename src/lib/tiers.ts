@@ -1,7 +1,7 @@
 // Tiered service desk. A tier is escalation DEPTH — how strong a model, how wide
 // a capability set, how many attempts before the ticket moves up. It is not an
-// approval level: risk classification in policy.ts is tier-independent, and the
-// human gate in ticket-graph.ts is reachable from every tier.
+// approval level: the reviewer in reviewer.ts rules on every step independently
+// of tier, and the human gate in ticket-graph.ts is reachable from every tier.
 //
 // Tier 1 also owns every word the employee ever sees, including for work done by
 // tiers 2 and 3 — see COMMUNICATOR_PROMPT. Tiers 2 and 3 have no reply
@@ -9,7 +9,6 @@
 //
 // Design rationale lives in docs/TIERS.md.
 
-import { isFullyAutonomous } from "./autonomy";
 
 export type Tier = 1 | 2 | 3;
 
@@ -68,13 +67,15 @@ const T3_CAPS = [
   "ad.reset_password",
 ] as const;
 
-// Under AUTONOMY=full, tier is escalation DEPTH only — a stronger model, more
-// attempts, a longer budget. It stops narrowing what may be attempted, so tier 1
-// can reach for anything tier 3 can. Note this was never a hard gate anyway:
-// capabilityAllowed() exists but no caller enforces it, so the tier capability
-// list has only ever shaped the prompt.
+// A tier's capability set is fixed by the tier, in every autonomy mode.
+// capabilityAllowed() is enforced at both drafting and replanning in
+// ai-gateway.ts, so widening tier 1 here would not merely reword a prompt — it
+// would delete the escalation trigger, because a tier that can reach for
+// anything never reaches past its own depth and so never hands the ticket down.
+//
+// AUTONOMY=full means nobody WAITS on a person (see reviewer.ts). It does not
+// mean first-line and the escalation engineer are the same colleague.
 function capsFor(tier: Tier): ReadonlySet<string> {
-  if (isFullyAutonomous()) return new Set(T3_CAPS);
   return new Set(tier === 1 ? T1_CAPS : tier === 2 ? T2_CAPS : T3_CAPS);
 }
 
@@ -88,6 +89,10 @@ Output ONLY a single JSON object. No markdown fences, no preface, no trailing pr
   "escalate_reason": "",
   "capability_request": null,
   "hypothesis": "one line: what you believe is actually wrong",
+  "rejected_hypotheses": [
+    { "hypothesis": "what else could explain this", "ruled_out_by": "the observation that killed it, or 'not tested'" }
+  ],
+  "capabilities_considered": ["ids you weighed, including ones you decided against"],
   "reasoning": "1-3 sentences, for the engineering log",
   "customer_summary": "1-2 plain sentences the service desk will relay",
   "plan": [
@@ -132,6 +137,18 @@ Hard rules:
 
 5. Any fix step must be followed by a step that verifies the end state. Running a
    fix is not evidence the fix worked.
+
+5b. "rejected_hypotheses" is a decision record, not your thinking. List the
+   explanations you seriously considered and discarded, each with what ruled it
+   out. Write "not tested" where you reasoned it away rather than observing it.
+   An empty list is correct when you only ever had one explanation. This is what
+   stops the next tier re-testing your dead ends, and it is the most useful thing
+   a human technician inherits — it tells them where NOT to start.
+
+5c. A step that CHANGES something must trace to an observation that already
+   happened. If the cause is still assumed, gather the evidence first and let a
+   later round apply the fix. A change proposed on an unestablished cause is
+   refused by the safety reviewer, which costs the ticket a whole round.
 
 6. You do NOT write to the employee. A separate service-desk pass owns every
    message they see. Your "customer_summary" is raw material for it: one or two
@@ -214,8 +231,15 @@ When the FIX you need is not in your list, do not substitute a near-miss and do 
     "command": "the exact command, with its arguments",
     "probe_fields": ["which read-only facts prove it worked, before vs after"],
     "expects_change": true,
+    "expected_effect": "what the machine should look like afterwards if this works",
+    "risk": "low" | "medium" | "high",
     "reversible": "how a technician would undo this"
   }
+
+A human reads this to decide whether to build the capability, so answer the
+question they will actually ask — *why does the agent want this, and what breaks
+if it goes wrong* — not merely *what command*. "risk" is your own read of the
+blast radius; the safety reviewer still rules independently on first use.
 
 "probe_fields" is required and must be expressible using the read capabilities you already have. A fix whose effect cannot be observed cannot be verified, and an unverifiable fix can never support a claim that the problem is solved.
 
@@ -225,47 +249,43 @@ When you cannot form a hypothesis your read surface can test, set "escalate": tr
 
 Maximum 6 steps per round.`;
 
-// Under AUTONOMY=full every tier runs the deepest model and the deepest prompt.
-// A cheap first-line pass exists to hand off fast; when nothing is waiting to be
-// handed off to, that pass is just a worse answer arriving sooner.
-const FULL = isFullyAutonomous();
-
+// A tier is a different colleague, not a dial. Model, prompt, capability set,
+// attempt budget and confidence floor are all fixed by the tier and identical in
+// every autonomy mode — the escalation chain is the product, so flattening it
+// would leave one agent pretending to be three.
+//
+// The confidence floor routes a shaky answer to the NEXT TIER, not to a person.
+// It is an escalation trigger, so it stays meaningful with no human in the loop.
 export const TIERS: Readonly<Record<Tier, TierSpec>> = {
   1: {
     tier: 1,
     label: "service desk",
-    model: FULL
-      ? process.env.TIER3_MODEL || "anthropic/claude-opus-5"
-      : process.env.TIER1_MODEL || "anthropic/claude-haiku-4-5",
-    maxAttempts: FULL ? 3 : 1,
-    budgetMs: FULL ? 120_000 : 20_000,
-    maxSteps: FULL ? 10 : 3,
-    // Confidence floor exists to route a shaky answer to a human. With no human
-    // at the end of the route, it only stops work that could have continued.
-    confidenceFloor: FULL ? 0 : 0.6,
+    model: process.env.TIER1_MODEL || "anthropic/claude-haiku-4-5",
+    maxAttempts: 1,
+    budgetMs: 20_000,
+    maxSteps: 3,
+    confidenceFloor: 0.6,
     capabilities: capsFor(1),
-    promptBody: FULL ? T3_BODY : T1_BODY,
+    promptBody: T1_BODY,
   },
   2: {
     tier: 2,
     label: "systems engineer",
-    model: FULL
-      ? process.env.TIER3_MODEL || "anthropic/claude-opus-5"
-      : process.env.TIER2_MODEL || "anthropic/claude-sonnet-5",
-    maxAttempts: FULL ? 3 : 2,
-    budgetMs: FULL ? 180_000 : 60_000,
-    maxSteps: FULL ? 10 : 5,
-    confidenceFloor: FULL ? 0 : 0.5,
+    model: process.env.TIER2_MODEL || "anthropic/claude-sonnet-5",
+    maxAttempts: 2,
+    budgetMs: 60_000,
+    maxSteps: 5,
+    confidenceFloor: 0.5,
     capabilities: capsFor(2),
-    promptBody: FULL ? T3_BODY : T2_BODY,
+    promptBody: T2_BODY,
   },
   3: {
     tier: 3,
     label: "escalation engineer",
     model: process.env.TIER3_MODEL || "anthropic/claude-opus-5",
-    maxAttempts: FULL ? 4 : 2,
-    budgetMs: FULL ? 240_000 : 120_000,
-    maxSteps: FULL ? 12 : 6,
+    maxAttempts: 2,
+    budgetMs: 120_000,
+    maxSteps: 6,
     confidenceFloor: 0,
     capabilities: capsFor(3),
     promptBody: T3_BODY,

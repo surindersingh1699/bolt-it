@@ -37,11 +37,11 @@ export function LogAnalyzer({ currentUser }: { currentUser: PublicUser }) {
   };
 
   return (
-    <div className="grid h-full min-h-0 grid-cols-[420px_1fr] divide-x divide-neutral-800 bg-neutral-950">
+    <div className="grid h-full min-h-0 grid-cols-[420px_1fr] divide-x divide-neutral-200 bg-white">
       <section className="min-h-0 overflow-y-auto p-5">
         <div className="mb-4">
-          <div className="flex items-center gap-2 text-sm font-semibold text-neutral-100">
-            <SearchCheck size={16} className="text-emerald-300" />
+          <div className="flex items-center gap-2 text-sm font-semibold text-neutral-900">
+            <SearchCheck size={16} className="text-blue-600" />
             Analyze logs
           </div>
           <p className="mt-1 text-xs leading-5 text-neutral-500">
@@ -55,7 +55,7 @@ export function LogAnalyzer({ currentUser }: { currentUser: PublicUser }) {
           <input
             value={issue}
             onChange={(e) => setIssue(e.target.value)}
-            className="mt-1 w-full rounded border border-neutral-800 bg-neutral-900 px-3 py-2 text-sm text-neutral-100 placeholder:text-neutral-600 focus:border-neutral-600 focus:outline-none"
+            className="mt-1 w-full rounded border border-neutral-200 bg-neutral-50 px-3 py-2 text-sm text-neutral-900 placeholder:text-neutral-400 focus:border-blue-600 focus:outline-none"
           />
         </label>
 
@@ -64,7 +64,7 @@ export function LogAnalyzer({ currentUser }: { currentUser: PublicUser }) {
           <input
             value={reporterEmail}
             onChange={(e) => setReporterEmail(e.target.value)}
-            className="mt-1 w-full rounded border border-neutral-800 bg-neutral-900 px-3 py-2 text-sm text-neutral-100 placeholder:text-neutral-600 focus:border-neutral-600 focus:outline-none"
+            className="mt-1 w-full rounded border border-neutral-200 bg-neutral-50 px-3 py-2 text-sm text-neutral-900 placeholder:text-neutral-400 focus:border-blue-600 focus:outline-none"
           />
         </label>
 
@@ -74,20 +74,20 @@ export function LogAnalyzer({ currentUser }: { currentUser: PublicUser }) {
             value={logs}
             onChange={(e) => setLogs(e.target.value)}
             rows={14}
-            className="mt-1 w-full resize-none rounded border border-neutral-800 bg-neutral-900 px-3 py-2 font-mono text-xs leading-5 text-neutral-100 placeholder:text-neutral-600 focus:border-neutral-600 focus:outline-none"
+            className="mt-1 w-full resize-none rounded border border-neutral-200 bg-neutral-50 px-3 py-2 font-mono text-xs leading-5 text-neutral-900 placeholder:text-neutral-400 focus:border-blue-600 focus:outline-none"
           />
         </label>
 
         <button
           onClick={submit}
           disabled={pending || !logs.trim()}
-          className="flex w-full items-center justify-center gap-2 rounded bg-emerald-500 px-4 py-2.5 text-sm font-medium text-neutral-950 transition-colors hover:bg-emerald-400 disabled:opacity-50"
+          className="flex w-full items-center justify-center gap-2 rounded-full bg-blue-600 px-4 py-2.5 text-sm font-medium text-white transition-colors hover:bg-blue-700 disabled:opacity-50"
         >
           {pending ? <Loader2 size={15} className="animate-spin" /> : <Brain size={15} />}
           Analyze, ticket, and save context
         </button>
         {error && (
-          <div className="mt-3 flex items-start gap-2 rounded border border-rose-900/60 bg-rose-950/30 px-3 py-2 text-xs text-rose-200">
+          <div className="mt-3 flex items-start gap-2 rounded bg-rose-50 px-3 py-2 text-xs text-rose-700">
             <AlertTriangle size={14} className="mt-0.5 shrink-0" />
             {error}
           </div>
@@ -98,11 +98,11 @@ export function LogAnalyzer({ currentUser }: { currentUser: PublicUser }) {
         {!result ? (
           <div className="flex h-full items-center justify-center text-center">
             <div className="max-w-md">
-              <FileText size={28} className="mx-auto mb-3 text-neutral-600" />
-              <h2 className="text-lg font-semibold text-neutral-200">Turn raw logs into support context</h2>
+              <FileText size={28} className="mx-auto mb-3 text-neutral-400" />
+              <h2 className="text-lg font-medium text-neutral-800">Turn raw logs into a ticket</h2>
               <p className="mt-2 text-sm leading-6 text-neutral-500">
-                This is the real useful wedge: any MSP can paste evidence, get a diagnosis, open a
-                ticket, and preserve what was learned for the next technician.
+                Paste the evidence you already have. You get a diagnosis, a ticket, and the finding
+                saved against that person — so the next technician starts where you finished.
               </p>
             </div>
           </div>
@@ -117,22 +117,22 @@ export function LogAnalyzer({ currentUser }: { currentUser: PublicUser }) {
 function AnalysisResult({ result }: { result: LogAnalysisResult }) {
   return (
     <div className="mx-auto max-w-4xl space-y-4">
-      <div className="rounded-lg border border-neutral-800 bg-neutral-900 p-5">
+      <div className="rounded-lg border border-neutral-200 bg-neutral-50 p-5">
         <div className="mb-2 flex items-center gap-2">
           <SeverityBadge severity={result.severity} />
           <span className="text-[11px] font-mono text-neutral-500">{result.ticketId}</span>
         </div>
-        <h2 className="text-xl font-semibold tracking-tight text-neutral-100">{result.title}</h2>
-        <p className="mt-3 text-sm leading-6 text-neutral-300">{result.rootCause}</p>
+        <h2 className="text-xl font-semibold tracking-tight text-neutral-900">{result.title}</h2>
+        <p className="mt-3 text-sm leading-6 text-neutral-700">{result.rootCause}</p>
       </div>
 
       <ResultSection title="Important details" items={result.importantDetails} />
       <ResultSection title="Evidence extracted" items={result.evidence} mono />
       <ResultSection title="Suggested fixes" items={result.suggestedFixes} />
 
-      <div className="rounded-lg border border-neutral-800 bg-neutral-900 p-4">
+      <div className="rounded-lg border border-neutral-200 bg-neutral-50 p-4">
         <div className="mb-2 text-[11px] uppercase tracking-wider text-neutral-500">Ready-to-send user reply</div>
-        <p className="text-sm leading-6 text-neutral-200">{result.userReply}</p>
+        <p className="text-sm leading-6 text-neutral-800">{result.userReply}</p>
       </div>
 
       <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
@@ -149,13 +149,13 @@ function AnalysisResult({ result }: { result: LogAnalysisResult }) {
 
 function ResultSection({ title, items, mono = false }: { title: string; items: string[]; mono?: boolean }) {
   return (
-    <div className="rounded-lg border border-neutral-800 bg-neutral-900/70 p-4">
+    <div className="rounded-lg border border-neutral-200 bg-neutral-50/70 p-4">
       <div className="mb-3 text-[11px] uppercase tracking-wider text-neutral-500">{title}</div>
       <ul className="space-y-2">
         {items.map((item, i) => (
-          <li key={`${item}-${i}`} className="flex items-start gap-2 text-sm leading-6 text-neutral-300">
-            <CheckCircle2 size={14} className="mt-1 shrink-0 text-emerald-400" />
-            <span className={mono ? "font-mono text-xs text-neutral-400" : ""}>{item}</span>
+          <li key={`${item}-${i}`} className="flex items-start gap-2 text-sm leading-6 text-neutral-700">
+            <CheckCircle2 size={14} className="mt-1 shrink-0 text-emerald-600" />
+            <span className={mono ? "font-mono text-xs text-neutral-500" : ""}>{item}</span>
           </li>
         ))}
       </ul>
@@ -165,21 +165,21 @@ function ResultSection({ title, items, mono = false }: { title: string; items: s
 
 function SeverityBadge({ severity }: { severity: LogAnalysisResult["severity"] }) {
   const cls = {
-    low: "bg-neutral-700/40 text-neutral-300",
-    medium: "bg-amber-500/15 text-amber-300",
-    high: "bg-rose-500/15 text-rose-300",
+    low: "bg-neutral-100 text-neutral-600",
+    medium: "bg-amber-50 text-amber-700",
+    high: "bg-rose-50 text-rose-700",
   }[severity];
   return <span className={`rounded px-2 py-1 text-[10px] uppercase tracking-wider ${cls}`}>{severity}</span>;
 }
 
 function SaveCard({ label, value, ok }: { label: string; value: string; ok: boolean }) {
   return (
-    <div className="rounded-lg border border-neutral-800 bg-neutral-900 p-3">
+    <div className="rounded-lg border border-neutral-200 bg-neutral-50 p-3">
       <div className="mb-1 flex items-center gap-1.5 text-[11px] uppercase tracking-wider text-neutral-500">
-        <Save size={12} className={ok ? "text-emerald-400" : "text-neutral-600"} />
+        <Save size={12} className={ok ? "text-emerald-600" : "text-neutral-400"} />
         {label}
       </div>
-      <div className={ok ? "text-xs text-emerald-300" : "text-xs text-neutral-500"}>{value}</div>
+      <div className={ok ? "text-xs text-emerald-700" : "text-xs text-neutral-500"}>{value}</div>
     </div>
   );
 }

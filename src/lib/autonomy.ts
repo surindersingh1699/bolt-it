@@ -1,8 +1,14 @@
 // One switch for how much the agent may do without a human in the loop.
 //
-//   full   — no approval gate, every tier gets every capability, open file read
-//            on the employee's machine. For sandbox / disposable-VM testing.
+//   full   — no approval gate. Every "ask_human" verdict runs unattended,
+//            including the ALWAYS_ASK floor and the cross-account target bind.
+//            For sandbox / disposable-VM testing.
 //   gated  — high-risk steps stop at interrupt() and wait for a person.
+//
+// Autonomy decides whether anyone WAITS on a person. It does not widen what a
+// tier can reach for: capability sets are fixed by tier in both modes (see
+// capsFor in tiers.ts), because a tier that can reach for anything never
+// reaches past its own depth and so never hands the ticket down.
 //
 // Default is "full" outside production, because that is what a prototype wants,
 // and "gated" in production, because that is what a fleet wants. Override with

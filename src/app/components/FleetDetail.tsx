@@ -21,7 +21,7 @@ export function FleetDetail({ fleet, selected }: { fleet: FleetView; selected: F
         <div className="flex items-center gap-3">
           <UserIcon size={18} className="text-neutral-500" />
           <div>
-            <div className="text-lg font-semibold text-neutral-100">{user.name}</div>
+            <div className="text-lg font-semibold text-neutral-900">{user.name}</div>
             <div className="text-xs text-neutral-500">{user.email}</div>
           </div>
           <span className="ml-auto">
@@ -50,11 +50,11 @@ export function FleetDetail({ fleet, selected }: { fleet: FleetView; selected: F
       <div className="flex items-center gap-3">
         <Monitor size={18} className="text-neutral-500" />
         <div>
-          <div className="text-lg font-semibold font-mono text-neutral-100">{device.hostname}</div>
+          <div className="text-lg font-semibold font-mono text-neutral-900">{device.hostname}</div>
           <div className="text-xs text-neutral-500">{device.os}</div>
         </div>
         {device.isLiveNow && (
-          <span className="ml-auto flex items-center gap-1 text-[11px] text-cyan-300">
+          <span className="ml-auto flex items-center gap-1 text-[11px] text-blue-600">
             <Radio size={11} className="animate-pulse" />
             live now
           </span>
@@ -84,7 +84,7 @@ function DetailGrid({ rows }: { rows: Array<[string, string]> }) {
       {rows.map(([label, value]) => (
         <Fragment key={label}>
           <div className="text-neutral-500">{label}</div>
-          <div className="text-neutral-200">{value}</div>
+          <div className="text-neutral-800">{value}</div>
         </Fragment>
       ))}
     </div>

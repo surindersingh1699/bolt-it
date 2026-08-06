@@ -1,7 +1,19 @@
 # Tiered service desk — design
 
-Status: **proposed, not implemented.** Implementation touches `src/lib/tiers.ts` (new),
-`src/lib/integrations/ai-gateway.ts`, `src/lib/policy.ts`, `src/lib/ticket-graph.ts`.
+Status: **implemented.** [tiers.ts](../src/lib/tiers.ts) holds the tier table and
+every prompt; [ticket-graph.ts](../src/lib/ticket-graph.ts) has `tierGate`,
+`escalateTier` and `humanHandoff`; the service-desk voice is `communicate()` in
+[ai-gateway.ts](../src/lib/integrations/ai-gateway.ts); external knowledge is
+[knowledge.ts](../src/lib/integrations/knowledge.ts) (Tavily).
+
+Two things in this document are described but deliberately **not** built, both
+for the same mechanical reason — a handler with no probe produces no before/after
+facts and so can never be verified:
+
+- **Auto-registration of a requested write capability.** Requests are parsed,
+  classified, traced and carried into the handoff artifact. A human adds the
+  handler.
+- **Free-form command execution on the endpoint.** See the closing section.
 
 ## What a tier is, and what it is not
 
@@ -10,9 +22,9 @@ capability set, and how many attempts a ticket gets before moving up.
 
 A tier is **not** an approval level. Approval is per-step and orthogonal — the
 `interrupt()` gate in [ticket-graph.ts](../src/lib/ticket-graph.ts) is reachable
-from every tier, and a Tier 1 password unlock still needs a human. Risk
-classification in [policy.ts](../src/lib/policy.ts) is tier-independent and never
-gets more permissive as tiers rise. Tier 3 is where the *most* high-risk work
+from every tier, and a Tier 1 password unlock still needs a human. The reviewer
+in [reviewer.ts](../src/lib/reviewer.ts) rules on every step independently of
+tier and never gets more permissive as tiers rise. Tier 3 is where the *most* high-risk work
 happens, so it gates more often, not less.
 
 Tier 4 is not a model at all. It is a terminal handoff to a human with a
@@ -97,18 +109,21 @@ Three calls in the loop route by tier. Two do not.
   `resolved: true` short-circuits straight to `finalizeExecution`. Cheap draft,
   honest judge. This call is the cheapest in the loop (evidence in, small JSON
   out), so pinning it costs almost nothing.
-- The policy judge in [policy.ts](../src/lib/policy.ts) — stays on
-  `claude-haiku-4-5`. Risk classification does not change because escalation got
-  deeper.
+- The safety reviewer in [reviewer.ts](../src/lib/reviewer.ts) — pinned to
+  `REVIEWER_MODEL` (`anthropic/claude-sonnet-5`). Whether a step is safe to run
+  unattended does not change because escalation got deeper, and this is the one
+  judgement whose failure mode is an unsupervised write.
 
 ## Tool access matrix
 
 Capability sets are cumulative. A step whose capability falls outside the current
 tier's set is not run — it escalates the tier.
 
-The live surface today is 10 capabilities plus `reply`. `ActionKind` is
-`"device" | "backend" | "reply"` ([types.ts:15](../src/lib/types.ts#L15)).
-Risk column is the current classification in [policy.ts](../src/lib/policy.ts).
+`ActionKind` is `"device" | "backend" | "knowledge" | "reply"`
+([types.ts](../src/lib/types.ts)). Risk is no longer a static column: the
+reviewer assigns `low` / `medium` / `high` per step, per ticket, from the step's
+params and the reported symptom. The risk shown below is the typical verdict,
+not a lookup table.
 
 | Capability | Kind | Risk | Real? | T1 | T2 | T3 |
 |---|---|---|---|:-:|:-:|:-:|
@@ -663,18 +678,21 @@ does not merely give up. It emits a `capability_request` naming the action, the
 exact command, and — required — the `probe_fields` that would prove the action
 worked, expressed in terms of the read surface above.
 
-Requests are classified by the existing judge in
-[policy.ts](../src/lib/policy.ts), with the same never-permissive fallback:
+**Requests are never registered at runtime.** A capability invented mid-ticket
+would arrive with no handler and therefore no probe, and a handler with no probe
+produces no before/after facts — so it could never be verified, and an
+unverifiable fix can never support a claim that the problem is solved. Rule 5 in
+[CLAUDE.md](../CLAUDE.md) is the general form of this: no adapter without a real
+backend.
 
-| Classification | Handling |
-|---|---|
-| `low` — read-only, mutates nothing | **Registered and executed immediately.** No human, no wait. Still probe-wrapped, still audited. |
-| `medium` / `high` | Human approves first use. Then [governance.ts](../src/lib/governance.ts) precedent applies unchanged — after `PROMOTION_THRESHOLD` (3) clean executions it auto-promotes out of the gate. |
-| Judge unavailable / unparseable | `high`. Never permissive on failure. |
+What actually happens: `noteCapabilityRequest` in
+[ticket-graph.ts](../src/lib/ticket-graph.ts) writes the request to the trace and
+appends it to `state.findings`, which lands it in the handoff artifact. The
+request is a **spec for a human** — name, reason, exact command, probe fields,
+reversibility — so a technician can add the capability properly, with a probe,
+in a normal change.
 
-So the system does converge on "executes whatever it needs" — it just earns each
-new mutation once, through the precedent machinery that already exists, instead
-of being granted all of them up front.
+So the write set grows between tickets, by a person, not during one.
 
 **One mechanical constraint, stated plainly:** `HANDLERS` in
 [local-agent.mjs](../scripts/local-agent.mjs) is a static table, and a write

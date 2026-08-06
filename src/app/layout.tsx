@@ -13,8 +13,8 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "AI-Native IT Support",
-  description: "Slack-native, Nia-grounded, zero-standing-access IT support agent.",
+  title: "Bolt-it — IT support that fixes things",
+  description: "An IT support agent that diagnoses, fixes, and proves it worked — with a person approving anything that changes a machine.",
 };
 
 export default function RootLayout({
@@ -27,7 +27,7 @@ export default function RootLayout({
       lang="en"
       className={`${geistSans.variable} ${geistMono.variable} h-full antialiased`}
     >
-      <body className="min-h-full bg-neutral-950 text-neutral-100">{children}</body>
+      <body className="min-h-full bg-white text-neutral-900">{children}</body>
     </html>
   );
 }

@@ -2,10 +2,10 @@ import { ShieldCheck, AlertTriangle, AlertCircle, HelpCircle } from "lucide-reac
 import type { HealthTier } from "@/lib/fleet";
 
 const STYLES: Record<HealthTier, { cls: string; Icon: typeof ShieldCheck; label: string }> = {
-  healthy: { cls: "bg-emerald-500/15 text-emerald-300 border-emerald-500/30", Icon: ShieldCheck, label: "healthy" },
-  attention: { cls: "bg-amber-500/15 text-amber-300 border-amber-500/30", Icon: AlertTriangle, label: "attention" },
-  critical: { cls: "bg-rose-500/15 text-rose-300 border-rose-500/30", Icon: AlertCircle, label: "critical" },
-  unknown: { cls: "bg-neutral-800 text-neutral-500 border-neutral-700", Icon: HelpCircle, label: "unknown" },
+  healthy: { cls: "bg-emerald-50 text-emerald-700 border-emerald-200", Icon: ShieldCheck, label: "healthy" },
+  attention: { cls: "bg-amber-50 text-amber-700 border-amber-200", Icon: AlertTriangle, label: "attention" },
+  critical: { cls: "bg-rose-50 text-rose-700 border-rose-200", Icon: AlertCircle, label: "critical" },
+  unknown: { cls: "bg-neutral-100 text-neutral-600 border-neutral-200", Icon: HelpCircle, label: "unknown" },
 };
 
 export function HealthBadge({ tier }: { tier: HealthTier }) {
