@@ -6,12 +6,19 @@ import { PlanStep, Ticket } from "./types";
 // unreachable. That is deliberate: these assert what happens when the gate
 // CANNOT form an opinion. The whole design rests on that path failing closed,
 // so it is the path most worth pinning.
+//
+// AUTONOMY is pinned to "gated" throughout, because it defaults to "full"
+// outside production and full autonomy turns every ask_human into auto — which
+// would silently empty the assertions below rather than fail them. The bypass
+// has its own describe block at the bottom.
 beforeEach(() => {
   delete process.env.AI_GATEWAY_API_KEY;
+  process.env.AUTONOMY = "gated";
 });
 
 afterEach(() => {
   delete process.env.AI_GATEWAY_API_KEY;
+  delete process.env.AUTONOMY;
 });
 
 const ticket = (over: Partial<Ticket> = {}): Ticket => ({
@@ -103,5 +110,53 @@ describe("blocked steps", () => {
     expect(out.status).toBe("pending");
     expect(out.riskSource).toBe("judge");
     expect(out.log?.join("\n")).toContain("[Reviewer]");
+  });
+});
+
+describe("AUTONOMY=full", () => {
+  beforeEach(() => {
+    process.env.AUTONOMY = "full";
+  });
+
+  it("runs a step the reviewer wanted a human for", async () => {
+    const [out] = await reviewPlan([step()], ticket());
+    expect(out.approvalMode).toBe("auto");
+  });
+
+  it("runs even the ALWAYS_ASK floor unattended", async () => {
+    process.env.AI_GATEWAY_API_KEY = "test-key";
+    const [out] = await reviewPlan(
+      [step({ kind: "backend", capability: "ad.reset_password", params: { email: "dana@acme.test" } })],
+      ticket(),
+    );
+    expect(out.approvalMode).toBe("auto");
+  });
+
+  it("runs a cross-account step unattended", async () => {
+    process.env.AI_GATEWAY_API_KEY = "test-key";
+    const [out] = await reviewPlan(
+      [step({ kind: "backend", capability: "ad.unlock_account", params: { email: "ceo@acme.test" } })],
+      ticket(),
+    );
+    expect(out.approvalMode).toBe("auto");
+  });
+
+  it("keeps the verdict and its reason on the step, so the bypass is auditable", async () => {
+    const [out] = await reviewPlan([step()], ticket());
+    expect(out.risk).toBe("high");
+    expect(out.riskReason).toContain("unavailable");
+    expect(out.log?.join("\n")).toContain("AUTONOMY=full, running unapproved");
+  });
+
+  it("does not bypass a block — that verdict is not a gate on autonomy", async () => {
+    // reviewStep cannot be driven to "block" without a live reviewer, so assert
+    // the mapping directly: only allow and ask_human may reach approvalMode auto.
+    process.env.AI_GATEWAY_API_KEY = "test-key";
+    const [out] = await reviewPlan(
+      [step({ kind: "backend", capability: "ad.unlock_account", params: { email: "ceo@acme.test" } })],
+      ticket(),
+    );
+    expect(out.status).toBe("pending");
+    expect(out.log?.join("\n")).not.toContain("BLOCKED");
   });
 });

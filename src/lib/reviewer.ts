@@ -16,9 +16,15 @@
 //      inconvenience, never an unsupervised write.
 //
 // Everything else is the reviewer's call.
+//
+// EXCEPT under AUTONOMY=full, which turns every "ask_human" into "auto" — all
+// three of the above included. Read reviewStep for what the gate decides and
+// reviewPlan for whether that decision is honoured; under full autonomy only a
+// "block" still stops anything. See autonomy.ts.
 
 import { PlanStep, StepRisk, Ticket } from "./types";
 import { extractJsonObject } from "./integrations/json";
+import { isFullyAutonomous } from "./autonomy";
 
 const AI_GATEWAY_URL = process.env.AI_GATEWAY_URL || "https://ai-gateway.vercel.sh/v1";
 export const REVIEWER_MODEL = process.env.REVIEWER_MODEL || "anthropic/claude-sonnet-5";
@@ -223,16 +229,31 @@ export async function reviewStep(
  */
 export async function reviewPlan(plan: PlanStep[], ticket: Ticket): Promise<PlanStep[]> {
   const executedSoFar = ticket.plan.filter((s) => s.status === "succeeded" || s.status === "failed");
+  const full = isFullyAutonomous();
 
   const reviews = await Promise.all(plan.map((step) => reviewStep(step, ticket, executedSoFar)));
 
   return plan.map((step, i) => {
     const review = reviews[i];
     const blocked = review.verdict === "block";
+
+    // AUTONOMY=full: nothing waits for a person, so every "ask_human" runs —
+    // including the ALWAYS_ASK floor and the target-binding check, which both
+    // express themselves as ask_human.
+    //
+    // "block" is deliberately NOT bypassed. It is not a gate on autonomy: the
+    // reviewer returns it when a step does not follow from the ticket, which is
+    // the shape a successful prompt injection takes. There is no human to route
+    // it to, so bypassing it would not remove a wait — it would just run the
+    // step the reviewer identified as not belonging to this problem. A correct
+    // step is never blocked, so keeping this costs no autonomy on real work.
+    const bypassed = full && review.verdict === "ask_human";
+    const approvalMode = review.verdict === "allow" || bypassed ? ("auto" as const) : ("human" as const);
+
     return {
       ...step,
       risk: review.risk,
-      approvalMode: review.verdict === "allow" ? ("auto" as const) : ("human" as const),
+      approvalMode,
       riskReason: review.reason,
       riskSource: "judge" as const,
       status: blocked ? ("failed" as const) : step.status,
@@ -240,7 +261,9 @@ export async function reviewPlan(plan: PlanStep[], ticket: Ticket): Promise<Plan
         ...(step.log ?? []),
         blocked
           ? `[Reviewer] BLOCKED (${REVIEWER_MODEL}): ${review.reason}`
-          : `[Reviewer] ${review.verdict} · ${review.risk} risk (${REVIEWER_MODEL}): ${review.reason}`,
+          : bypassed
+            ? `[Reviewer] ask_human · ${review.risk} risk (${REVIEWER_MODEL}): ${review.reason} · AUTONOMY=full, running unapproved`
+            : `[Reviewer] ${review.verdict} · ${review.risk} risk (${REVIEWER_MODEL}): ${review.reason}`,
       ],
     };
   });
