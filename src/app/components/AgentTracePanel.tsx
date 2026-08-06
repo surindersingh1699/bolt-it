@@ -22,17 +22,19 @@ import {
 import clsx from "clsx";
 
 const NODE_META: Record<string, { label: string; icon: React.ComponentType<{ size?: number; className?: string }> }> = {
-  gatherUserContext: { label: "Gather user context", icon: UserSearch },
-  gatherMemories: { label: "Search memory (Hyperspell)", icon: Database },
+  gatherProfile: { label: "Look up directory record", icon: UserSearch },
+  gatherMemory: { label: "Recall what we know about this user", icon: Database },
   gatherDeviceContext: { label: "Look up reporter's device", icon: Monitor },
   draftPlan: { label: "Draft plan (LLM)", icon: Brain },
   classifyRisk: { label: "Classify risk per step", icon: ShieldCheck },
+  tierGate: { label: "Check autonomy tier", icon: ShieldCheck },
   persistPlan: { label: "Persist plan", icon: Database },
   interrupt: { label: "Human approval gate", icon: PauseCircle },
   verifyOutcome: { label: "Verify: did it actually work?", icon: SearchCheck },
   replan: { label: "Re-plan next attempt", icon: RotateCw },
   exhausted: { label: "Attempts exhausted", icon: CircleX },
   escalate: { label: "Escalate", icon: CircleX },
+  updateMemory: { label: "Save what we learned", icon: Database },
   finalize: { label: "Finalize & confirm", icon: CircleCheck },
 };
 
@@ -40,6 +42,10 @@ function metaFor(node: string) {
   if (NODE_META[node]) return NODE_META[node];
   if (node.startsWith("execute:")) {
     return { label: `Execute ${node.slice("execute:".length)}`, icon: Wrench };
+  }
+  // escalate:tier2 — the tier gate refusing to act at the current autonomy level.
+  if (node.startsWith("escalate:tier")) {
+    return { label: `Escalate — needs tier ${node.slice("escalate:tier".length)}`, icon: CircleX };
   }
   return { label: node, icon: GitBranch };
 }

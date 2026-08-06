@@ -89,19 +89,3 @@ export async function waitForAgentJobs(ticketId: string, timeoutMs: number): Pro
   }
 }
 
-export function inferTagsFromTicket(text: string): string[] {
-  const t = text.toLowerCase();
-  const tags: string[] = [];
-  for (const tag of ["figma", "sso", "okta", "vpn", "network", "password", "reset", "laptop", "mdm"]) {
-    if (t.includes(tag)) tags.push(tag);
-  }
-  if (tags.length === 0) tags.push("misc");
-  return tags;
-}
-
-export function synthesizeRunbookBody(ticket: Ticket): string {
-  const steps = ticket.plan
-    .map((s, i) => `${i + 1}. (${s.kind}) ${s.description} — ${s.status}`)
-    .join("\n");
-  return `Symptom: ${ticket.subject}\n\nUser report: ${ticket.body}\n\nResolution plan executed:\n${steps}\n\nOutcome: resolved by AI in ${Math.round((ticket.resolutionTimeMs ?? 0) / 1000)}s.`;
-}

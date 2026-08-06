@@ -12,7 +12,10 @@ export function isAgentJobCapability(capability?: string): boolean {
     capability === "fix.toggle_wifi" ||
     capability === "diag.process_list" ||
     capability === "diag.network_state" ||
-    capability === "diag.command_output"
+    capability === "diag.command_output" ||
+    capability === "fs.list" ||
+    capability === "fs.read" ||
+    capability === "fs.grep"
   );
 }
 
@@ -52,6 +55,9 @@ export function humanLabelFor(capability: string | undefined): string {
   if (capability === "diag.process_list") return "List what's running on the machine";
   if (capability === "diag.network_state") return "Read interfaces, routes and DNS";
   if (capability === "diag.command_output") return "Read device state with a read-only command";
+  if (capability === "fs.list") return "List a directory on the machine";
+  if (capability === "fs.read") return "Read a file on the machine";
+  if (capability === "fs.grep") return "Search files on the machine";
   return "Run device action";
 }
 
@@ -80,6 +86,17 @@ function sanitizeArgv(s: unknown): string {
     .join(" ");
 }
 
+// Paths routinely contain spaces ("Application Support"), so unlike sanitizeArgv
+// this keeps them. The audit string stays unambiguous because the double quote
+// that delimits the value is the one character stripped.
+function sanitizePath(s: unknown): string {
+  return String(s ?? "").replace(/["\r\n\0]/g, "").slice(0, 512);
+}
+
+function sanitizePattern(s: unknown): string {
+  return String(s ?? "").replace(/["\r\n\0]/g, "").slice(0, 200);
+}
+
 function commandForCapability(
   capability: string | undefined,
   email: string,
@@ -99,6 +116,14 @@ function commandForCapability(
       Array.isArray(params?.args) ? (params.args as unknown[]).join(" ") : params?.args,
     );
     return `command_output --binary "${sanitizeBinary(params?.binary)}" --args "${args}"`;
+  }
+  if (capability === "fs.list") return `fs_list --path "${sanitizePath(params?.path)}"`;
+  if (capability === "fs.read") {
+    const lines = Math.min(Number(params?.lines) || 2000, 5000);
+    return `fs_read --path "${sanitizePath(params?.path)}" --lines ${lines}`;
+  }
+  if (capability === "fs.grep") {
+    return `fs_grep --path "${sanitizePath(params?.path)}" --pattern "${sanitizePattern(params?.pattern)}"`;
   }
   return "toggle_wifi";
 }

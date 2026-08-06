@@ -19,8 +19,8 @@ const W = 150;
 const H = 44;
 
 const NODES: NodeDef[] = [
-  { id: "ctxUser", label: "User context", x: 20, y: 16, match: (n) => n === "gatherUserContext" },
-  { id: "ctxMem", label: "Memory search", x: 20, y: 86, match: (n) => n === "gatherMemories" },
+  { id: "ctxUser", label: "Directory record", x: 20, y: 16, match: (n) => n === "gatherProfile" },
+  { id: "ctxMem", label: "User memory", x: 20, y: 86, match: (n) => n === "gatherMemory" },
   { id: "ctxDev", label: "Device lookup", x: 20, y: 156, match: (n) => n === "gatherDeviceContext" },
   { id: "draft", label: "Draft plan (LLM)", x: 220, y: 86, match: (n) => n === "draftPlan" },
   { id: "classify", label: "Classify risk", x: 420, y: 86, match: (n) => n === "classifyRisk" },
@@ -28,7 +28,7 @@ const NODES: NodeDef[] = [
   { id: "gate", label: "Human gate", x: 620, y: 186, match: (n) => n === "interrupt" },
   { id: "verify", label: "Verify outcome", x: 820, y: 86, match: (n) => n === "verifyOutcome" },
   { id: "replan", label: "Re-plan", x: 820, y: 186, match: (n) => n === "replan" },
-  { id: "finalize", label: "Finalize", x: 1020, y: 86, match: (n) => n === "finalize" || n === "exhausted" || n === "escalate" },
+  { id: "finalize", label: "Finalize", x: 1020, y: 86, match: (n) => n === "finalize" || n === "updateMemory" || n === "exhausted" || n.startsWith("escalate") },
 ];
 
 const EDGES: Array<[string, string]> = [

@@ -92,7 +92,7 @@ function TicketView({
         {ticket.status === "drafting" || ticket.status === "new" ? (
           <div className="text-sm text-neutral-500 flex items-center gap-2 py-3">
             <Loader2 size={14} className="animate-spin" />
-            Drafting plan from runbooks…
+            Drafting plan…
           </div>
         ) : ticket.draftResponse ? (
           <>
@@ -103,7 +103,7 @@ function TicketView({
               <ShieldCheck size={12} className="text-emerald-400" />
               Confidence: {Math.round(ticket.confidence * 100)}%
               <span className="text-neutral-700">·</span>
-              {ticket.citations.filter((c) => c.source === "runbook").length} runbook citations
+              {ticket.citations.length} grounding {ticket.citations.length === 1 ? "citation" : "citations"}
             </div>
           </>
         ) : (
@@ -185,7 +185,7 @@ function TicketView({
             Resolved by AI in {Math.round((ticket.resolutionTimeMs ?? 0) / 1000)}s
           </div>
           <p className="text-xs text-neutral-500 mt-2">
-            Resolution auto-extracted to a runbook entry. The next identical ticket will resolve faster.
+            What worked was written to this employee&apos;s memory, so the next similar ticket starts ahead.
           </p>
         </section>
       )}

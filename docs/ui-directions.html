@@ -1,0 +1,694 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Bolt-it — 5 UI directions</title>
+<style>
+  :root{
+    --g-bg:#f6f8fc; --g-surf:#fff; --g-bd:#dadce0; --g-t1:#202124; --g-t2:#5f6368;
+    --g-blue:#1a73e8; --g-bluebg:#e8f0fe; --g-green:#188038; --g-amber:#b06000; --g-red:#d93025;
+    --m-bg:#faf9f8; --m-surf:#fff; --m-bd:#e1dfdd; --m-t1:#242424; --m-t2:#616161;
+    --m-blue:#0f6cbd; --m-bluebg:#eff6fc; --m-purple:#5b5fc7; --m-green:#0e700e; --m-amber:#8a5300;
+    --font:"Inter","Segoe UI Variable","Segoe UI",Roboto,system-ui,-apple-system,sans-serif;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;font-family:var(--font);background:#0e0f11;color:#e8eaed;-webkit-font-smoothing:antialiased}
+  /* ---------- chrome ---------- */
+  .picker{position:sticky;top:0;z-index:50;display:flex;gap:6px;align-items:center;flex-wrap:wrap;
+    padding:12px 18px;background:#141518;border-bottom:1px solid #26282d}
+  .picker b{font-size:13px;font-weight:600;margin-right:10px;letter-spacing:-.01em}
+  .picker button{font:inherit;font-size:12px;padding:7px 13px;border-radius:999px;cursor:pointer;
+    border:1px solid #2e3137;background:#1c1e22;color:#b9bec7;transition:.12s}
+  .picker button:hover{background:#25282e;color:#fff}
+  .picker button[aria-selected=true]{background:#e8eaed;color:#111;border-color:#e8eaed;font-weight:600}
+  .note{max-width:1180px;margin:22px auto 0;padding:0 20px;font-size:13px;line-height:1.65;color:#9aa0a6}
+  .note h2{color:#fff;font-size:19px;margin:0 0 6px;letter-spacing:-.02em}
+  .note .tag{display:inline-block;font-size:11px;padding:3px 9px;border-radius:999px;background:#1c2b1f;color:#7ee2a0;margin-left:8px;vertical-align:2px}
+  .stage{max-width:1180px;margin:14px auto 60px;padding:0 20px}
+  .screen{border-radius:14px;overflow:hidden;border:1px solid #2a2d33;background:#fff;color:#111;
+    box-shadow:0 24px 60px rgba(0,0,0,.5)}
+  .panelwrap{display:none}
+  .panelwrap.on{display:block}
+  .metaRow{display:flex;gap:26px;flex-wrap:wrap;margin:14px 0 0;font-size:12.5px;color:#9aa0a6}
+  .metaRow div b{color:#e8eaed;font-weight:600}
+
+  /* ---------- shared bits ---------- */
+  .row{display:flex}
+  .col{display:flex;flex-direction:column}
+  .grow{flex:1;min-width:0}
+  .av{width:36px;height:36px;border-radius:999px;display:grid;place-items:center;color:#fff;font-size:12px;font-weight:600;flex:none}
+  .pill{display:inline-flex;align-items:center;gap:6px;font-size:11px;font-weight:600;padding:4px 10px;border-radius:999px}
+
+  /* ================= 1 · GOOGLE INBOX ================= */
+  #d1{background:var(--g-bg);color:var(--g-t1);font-size:14px}
+  #d1 .top{display:flex;align-items:center;gap:16px;padding:10px 16px}
+  #d1 .mark{width:36px;height:36px;border-radius:10px;background:var(--g-blue);color:#fff;display:grid;place-items:center;font-weight:700;font-size:18px}
+  #d1 .brand{display:flex;align-items:center;gap:10px;font-size:18px;font-weight:500}
+  #d1 .search{flex:1;background:#eef1f5;border-radius:28px;padding:12px 20px;color:var(--g-t2);font-size:14px}
+  #d1 .body{display:flex;padding:0 16px 16px 8px;height:660px}
+  #d1 .nav{width:232px;padding:8px 12px 0 0;flex:none}
+  #d1 .nv{display:flex;align-items:center;gap:14px;padding:11px 16px 11px 20px;border-radius:999px;font-size:14px;color:var(--g-t1);cursor:pointer}
+  #d1 .nv .dot{width:8px;height:8px;border-radius:999px;background:var(--g-t2);flex:none}
+  #d1 .nv .ct{font-size:12px;color:var(--g-t2)}
+  #d1 .nv:hover{background:#eaeef4}
+  #d1 .nv.on{background:var(--g-bluebg);color:var(--g-blue);font-weight:500}
+  #d1 .nv.on .dot{background:var(--g-blue)} #d1 .nv.on .ct{color:var(--g-blue)}
+  #d1 .panel{flex:1;display:flex;background:#fff;border-radius:16px;overflow:hidden;min-width:0}
+  #d1 .list{width:392px;flex:none;border-right:1px solid var(--g-bd);overflow:auto}
+  #d1 .lh{display:flex;align-items:center;padding:18px 20px 14px;font-size:15px;font-weight:500}
+  #d1 .lh span{margin-left:auto;font-size:12px;font-weight:400;color:var(--g-t2)}
+  #d1 .it{display:flex;gap:14px;padding:14px 20px;cursor:pointer;border-left:3px solid transparent}
+  #d1 .it:hover{background:#f8f9fb}
+  #d1 .it.on{background:#f0f4fe;border-left-color:var(--g-blue)}
+  #d1 .it .l1{display:flex;align-items:center;gap:8px;font-size:13px;font-weight:500}
+  #d1 .it .l1 time{margin-left:auto;font-size:11px;font-weight:400;color:var(--g-t2)}
+  #d1 .it .sub{font-size:14px;margin-top:3px}
+  #d1 .it.on .sub{font-weight:500}
+  #d1 .it .sn{font-size:12px;color:var(--g-t2);margin-top:3px}
+  #d1 .detail{flex:1;overflow:auto;padding:26px 30px;min-width:0}
+  #d1 h1{font-size:22px;font-weight:400;letter-spacing:-.01em;margin:0 0 10px}
+  #d1 .meta{display:flex;gap:10px;align-items:center;color:var(--g-t2);font-size:12.5px;margin-bottom:22px}
+  #d1 .step{display:flex;gap:14px;padding:11px 0}
+  #d1 .step .ic{width:22px;height:22px;border-radius:999px;display:grid;place-items:center;font-size:12px;color:#fff;flex:none}
+  #d1 .step .tx{font-size:13.5px}
+  #d1 .step .tx small{display:block;color:var(--g-t2);font-size:12px;margin-top:2px}
+  #d1 .ask{border:1px solid var(--g-blue);background:var(--g-bluebg);border-radius:14px;padding:18px 20px;margin:16px 0 6px}
+  #d1 .ask h3{margin:0 0 4px;font-size:15px;font-weight:500;color:#174ea6}
+  #d1 .ask p{margin:0 0 16px;font-size:13px;color:#3c4043;line-height:1.6}
+  #d1 .btnrow{display:flex;gap:10px;align-items:center}
+  #d1 .bp{background:var(--g-blue);color:#fff;border:0;border-radius:999px;padding:10px 24px;font:inherit;font-size:13.5px;font-weight:500;cursor:pointer}
+  #d1 .bs{background:#fff;color:var(--g-blue);border:1px solid var(--g-bd);border-radius:999px;padding:10px 20px;font:inherit;font-size:13.5px;font-weight:500;cursor:pointer}
+  #d1 .why{margin-left:auto;font-size:12px;color:var(--g-t2)}
+  #d1 .src{border-top:1px solid var(--g-bd);margin-top:20px;padding-top:16px;font-size:12px;color:var(--g-t2)}
+  #d1 .src a{color:var(--g-blue);text-decoration:none;margin-right:14px}
+
+  /* ================= 2 · MS COPILOT CHAT ================= */
+  #d2{background:var(--m-bg);color:var(--m-t1);font-size:14px;display:flex;height:720px}
+  #d2 .rail{width:68px;flex:none;background:#f0efee;border-right:1px solid var(--m-bd);padding:12px 0;display:flex;flex-direction:column;align-items:center;gap:4px}
+  #d2 .ri{width:52px;padding:9px 0;border-radius:8px;display:flex;flex-direction:column;align-items:center;gap:4px;font-size:10px;color:var(--m-t2);cursor:pointer}
+  #d2 .ri .g{width:22px;height:22px;border-radius:6px;background:#c9c7c5}
+  #d2 .ri.on{background:#fff;color:var(--m-blue);font-weight:600;box-shadow:0 1px 2px rgba(0,0,0,.08)}
+  #d2 .ri.on .g{background:var(--m-blue)}
+  #d2 .main{flex:1;display:flex;flex-direction:column;min-width:0}
+  #d2 .hdr{display:flex;align-items:center;gap:12px;padding:14px 22px;border-bottom:1px solid var(--m-bd);background:#fff}
+  #d2 .hdr .t{font-size:15px;font-weight:600}
+  #d2 .hdr .s{font-size:12px;color:var(--m-t2)}
+  #d2 .live{margin-left:auto;display:flex;align-items:center;gap:7px;font-size:12px;color:var(--m-green);font-weight:600}
+  #d2 .live i{width:8px;height:8px;border-radius:999px;background:var(--m-green);display:block;animation:pulse 1.6s infinite}
+  @keyframes pulse{0%,100%{opacity:1}50%{opacity:.25}}
+  #d2 .feed{flex:1;overflow:auto;padding:26px 22px;display:flex;flex-direction:column;gap:18px;background:var(--m-bg)}
+  #d2 .msg{display:flex;gap:12px;max-width:760px}
+  #d2 .msg.me{align-self:flex-end;flex-direction:row-reverse}
+  #d2 .bub{background:#fff;border:1px solid var(--m-bd);border-radius:10px;padding:13px 16px;font-size:14px;line-height:1.6;box-shadow:0 1px 2px rgba(0,0,0,.04)}
+  #d2 .msg.me .bub{background:#e8ebfa;border-color:#d5daf5}
+  #d2 .who{font-size:11.5px;color:var(--m-t2);margin-bottom:5px;font-weight:600}
+  #d2 .card{background:#fff;border:1px solid var(--m-bd);border-radius:10px;overflow:hidden;box-shadow:0 2px 6px rgba(0,0,0,.06);max-width:560px}
+  #d2 .card .bar{height:4px;background:var(--m-purple)}
+  #d2 .card .bd{padding:16px 18px}
+  #d2 .card h4{margin:0 0 3px;font-size:15px;font-weight:600}
+  #d2 .card .sm{font-size:12.5px;color:var(--m-t2);margin-bottom:14px}
+  #d2 .kv{display:flex;gap:10px;padding:7px 0;font-size:13px;border-top:1px solid #f0efee}
+  #d2 .kv b{width:120px;flex:none;color:var(--m-t2);font-weight:500;font-size:12.5px}
+  #d2 .acts{display:flex;gap:8px;padding:14px 18px;background:#faf9f8;border-top:1px solid var(--m-bd)}
+  #d2 .bp{background:var(--m-blue);color:#fff;border:0;border-radius:4px;padding:9px 20px;font:inherit;font-size:13.5px;font-weight:600;cursor:pointer}
+  #d2 .bs{background:#fff;color:var(--m-t1);border:1px solid #c6c4c2;border-radius:4px;padding:9px 16px;font:inherit;font-size:13.5px;cursor:pointer}
+  #d2 .prog{display:flex;flex-direction:column;gap:0;font-size:13px}
+  #d2 .pl{display:flex;gap:11px;align-items:center;padding:7px 0}
+  #d2 .pl .d{width:18px;height:18px;border-radius:999px;display:grid;place-items:center;font-size:10px;color:#fff;flex:none}
+  #d2 .composer{border-top:1px solid var(--m-bd);background:#fff;padding:14px 22px;display:flex;gap:12px;align-items:center}
+  #d2 .composer .inp{flex:1;border:1px solid #c6c4c2;border-radius:6px;padding:11px 14px;color:#9a9a9a;font-size:14px}
+  #d2 .composer .snd{width:38px;height:38px;border-radius:6px;background:var(--m-blue);color:#fff;display:grid;place-items:center;font-size:15px}
+
+  /* ================= 3 · ASK BOX ================= */
+  #d3{background:#fff;color:var(--g-t1);height:720px;overflow:auto}
+  #d3 .nav{display:flex;align-items:center;gap:14px;padding:16px 26px;font-size:13px;color:var(--g-t2)}
+  #d3 .nav .sp{margin-left:auto}
+  #d3 .hero{max-width:640px;margin:0 auto;padding:46px 20px 0;text-align:center}
+  #d3 .logo{font-size:42px;font-weight:600;letter-spacing:-.04em;margin-bottom:6px}
+  #d3 .logo span:nth-child(1){color:#1a73e8}#d3 .logo span:nth-child(2){color:#ea4335}
+  #d3 .logo span:nth-child(3){color:#fbbc04}#d3 .logo span:nth-child(4){color:#34a853}
+  #d3 .logo span:nth-child(5){color:#1a73e8}#d3 .logo span:nth-child(6){color:#ea4335}
+  #d3 .kicker{font-size:14px;color:var(--g-t2);margin-bottom:26px}
+  #d3 .box{display:flex;align-items:center;gap:14px;border:1px solid var(--g-bd);border-radius:26px;padding:14px 22px;
+    box-shadow:0 1px 8px rgba(32,33,36,.1);text-align:left;font-size:16px;color:var(--g-t1)}
+  #d3 .box .mic{margin-left:auto;color:var(--g-blue);font-size:15px}
+  #d3 .chips{display:flex;gap:9px;flex-wrap:wrap;justify-content:center;margin-top:20px}
+  #d3 .chip{border:1px solid var(--g-bd);border-radius:999px;padding:8px 16px;font-size:13px;color:#3c4043;cursor:pointer;background:#fff}
+  #d3 .chip:hover{background:#f8f9fa;box-shadow:0 1px 4px rgba(0,0,0,.08)}
+  #d3 .res{max-width:720px;margin:40px auto 0;padding:0 20px 50px;border-top:1px solid #ecedef}
+  #d3 .rq{font-size:13px;color:var(--g-t2);padding:18px 0 14px}
+  #d3 .answer{border:1px solid var(--g-bd);border-radius:16px;padding:24px 26px}
+  #d3 .aihdr{display:flex;align-items:center;gap:9px;font-size:12px;font-weight:600;color:#5f6368;letter-spacing:.04em;text-transform:uppercase;margin-bottom:12px}
+  #d3 .aihdr i{width:16px;height:16px;border-radius:4px;background:linear-gradient(135deg,#4285f4,#9b72cb);display:block}
+  #d3 .answer h2{font-size:21px;font-weight:400;margin:0 0 12px;letter-spacing:-.01em}
+  #d3 .answer p{font-size:14.5px;line-height:1.75;color:#3c4043;margin:0 0 18px}
+  #d3 .doit{display:flex;gap:12px;align-items:center;flex-wrap:wrap}
+  #d3 .bp{background:var(--g-blue);color:#fff;border:0;border-radius:999px;padding:12px 26px;font:inherit;font-size:14px;font-weight:500;cursor:pointer}
+  #d3 .bs{background:#fff;border:1px solid var(--g-bd);border-radius:999px;padding:12px 22px;font:inherit;font-size:14px;cursor:pointer;color:#3c4043}
+  #d3 .eta{font-size:12.5px;color:var(--g-t2)}
+  #d3 .srcs{margin-top:22px;padding-top:18px;border-top:1px solid #ecedef}
+  #d3 .srcs .h{font-size:12px;color:var(--g-t2);margin-bottom:10px}
+  #d3 .sc{display:flex;gap:10px}
+  #d3 .scard{flex:1;border:1px solid var(--g-bd);border-radius:10px;padding:11px 13px;font-size:12px;line-height:1.5}
+  #d3 .scard b{display:block;color:var(--g-blue);font-weight:500;margin-bottom:3px}
+  #d3 .scard span{color:var(--g-t2)}
+  #d3 .esc{margin-top:18px;font-size:13px;color:var(--g-t2)}
+  #d3 .esc a{color:var(--g-blue);text-decoration:none}
+
+  /* ================= 4 · ADMIN CONSOLE ================= */
+  #d4{background:var(--m-bg);color:var(--m-t1);font-size:14px;height:760px;display:flex;flex-direction:column}
+  #d4 .top{background:var(--m-purple);color:#fff;display:flex;align-items:center;gap:16px;padding:11px 20px;font-size:14px}
+  #d4 .top .waffle{display:grid;grid-template-columns:repeat(3,4px);gap:3px}
+  #d4 .top .waffle i{width:4px;height:4px;background:#fff;border-radius:1px;display:block}
+  #d4 .top .sr{flex:1;max-width:420px;background:rgba(255,255,255,.18);border-radius:4px;padding:7px 12px;font-size:13px;color:#e9e8f7}
+  #d4 .top .me{margin-left:auto;display:flex;align-items:center;gap:9px;font-size:13px}
+  #d4 .wrap{flex:1;display:flex;min-height:0}
+  #d4 .side{width:232px;flex:none;background:#fff;border-right:1px solid var(--m-bd);padding:12px 0;font-size:13.5px}
+  #d4 .si{padding:9px 20px;color:#242424;cursor:pointer;border-left:3px solid transparent}
+  #d4 .si:hover{background:#f5f5f5}
+  #d4 .si.on{background:#f0f0fa;border-left-color:var(--m-purple);font-weight:600;color:var(--m-purple)}
+  #d4 .si.grp{font-size:11px;text-transform:uppercase;letter-spacing:.06em;color:var(--m-t2);padding-top:16px;font-weight:600;cursor:default}
+  #d4 .content{flex:1;overflow:auto;padding:24px 28px;min-width:0}
+  #d4 h1{font-size:24px;font-weight:600;margin:0 0 4px;letter-spacing:-.02em}
+  #d4 .sub{color:var(--m-t2);font-size:13.5px;margin-bottom:22px}
+  #d4 .cards{display:grid;grid-template-columns:repeat(4,1fr);gap:14px;margin-bottom:22px}
+  #d4 .kpi{background:#fff;border:1px solid var(--m-bd);border-radius:8px;padding:16px 18px;box-shadow:0 1px 2px rgba(0,0,0,.04)}
+  #d4 .kpi .n{font-size:30px;font-weight:600;letter-spacing:-.02em;line-height:1.1}
+  #d4 .kpi .l{font-size:12.5px;color:var(--m-t2);margin-top:5px}
+  #d4 .kpi .d{font-size:11.5px;margin-top:9px;font-weight:600}
+  #d4 .two{display:grid;grid-template-columns:1.55fr 1fr;gap:16px}
+  #d4 .box{background:#fff;border:1px solid var(--m-bd);border-radius:8px;overflow:hidden;box-shadow:0 1px 2px rgba(0,0,0,.04)}
+  #d4 .box .bh{display:flex;align-items:center;padding:15px 18px;border-bottom:1px solid var(--m-bd);font-size:15px;font-weight:600}
+  #d4 .box .bh a{margin-left:auto;font-size:12.5px;font-weight:500;color:var(--m-blue);text-decoration:none}
+  #d4 table{width:100%;border-collapse:collapse;font-size:13px}
+  #d4 th{text-align:left;font-size:11.5px;text-transform:uppercase;letter-spacing:.05em;color:var(--m-t2);padding:10px 18px;border-bottom:1px solid var(--m-bd);font-weight:600}
+  #d4 td{padding:12px 18px;border-bottom:1px solid #f5f4f3;vertical-align:middle}
+  #d4 tr:hover td{background:#fafafa}
+  #d4 .who{display:flex;align-items:center;gap:10px}
+  #d4 .who .av{width:28px;height:28px;font-size:11px}
+  #d4 .bp{background:var(--m-blue);color:#fff;border:0;border-radius:4px;padding:6px 14px;font:inherit;font-size:12.5px;font-weight:600;cursor:pointer}
+  #d4 .bs{background:#fff;border:1px solid #c6c4c2;border-radius:4px;padding:6px 12px;font:inherit;font-size:12.5px;cursor:pointer;margin-left:6px}
+  #d4 .lv{padding:13px 18px;border-bottom:1px solid #f5f4f3;font-size:13px;display:flex;gap:11px;align-items:flex-start}
+  #d4 .lv .d{width:8px;height:8px;border-radius:999px;margin-top:5px;flex:none}
+  #d4 .lv small{display:block;color:var(--m-t2);font-size:11.5px;margin-top:2px}
+  #d4 .bar{height:8px;border-radius:999px;background:#eceae9;overflow:hidden;margin-top:12px}
+  #d4 .bar i{display:block;height:100%;border-radius:999px}
+
+  /* ================= 5 · POCKET STATUS ================= */
+  #d5{background:#e8eaed;height:760px;display:flex;align-items:center;justify-content:center;gap:34px;padding:26px;flex-wrap:wrap}
+  #d5 .phone{width:340px;height:700px;background:#fff;border-radius:34px;border:9px solid #17181a;overflow:hidden;display:flex;flex-direction:column;
+    box-shadow:0 24px 50px rgba(0,0,0,.28);color:var(--g-t1)}
+  #d5 .sb{display:flex;align-items:center;padding:11px 20px 4px;font-size:11.5px;font-weight:600;color:var(--g-t1)}
+  #d5 .sb .r{margin-left:auto;letter-spacing:1px}
+  #d5 .ph{padding:10px 20px 14px;display:flex;align-items:center;gap:11px}
+  #d5 .ph .mark{width:30px;height:30px;border-radius:9px;background:var(--g-blue);color:#fff;display:grid;place-items:center;font-weight:700;font-size:15px}
+  #d5 .ph .t{font-size:17px;font-weight:500}
+  #d5 .ph .av{width:30px;height:30px;font-size:11px;margin-left:auto;background:#c5221f}
+  #d5 .pb{flex:1;overflow:auto;padding:0 20px 20px}
+  #d5 .hero{background:var(--g-bluebg);border-radius:18px;padding:20px;margin-bottom:18px}
+  #d5 .hero .st{font-size:12px;font-weight:600;color:var(--g-blue);text-transform:uppercase;letter-spacing:.05em}
+  #d5 .hero h2{font-size:20px;font-weight:500;margin:8px 0 6px;letter-spacing:-.01em;line-height:1.3}
+  #d5 .hero p{font-size:13.5px;color:#3c4043;line-height:1.6;margin:0}
+  #d5 .stepper{position:relative;padding-left:30px}
+  #d5 .stepper:before{content:"";position:absolute;left:10px;top:14px;bottom:22px;width:2px;background:#e4e6ea}
+  #d5 .sp{position:relative;padding:0 0 22px}
+  #d5 .sp .mk{position:absolute;left:-30px;top:1px;width:22px;height:22px;border-radius:999px;display:grid;place-items:center;font-size:11px;color:#fff;border:3px solid #fff}
+  #d5 .sp .tt{font-size:14px;font-weight:500}
+  #d5 .sp .dd{font-size:12.5px;color:var(--g-t2);margin-top:3px;line-height:1.55}
+  #d5 .sp.now .tt{color:var(--g-blue)}
+  #d5 .sp.todo .tt{color:#9aa0a6;font-weight:400}
+  #d5 .ask{border:1px solid var(--g-amber);background:#fef7e0;border-radius:16px;padding:16px 18px;margin:4px 0 18px}
+  #d5 .ask h3{margin:0 0 5px;font-size:14.5px;font-weight:600;color:#8a5300}
+  #d5 .ask p{margin:0 0 14px;font-size:13px;color:#5f4200;line-height:1.55}
+  #d5 .bp{width:100%;background:var(--g-blue);color:#fff;border:0;border-radius:999px;padding:13px;font:inherit;font-size:14.5px;font-weight:500;cursor:pointer}
+  #d5 .bs{width:100%;background:#fff;border:1px solid var(--g-bd);border-radius:999px;padding:12px;font:inherit;font-size:14px;cursor:pointer;margin-top:9px;color:#3c4043}
+  #d5 .nb{display:flex;border-top:1px solid #ecedef;padding:9px 0 14px;background:#fff}
+  #d5 .nb div{flex:1;text-align:center;font-size:10.5px;color:var(--g-t2)}
+  #d5 .nb div i{display:block;width:22px;height:22px;border-radius:7px;background:#dadce0;margin:0 auto 5px}
+  #d5 .nb div.on{color:var(--g-blue);font-weight:600}
+  #d5 .nb div.on i{background:var(--g-blue)}
+  #d5 .cap{width:340px;font-size:13px;color:#3c4043;line-height:1.7}
+  #d5 .cap h3{margin:0 0 8px;font-size:16px;color:#111}
+  #d5 .cap ul{margin:0;padding-left:18px}
+  #d5 .cap li{margin-bottom:7px}
+  @media(max-width:900px){#d4 .cards{grid-template-columns:repeat(2,1fr)}#d4 .two{grid-template-columns:1fr}}
+</style>
+</head>
+<body>
+
+<div class="picker" role="tablist">
+  <b>Bolt-it · 5 UI directions</b>
+  <button role="tab" aria-selected="true"  data-t="1">1 · Triage Inbox</button>
+  <button role="tab" aria-selected="false" data-t="2">2 · Copilot Chat</button>
+  <button role="tab" aria-selected="false" data-t="3">3 · Ask Box</button>
+  <button role="tab" aria-selected="false" data-t="4">4 · Admin Console</button>
+  <button role="tab" aria-selected="false" data-t="5">5 · Pocket Status</button>
+</div>
+
+<!-- ========================= 1 ========================= -->
+<div class="panelwrap on" id="p1">
+<div class="note">
+  <h2>1 · Triage Inbox <span class="tag">Gmail / Google Workspace</span></h2>
+  <p>Every ticket is a message. Three panes, one job: <b>clear the "Needs your approval" list</b>. The approval gate becomes a blue inline card — the one thing you can act on, always in the same place. Zero LangGraph vocabulary on screen.</p>
+  <div class="metaRow">
+    <div><b>Primary user:</b> IT staff</div><div><b>Density:</b> high</div>
+    <div><b>Replaces:</b> Console + Chat tabs</div><div><b>Risk:</b> familiar, but still an inbox to clear</div>
+  </div>
+</div>
+<div class="stage"><div class="screen"><div id="d1">
+  <div class="top">
+    <div class="brand"><div class="mark">b</div>Bolt-it</div>
+    <div class="search">Search tickets, people, devices</div>
+    <div class="av" style="background:#c5221f">SS</div>
+  </div>
+  <div class="body">
+    <div class="nav">
+      <div class="nv on"><i class="dot"></i>Needs your approval<span class="ct">3</span></div>
+      <div class="nv"><i class="dot"></i>Working now<span class="ct">8</span></div>
+      <div class="nv"><i class="dot"></i>Waiting on employee<span class="ct">4</span></div>
+      <div class="nv"><i class="dot"></i>Resolved today<span class="ct">27</span></div>
+      <div style="height:18px"></div>
+      <div class="nv"><i class="dot"></i>People &amp; devices</div>
+      <div class="nv"><i class="dot"></i>Runbooks</div>
+    </div>
+    <div class="panel">
+      <div class="list">
+        <div class="lh">Needs your approval <span>Newest</span></div>
+        <div class="it on">
+          <div class="av" style="background:#1a73e8">PM</div>
+          <div class="grow">
+            <div class="l1">Priya Menon<time>2 min</time></div>
+            <div class="sub">VPN won't connect from home</div>
+            <div class="sn">Expired certificate · fix ready, 1 step needs you</div>
+            <div style="margin-top:7px"><span class="pill" style="background:#fef7e0;color:var(--g-amber)">Approve to finish</span></div>
+          </div>
+        </div>
+        <div class="it">
+          <div class="av" style="background:#188038">DK</div>
+          <div class="grow">
+            <div class="l1">Dan Kaur<time>11 min</time></div>
+            <div class="sub">Outlook keeps asking for my password</div>
+            <div class="sn">Kerberos ticket stale · refresh ready</div>
+            <div style="margin-top:7px"><span class="pill" style="background:#fef7e0;color:var(--g-amber)">Approve to finish</span></div>
+          </div>
+        </div>
+        <div class="it">
+          <div class="av" style="background:#9334e6">LT</div>
+          <div class="grow">
+            <div class="l1">Lena Tran<time>24 min</time></div>
+            <div class="sub">Locked out of my laptop</div>
+            <div class="sn">Account locked after 5 tries · unlock ready</div>
+            <div style="margin-top:7px"><span class="pill" style="background:#fef7e0;color:var(--g-amber)">Approve to finish</span></div>
+          </div>
+        </div>
+        <div class="lh" style="padding-top:22px">Working now</div>
+        <div class="it">
+          <div class="av" style="background:#e37400">RS</div>
+          <div class="grow">
+            <div class="l1">Raj Shah<time>just now</time></div>
+            <div class="sub">Zoom crashes when I join a call</div>
+            <div class="sn">Restarting Zoom · step 2 of 3</div>
+            <div style="margin-top:7px"><span class="pill" style="background:var(--g-bluebg);color:var(--g-blue)">Agent working</span></div>
+          </div>
+        </div>
+        <div class="it">
+          <div class="av" style="background:#00897b">AO</div>
+          <div class="grow">
+            <div class="l1">Amara Osei<time>6 min</time></div>
+            <div class="sub">Printer offline on 4th floor</div>
+            <div class="sn">Checking print spooler service</div>
+            <div style="margin-top:7px"><span class="pill" style="background:var(--g-bluebg);color:var(--g-blue)">Agent working</span></div>
+          </div>
+        </div>
+      </div>
+
+      <div class="detail">
+        <h1>VPN won't connect from home</h1>
+        <div class="meta">
+          <div class="av" style="width:24px;height:24px;font-size:10px;background:#1a73e8">PM</div>
+          Priya Menon · Finance · MacBook Pro "PRIYA-MBP" · reported 2 min ago
+        </div>
+
+        <div class="step">
+          <div class="ic" style="background:var(--g-green)">✓</div>
+          <div class="tx">Checked her laptop<small>VPN client running, last successful connect 9 days ago</small></div>
+        </div>
+        <div class="step">
+          <div class="ic" style="background:var(--g-green)">✓</div>
+          <div class="tx">Read the VPN runbook<small>"Certificate renewal — quarterly" matched her error code</small></div>
+        </div>
+        <div class="step">
+          <div class="ic" style="background:var(--g-green)">✓</div>
+          <div class="tx">Confirmed the cause<small>Client certificate expired 2026-08-03. 6 other people hit this today.</small></div>
+        </div>
+
+        <div class="ask">
+          <h3>One step needs your OK</h3>
+          <p><b>Renew Priya's VPN certificate</b> and restart her VPN client. Nothing else on her machine changes. Takes about 40 seconds, and she stays online the whole time.</p>
+          <div class="btnrow">
+            <button class="bp">Approve &amp; finish</button>
+            <button class="bs">Change the plan</button>
+            <span class="why">Approved 3 times before · still asks every time</span>
+          </div>
+        </div>
+
+        <div class="step">
+          <div class="ic" style="background:#9aa0a6">4</div>
+          <div class="tx" style="color:var(--g-t2)">Then: confirm the fix worked<small>Re-test the tunnel, and only mark resolved if it actually connects</small></div>
+        </div>
+        <div class="step">
+          <div class="ic" style="background:#9aa0a6">5</div>
+          <div class="tx" style="color:var(--g-t2)">Then: reply to Priya<small>Plain-language message, sent from you</small></div>
+        </div>
+
+        <div class="src">
+          Sources used: <a href="#">VPN certificate renewal (runbook)</a><a href="#">Priya's device log</a><a href="#">6 similar tickets this week</a>
+        </div>
+      </div>
+    </div>
+  </div>
+</div></div></div>
+</div>
+
+<!-- ========================= 2 ========================= -->
+<div class="panelwrap" id="p2">
+<div class="note">
+  <h2>2 · Copilot Chat <span class="tag">Microsoft Teams / Fluent</span></h2>
+  <p>One conversation, no tabs. The employee talks; the agent answers and works in the same thread. Approvals arrive as Fluent-style cards inline — the technician approves without ever leaving chat. This is the smallest possible surface for the simplified tier.</p>
+  <div class="metaRow">
+    <div><b>Primary user:</b> employee + IT in one thread</div><div><b>Density:</b> low</div>
+    <div><b>Replaces:</b> whole app</div><div><b>Risk:</b> bulk triage is hard in a linear feed</div>
+  </div>
+</div>
+<div class="stage"><div class="screen"><div id="d2">
+  <div class="rail">
+    <div class="ri on"><i class="g"></i>Chat</div>
+    <div class="ri"><i class="g"></i>Queue</div>
+    <div class="ri"><i class="g"></i>People</div>
+    <div class="ri"><i class="g"></i>Docs</div>
+  </div>
+  <div class="main">
+    <div class="hdr">
+      <div class="av" style="background:#5b5fc7">PM</div>
+      <div><div class="t">Priya Menon</div><div class="s">VPN won't connect from home · opened 2 min ago</div></div>
+      <div class="live"><i></i>Agent working</div>
+    </div>
+    <div class="feed">
+      <div class="msg me">
+        <div class="av" style="background:#5b5fc7">PM</div>
+        <div><div class="bub">My VPN just stops at "connecting" since this morning. I have a board call at 2.</div></div>
+      </div>
+      <div class="msg">
+        <div class="av" style="background:#0f6cbd">b</div>
+        <div>
+          <div class="who">Bolt-it</div>
+          <div class="bub">Sorry — that's a bad morning for it. Give me a moment, I'm looking at your MacBook now.</div>
+        </div>
+      </div>
+      <div class="msg">
+        <div class="av" style="background:#0f6cbd">b</div>
+        <div style="min-width:0">
+          <div class="who">Bolt-it · found the cause</div>
+          <div class="card">
+            <div class="bar"></div>
+            <div class="bd">
+              <h4>Your VPN certificate expired</h4>
+              <div class="sm">It ran out on 3 Aug. Six other people hit this today.</div>
+              <div class="prog">
+                <div class="pl"><span class="d" style="background:var(--m-green)">✓</span>Checked your laptop — VPN client is fine</div>
+                <div class="pl"><span class="d" style="background:var(--m-green)">✓</span>Matched the certificate-renewal runbook</div>
+                <div class="pl"><span class="d" style="background:var(--m-amber)">!</span>Renewing the certificate — needs IT approval</div>
+                <div class="pl"><span class="d" style="background:#c8c6c4">4</span>Re-test, then confirm it actually connects</div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+      <div class="msg">
+        <div class="av" style="background:#0f6cbd">b</div>
+        <div style="min-width:0">
+          <div class="who">Bolt-it · waiting on Sam (IT)</div>
+          <div class="card">
+            <div class="bar" style="background:var(--m-amber)"></div>
+            <div class="bd">
+              <h4>Approve: renew VPN certificate</h4>
+              <div class="sm">Runs on PRIYA-MBP · reversible · ~40 seconds</div>
+              <div class="kv"><b>What changes</b><span>Client certificate replaced, VPN client restarted</span></div>
+              <div class="kv"><b>What doesn't</b><span>No other setting, file, or account touched</span></div>
+              <div class="kv"><b>Track record</b><span>Approved 3 times before, worked every time</span></div>
+            </div>
+            <div class="acts">
+              <button class="bp">Approve</button>
+              <button class="bs">Edit steps</button>
+              <button class="bs">Take over myself</button>
+            </div>
+          </div>
+        </div>
+      </div>
+      <div class="msg me">
+        <div class="av" style="background:#c5221f">SS</div>
+        <div><div class="bub">Approved — go ahead.</div></div>
+      </div>
+    </div>
+    <div class="composer">
+      <div class="inp">Message Priya, or tell Bolt-it what to do…</div>
+      <div class="snd">➤</div>
+    </div>
+  </div>
+</div></div></div>
+</div>
+
+<!-- ========================= 3 ========================= -->
+<div class="panelwrap" id="p3">
+<div class="note">
+  <h2>3 · Ask Box <span class="tag">Google Search</span></h2>
+  <p>No dashboard at all. One box: <i>"What's broken?"</i>. The answer comes back as a single card with one button — <b>Fix it for me</b> — plus the sources it used. The most consumer-grade of the five, and the easiest to explain in a demo.</p>
+  <div class="metaRow">
+    <div><b>Primary user:</b> employee</div><div><b>Density:</b> minimal</div>
+    <div><b>Replaces:</b> ticket form + chat</div><div><b>Risk:</b> hides the queue; IT still needs direction 1 or 4</div>
+  </div>
+</div>
+<div class="stage"><div class="screen"><div id="d3">
+  <div class="nav">Bolt-it<span class="sp"></span>My tickets<span>Devices</span><div class="av" style="width:28px;height:28px;font-size:11px;background:#1a73e8">PM</div></div>
+  <div class="hero">
+    <div class="logo"><span>B</span><span>o</span><span>l</span><span>t</span><span>-</span><span>it</span></div>
+    <div class="kicker">Tell us what's broken. Plain words are fine.</div>
+    <div class="box">🔍 my vpn won't connect<span class="mic">🎙</span></div>
+    <div class="chips">
+      <div class="chip">Wi-Fi keeps dropping</div>
+      <div class="chip">Forgot my password</div>
+      <div class="chip">Printer offline</div>
+      <div class="chip">Laptop is slow</div>
+      <div class="chip">New starter setup</div>
+    </div>
+  </div>
+  <div class="res">
+    <div class="rq">Answer for <b>"my vpn won't connect"</b> · checked your MacBook Pro 4 seconds ago</div>
+    <div class="answer">
+      <div class="aihdr"><i></i>Bolt-it found the cause</div>
+      <h2>Your VPN certificate expired on 3 August</h2>
+      <p>Your laptop and network are fine — the certificate the VPN uses to prove who you are ran out two days ago, so the tunnel stops at "connecting". Six other people hit this today. Renewing it takes about 40 seconds and you won't lose anything.</p>
+      <div class="doit">
+        <button class="bp">Fix it for me</button>
+        <button class="bs">Show me the steps</button>
+        <span class="eta">IT approves first · usually under 2 minutes</span>
+      </div>
+      <div class="srcs">
+        <div class="h">Based on</div>
+        <div class="sc">
+          <div class="scard"><b>VPN certificate renewal</b><span>Company runbook · updated Jun 2026</span></div>
+          <div class="scard"><b>Your device log</b><span>PRIYA-MBP · error 0x8007 at 08:41</span></div>
+          <div class="scard"><b>6 similar tickets</b><span>All resolved the same way this week</span></div>
+        </div>
+      </div>
+    </div>
+    <div class="esc">Not it? <a href="#">Describe it differently</a> · <a href="#">Talk to a person</a></div>
+  </div>
+</div></div></div>
+</div>
+
+<!-- ========================= 4 ========================= -->
+<div class="panelwrap" id="p4">
+<div class="note">
+  <h2>4 · Admin Console <span class="tag">Microsoft 365 admin center</span></h2>
+  <p>The IT-manager view. Calm gray canvas, KPI cards, one approval table, one activity feed. Answers "is this thing safe and is it working?" in one screen — the tier/autonomy model becomes a visible dial rather than a config file.</p>
+  <div class="metaRow">
+    <div><b>Primary user:</b> IT lead / MSP owner</div><div><b>Density:</b> high</div>
+    <div><b>Replaces:</b> the stats bar + governance</div><div><b>Risk:</b> a dashboard nobody opens unless it's the landing page</div>
+  </div>
+</div>
+<div class="stage"><div class="screen"><div id="d4">
+  <div class="top">
+    <div class="waffle"><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i></div>
+    <b style="font-weight:600">Bolt-it admin</b>
+    <div class="sr">Search users, devices, tickets</div>
+    <div class="me">Northwind Ltd<div class="av" style="width:28px;height:28px;font-size:11px;background:#c5221f">SS</div></div>
+  </div>
+  <div class="wrap">
+    <div class="side">
+      <div class="si on">Home</div>
+      <div class="si">Approvals <span style="color:#a4262c;font-weight:600">3</span></div>
+      <div class="si">Tickets</div>
+      <div class="si grp">Manage</div>
+      <div class="si">People</div>
+      <div class="si">Devices</div>
+      <div class="si">Runbooks</div>
+      <div class="si grp">Trust</div>
+      <div class="si">What the agent may do</div>
+      <div class="si">Activity log</div>
+    </div>
+    <div class="content">
+      <h1>Good morning, Sam</h1>
+      <div class="sub">Northwind Ltd · 214 people · 189 managed devices · agent online</div>
+
+      <div class="cards">
+        <div class="kpi"><div class="n" style="color:#a4262c">3</div><div class="l">Waiting on your approval</div><div class="d" style="color:#a4262c">Oldest: 24 min</div></div>
+        <div class="kpi"><div class="n">41</div><div class="l">Solved today</div><div class="d" style="color:var(--m-green)">▲ 12 vs. yesterday</div></div>
+        <div class="kpi"><div class="n">78%</div><div class="l">Solved without a person</div><div class="d" style="color:var(--m-green)">▲ 6 pts this month</div></div>
+        <div class="kpi"><div class="n">4m 12s</div><div class="l">Median time to fixed</div><div class="d" style="color:var(--m-green)">was 3h 40m in May</div></div>
+      </div>
+
+      <div class="two">
+        <div class="box">
+          <div class="bh">Waiting on you<a href="#">See all approvals</a></div>
+          <table>
+            <tr><th>Person</th><th>What the agent wants to do</th><th>Waiting</th><th></th></tr>
+            <tr>
+              <td><div class="who"><div class="av" style="background:#1a73e8">PM</div>Priya Menon</div></td>
+              <td>Renew VPN certificate<br><span style="color:var(--m-t2);font-size:11.5px">reversible · approved 3× before</span></td>
+              <td>2 min</td>
+              <td style="white-space:nowrap"><button class="bp">Approve</button><button class="bs">Review</button></td>
+            </tr>
+            <tr>
+              <td><div class="who"><div class="av" style="background:#188038">DK</div>Dan Kaur</div></td>
+              <td>Refresh Kerberos ticket<br><span style="color:var(--m-t2);font-size:11.5px">reversible · approved 7× before</span></td>
+              <td>11 min</td>
+              <td style="white-space:nowrap"><button class="bp">Approve</button><button class="bs">Review</button></td>
+            </tr>
+            <tr>
+              <td><div class="who"><div class="av" style="background:#9334e6">LT</div>Lena Tran</div></td>
+              <td>Unlock account<br><span style="color:#a4262c;font-size:11.5px">always needs a person — never automatic</span></td>
+              <td>24 min</td>
+              <td style="white-space:nowrap"><button class="bp">Approve</button><button class="bs">Review</button></td>
+            </tr>
+          </table>
+        </div>
+
+        <div class="col" style="gap:16px">
+          <div class="box">
+            <div class="bh">How much it may do on its own</div>
+            <div style="padding:16px 18px">
+              <div style="font-size:13px;color:var(--m-t2)">Currently: <b style="color:var(--m-t1)">Ask me before anything changes a machine</b></div>
+              <div class="bar"><i style="width:38%;background:var(--m-blue)"></i></div>
+              <div style="display:flex;justify-content:space-between;font-size:11px;color:var(--m-t2);margin-top:7px">
+                <span>Read only</span><span>Ask first</span><span>Fix routine things</span><span>Full autonomy</span>
+              </div>
+              <div style="font-size:12.5px;color:var(--m-t2);margin-top:12px;line-height:1.6">
+                Account unlocks and password resets stay behind a person at every level.
+              </div>
+            </div>
+          </div>
+          <div class="box">
+            <div class="bh">Activity<a href="#">Full log</a></div>
+            <div class="lv"><span class="d" style="background:var(--m-green)"></span><div>Fixed Raj Shah's Zoom crash<small>08:52 · no person needed · confirmed working</small></div></div>
+            <div class="lv"><span class="d" style="background:var(--m-green)"></span><div>Fixed 4 stale Kerberos tickets<small>08:44 · batch · confirmed working</small></div></div>
+            <div class="lv"><span class="d" style="background:var(--m-amber)"></span><div>Escalated Amara Osei's printer<small>08:31 · tried twice, nothing changed on the machine</small></div></div>
+            <div class="lv"><span class="d" style="background:var(--m-blue)"></span><div>Learned a new runbook step<small>08:12 · from Sam's edit on ticket #2291</small></div></div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div></div></div>
+</div>
+
+<!-- ========================= 5 ========================= -->
+<div class="panelwrap" id="p5">
+<div class="note">
+  <h2>5 · Pocket Status <span class="tag">Google Tasks / Material You, mobile-first</span></h2>
+  <p>Built for the person whose laptop is the broken thing. A phone-sized vertical stepper in plain English — no jargon, no queue, big touch targets. Push notification → one tap → they can see exactly who is waiting on what.</p>
+  <div class="metaRow">
+    <div><b>Primary user:</b> employee, off their laptop</div><div><b>Density:</b> minimal</div>
+    <div><b>Replaces:</b> "any news?" Slack pings</div><div><b>Risk:</b> companion surface, not the whole product</div>
+  </div>
+</div>
+<div class="stage"><div class="screen"><div id="d5">
+  <div class="phone">
+    <div class="sb">9:41<span class="r">▮▮▮ ⚡ 82%</span></div>
+    <div class="ph"><div class="mark">b</div><div class="t">Your ticket</div><div class="av">PM</div></div>
+    <div class="pb">
+      <div class="hero">
+        <div class="st">Almost done</div>
+        <h2>VPN won't connect from home</h2>
+        <p>We found the cause. Sam in IT just has to say yes, then it's fixed automatically.</p>
+      </div>
+
+      <div class="ask">
+        <h3>Waiting on Sam in IT</h3>
+        <p>Renewing your VPN certificate. Usually approved in under 2 minutes.</p>
+        <button class="bp">Nudge Sam</button>
+        <button class="bs">I need this urgently</button>
+      </div>
+
+      <div class="stepper">
+        <div class="sp">
+          <div class="mk" style="background:var(--g-green)">✓</div>
+          <div class="tt">You told us what was wrong</div>
+          <div class="dd">08:41 · "VPN stops at connecting"</div>
+        </div>
+        <div class="sp">
+          <div class="mk" style="background:var(--g-green)">✓</div>
+          <div class="tt">We checked your laptop</div>
+          <div class="dd">08:41 · Your machine and Wi-Fi are both fine</div>
+        </div>
+        <div class="sp">
+          <div class="mk" style="background:var(--g-green)">✓</div>
+          <div class="tt">We found the cause</div>
+          <div class="dd">08:42 · Your VPN certificate expired on 3 August</div>
+        </div>
+        <div class="sp now">
+          <div class="mk" style="background:var(--g-blue)">3</div>
+          <div class="tt">Waiting on IT to approve</div>
+          <div class="dd">Renewing the certificate changes nothing else on your laptop</div>
+        </div>
+        <div class="sp todo">
+          <div class="mk" style="background:#dadce0">4</div>
+          <div class="tt">We fix it</div>
+          <div class="dd">About 40 seconds. You can stay logged in.</div>
+        </div>
+        <div class="sp todo">
+          <div class="mk" style="background:#dadce0">5</div>
+          <div class="tt">We check it actually worked</div>
+          <div class="dd">We only close this if your VPN really connects</div>
+        </div>
+      </div>
+    </div>
+    <div class="nb">
+      <div class="on"><i></i>Ticket</div><div><i></i>Ask</div><div><i></i>My devices</div><div><i></i>Help</div>
+    </div>
+  </div>
+
+  <div class="cap">
+    <h3>Why this one matters</h3>
+    <ul>
+      <li>Answers the only question the employee has: <b>who is waiting on what, and when am I unblocked?</b></li>
+      <li>"We check it actually worked" is the proof-of-effect rule made visible — the step exists on screen, so a no-effect run can't quietly read as resolved.</li>
+      <li>Notification-driven, so it costs almost nothing to build: one route, one state machine, no queue UI.</li>
+      <li>Pairs naturally with direction 1 or 4 on the IT side — this is the employee half, not a whole product.</li>
+    </ul>
+  </div>
+</div></div></div>
+</div>
+
+<script>
+  const btns=[...document.querySelectorAll('.picker button')];
+  btns.forEach(b=>b.addEventListener('click',()=>{
+    btns.forEach(x=>x.setAttribute('aria-selected', x===b));
+    document.querySelectorAll('.panelwrap').forEach(p=>p.classList.remove('on'));
+    document.getElementById('p'+b.dataset.t).classList.add('on');
+    window.scrollTo({top:0,behavior:'smooth'});
+  }));
+</script>
+</body>
+</html>

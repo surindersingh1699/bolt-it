@@ -12,14 +12,14 @@ export type ActionStatus = "pending" | "running" | "succeeded" | "failed" | "ski
 // device = runs on the user's machine via the local agent.
 // backend = directory/account action in our own store.
 // reply = message to the user.
-export type ActionKind = "device" | "backend" | "reply";
+export type ActionKind = "device" | "backend" | "knowledge" | "reply";
 
 export type StepRisk = "low" | "medium" | "high";
 export type StepApprovalMode = "auto" | "human";
 export type RiskSource = "allowlist" | "judge" | "fallback";
 
 export interface Citation {
-  source: "runbook" | "memory";
+  source: "memory";
   title: string;
   snippet: string;
   ref: string;
@@ -156,28 +156,16 @@ export interface Ticket {
   citations: Citation[];
   confidence: number;
   resolvedByAi: boolean;
-  runbookSourceId?: string;
   resolutionTimeMs?: number;
   /** What the agent tried and concluded across troubleshooting attempts. */
   troubleshootingSummary?: string;
   attempts?: number;
+  /** Escalation depth reached: 1 service desk, 2 systems engineer, 3 escalation engineer. */
+  tier?: import("./tiers").Tier;
   /** Populated by /api/state from the in-memory trace store (not persisted). */
   trace?: import("./trace").TraceEvent[];
   /** Populated by /api/state from the in-memory chat transcript (not persisted). */
   chat?: import("./chat").ChatMsg[];
-}
-
-export interface Runbook {
-  id: string;
-  workspaceId: string;
-  title: string;
-  tags: string[];
-  body: string;
-  sourceTicketIds: string[];
-  createdAt: number;
-  updatedAt: number;
-  successCount: number;
-  failureCount: number;
 }
 
 export interface UserContext {

@@ -14,7 +14,7 @@ export function TicketQueue() {
 
   const onClear = () => {
     if (tickets.length === 0) return;
-    if (!confirm(`Delete all ${tickets.length} tickets in this workspace? Runbooks are kept.`)) return;
+    if (!confirm(`Delete all ${tickets.length} tickets in this workspace?`)) return;
     setError(null);
     startTransition(async () => {
       try {
@@ -34,7 +34,7 @@ export function TicketQueue() {
         <button
           onClick={onClear}
           disabled={pending || tickets.length === 0}
-          title="Delete all tickets (runbooks kept)"
+          title="Delete all tickets"
           className="text-[11px] text-neutral-500 hover:text-rose-300 disabled:opacity-30 disabled:hover:text-neutral-500 flex items-center gap-1"
         >
           <Trash2 size={12} />

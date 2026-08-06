@@ -1,4 +1,4 @@
-import { Ticket, Runbook, PlanStep, DeflectionStat, ADUser, ADGroup, ADAccount, Workspace, AgentJob, CapabilityPrecedent, Device } from "./types";
+import { Ticket, PlanStep, DeflectionStat, ADUser, ADGroup, ADAccount, Workspace, AgentJob, CapabilityPrecedent, Device } from "./types";
 
 declare global {
   // eslint-disable-next-line no-var
@@ -8,7 +8,6 @@ declare global {
 class ITDB {
   workspaces: Map<string, Workspace> = new Map();
   tickets: Map<string, Ticket> = new Map();
-  runbooks: Map<string, Runbook> = new Map();
   adUsers: Map<string, ADUser> = new Map();
   adGroups: Map<string, ADGroup> = new Map();
   adAccounts: Map<string, ADAccount> = new Map();
@@ -79,24 +78,6 @@ class ITDB {
     if (!t) return undefined;
     if (workspaceId && t.workspaceId !== workspaceId) return undefined;
     return t;
-  }
-
-  insertRunbook(r: Runbook) {
-    this.runbooks.set(r.id, r);
-    this.emit();
-  }
-
-  updateRunbook(id: string, patch: Partial<Runbook>) {
-    const existing = this.runbooks.get(id);
-    if (!existing) return;
-    this.runbooks.set(id, { ...existing, ...patch, updatedAt: Date.now() });
-    this.emit();
-  }
-
-  listRunbooks(workspaceId?: string): Runbook[] {
-    const all = Array.from(this.runbooks.values());
-    const scoped = workspaceId ? all.filter((r) => r.workspaceId === workspaceId) : all;
-    return scoped.sort((a, b) => b.updatedAt - a.updatedAt);
   }
 
   insertADUser(u: ADUser) {

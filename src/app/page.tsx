@@ -26,8 +26,7 @@ const OUTCOMES = [
 ];
 
 const SIGNALS = [
-  "Company runbooks and SOPs",
-  "User context from Hyperspell",
+  "What we've learned about each user",
   "Email, Slack, and identity history",
   "Device logs and network signals",
   "Web search when docs are missing",
@@ -52,7 +51,7 @@ const CAPABILITIES = [
   {
     icon: <BookOpenCheck size={17} />,
     title: "Self-learning knowledge",
-    body: "Every approved resolution strengthens the runbook library so repeated problems become faster and cheaper.",
+    body: "Every approved resolution is written back to that employee's memory, so repeat problems start ahead.",
   },
 ];
 
@@ -205,7 +204,7 @@ export default async function Landing() {
               <div className="mt-6 grid grid-cols-1 gap-3 sm:grid-cols-2">
                 <EnrollmentStep title="1. Create workspace" body="Company profile, domain, admin, and MSP team access." />
                 <EnrollmentStep title="2. Upload knowledge" body="Policies, onboarding docs, SOPs, vendor notes, network maps." />
-                <EnrollmentStep title="3. Connect context" body="Email, Slack, identity, ticket history, and Hyperspell memory." />
+                <EnrollmentStep title="3. Connect context" body="Identity directory, device fleet, and past ticket history." />
                 <EnrollmentStep title="4. Approve automation" body="Choose what AI can draft, what technicians approve, and what escalates." />
               </div>
             </div>
@@ -265,7 +264,7 @@ function DemoPreview() {
             </div>
           </div>
           <p className="text-sm leading-6 text-neutral-300">
-            AI found the VPN certificate renewal runbook, matched the user&apos;s device logs, and
+            AI recalled this employee&apos;s prior VPN case, matched it to their device logs, and
             detected a stale Okta group sync from the last 18 minutes.
           </p>
         </div>

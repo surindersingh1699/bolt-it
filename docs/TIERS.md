@@ -698,10 +698,9 @@ machinery possible.
 ## External knowledge — web search
 
 The agent currently has no external lookup of any kind. Every capability is
-internal: directory, device, Slack. Since the Hyperspell removal, the only
-knowledge sources are the runbook library and per-user memory
-([memory.ts](../src/lib/memory.ts)). On a novel ticket the agent is reasoning
-purely from model priors.
+internal: directory and device. The only knowledge sources are the runbook
+library and per-user memory ([memory.ts](../src/lib/memory.ts)). On a novel
+ticket the agent is reasoning purely from model priors.
 
 "Undocumented at this company" is not "undocumented anywhere." An unfamiliar
 error code, a regression in a specific app build, an expired intermediate

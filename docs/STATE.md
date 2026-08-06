@@ -15,7 +15,7 @@ Cutting `main` down to a small system where every capability is real, ahead of m
 |---|---|---|
 | Proof-of-effect / execution envelopes | `main`, uncommitted (`src/lib/evidence.ts`, `scripts/local-agent.mjs`) | Done, smoke-tested |
 | Simplification — deleted Slack OAuth, demo workspaces, Aside/Tensorlake/Okta/MDM, LLM risk judge, agent self-update | `main`, uncommitted | Done, build passes |
-| `user_memory` — facts + episodes replacing Hyperspell | `main`, uncommitted (`src/lib/memory.ts`, `m12`) | Code done; **`m12_user_memory.sql` not applied yet** |
+| `user_memory` — facts + episodes replacing Hyperspell | `main`, committed (`src/lib/memory.ts`, `m12`) | Code landed. **Verify `m12_user_memory.sql` is applied** before relying on memory |
 | Single data store (drop `db.ts` in-memory fallback) | `main` | **Not started** — the last piece of the simplification |
 | FastAPI backend port | `python-rebuild` branch | Not started against current main |
 
@@ -28,7 +28,8 @@ Cutting `main` down to a small system where every capability is real, ahead of m
 ## Open questions
 
 - **`.github/workflows/pdd-secrets-dispatch.yml`** — added by `prompt-driven-github[bot]`, not by hand. It sends all repo secrets to a `callback_url` supplied in the trigger payload. Keep, or delete and rotate secrets?
-- **Retrieval.** `main` is runbook-only plus `user_memory` (keyed facts, no embeddings). `python-rebuild` has pgvector RAG. Does `main` need semantic search before the port, or is tag matching enough?
+- **Retrieval.** Runbooks are gone. The agent's only stored knowledge is `user_memory` — per-employee facts and episodes, no embeddings — plus `kb.web_search` at tier 2+. Nothing is shared across employees: a fix learned from one person's ticket does not help the next. Is per-user memory + web search enough, or does something org-wide come back (pgvector, as on `python-rebuild`)?
+- **Safety tests were deleted.** `policy.test.ts` and `governance.test.ts` are staged as deleted. Nothing now covers `classifyPlan` risk tiers or `recordCleanExecution` promotion. Restore or replace?
 
 ## Known limitations (deliberate)
 

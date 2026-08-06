@@ -282,7 +282,7 @@ function ticketToChannelLines(ticket: Ticket): ChannelLine[] {
       lines.push({
         id: `${ticket.id}-agent-working`,
         kind: "agent",
-        text: "Got it. I am checking the company runbooks and user context now.",
+        text: "Got it. I am checking your history and your machine now.",
         ts: ticket.updatedAt,
         ticket,
       });
@@ -299,7 +299,7 @@ function ticketToChannelLines(ticket: Ticket): ChannelLine[] {
     lines.push({
       id: `${ticket.id}-agent-working`,
       kind: "agent",
-      text: "Got it. I am checking the company runbooks and user context now.",
+      text: "Got it. I am checking your history and your machine now.",
       ts: ticket.updatedAt,
       ticket,
     });

@@ -47,7 +47,7 @@ START ──────┼─ gatherMemory    (facts + past tickets) ───�
         │                               interrupt() ─────┘ Command({resume})
         │  step failed? ─► escalate ─► END
         ▼
-   verifyOutcome  (LLM verdict from real machine output + runbooks)
+   verifyOutcome  (LLM verdict from real machine output + memory)
         │  not resolved & attempt < 3 ─► replan ─► runNextStep
         ▼
    finalizeExecution ─► awaiting_confirmation ─► user confirms ─► resolved

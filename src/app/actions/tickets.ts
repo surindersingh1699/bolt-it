@@ -5,17 +5,14 @@ import { after } from "next/server";
 import {
   clearTicketsAndJobsForWorkspace,
   getTicket,
-  insertRunbook,
   insertTicket,
-  listRunbooks,
-  updateRunbook,
   updateTicket,
 } from "@/lib/data";
 import { Ticket } from "@/lib/types";
 import { ensureSeeded } from "@/lib/seed";
 import { getCurrentUser } from "@/lib/auth";
 import { ACME_WORKSPACE_ID, getCurrentWorkspaceId } from "@/lib/workspace";
-import { firstNameOf, inferTagsFromTicket, postUpdate, synthesizeRunbookBody } from "@/lib/ticket-helpers";
+import { firstNameOf, postUpdate } from "@/lib/ticket-helpers";
 import { runTicketGraphFromStart, resumeTicketGraph } from "@/lib/ticket-graph";
 
 export interface CreateTicketInput {
@@ -59,7 +56,7 @@ export async function createTicket(input: CreateTicketInput): Promise<string> {
         const firstName = firstNameOf(ticket.reporter);
         await postUpdate(
           ticket,
-          `👋 Hi ${firstName} — got it. I'm gathering context from your runbooks, user history, and recent activity. Logged as ticket ${ticket.id}.`,
+          `👋 Hi ${firstName} — got it. I'm gathering context from your history and your machine. Logged as ticket ${ticket.id}.`,
         );
       }
       await runTicketGraphFromStart(id);
@@ -121,10 +118,9 @@ export async function confirmTicketResolved(
     const firstName = firstNameOf(ticket.reporter);
     await postUpdate(
       ticket,
-      `🎉 Glad I could help, ${firstName}. I've saved this fix to the runbook so the next identical issue will resolve even faster.`,
+      `🎉 Glad I could help, ${firstName}. I've noted what worked, so the next time this comes up I'll get there faster.`,
     );
   }
-  await extractRunbook(ticketId);
   safeRevalidate("/");
 }
 
@@ -140,41 +136,6 @@ export async function escalateAfterUserDenied(ticketId: string): Promise<void> {
     );
   }
   safeRevalidate("/");
-}
-
-export async function extractRunbook(ticketId: string): Promise<void> {
-  const ticket = await getTicket(ticketId);
-  if (!ticket || ticket.status !== "resolved") return;
-
-  const sourceCitation = ticket.citations.find((c) => c.ref.startsWith("runbook:"));
-  if (sourceCitation && ticket.confidence >= 0.6) {
-    const rbId = sourceCitation.ref.replace("runbook:", "");
-    const existing = (await listRunbooks(ticket.workspaceId)).find((r) => r.id === rbId);
-    if (existing) {
-      await updateRunbook(rbId, {
-        successCount: existing.successCount + 1,
-        sourceTicketIds: [...existing.sourceTicketIds, ticket.id],
-      });
-      return;
-    }
-  }
-
-  const id = `rb-${ticket.id.toLowerCase()}`;
-  const tags = inferTagsFromTicket(ticket.subject + " " + ticket.body);
-  const body = synthesizeRunbookBody(ticket);
-  const now = Date.now();
-  await insertRunbook({
-    id,
-    workspaceId: ticket.workspaceId,
-    title: `Auto: ${ticket.subject.slice(0, 80)}`,
-    tags,
-    body,
-    sourceTicketIds: [ticket.id],
-    createdAt: now,
-    updatedAt: now,
-    successCount: 1,
-    failureCount: 0,
-  });
 }
 
 export async function clearTicketQueue(): Promise<{ tickets: number; agentJobs: number }> {

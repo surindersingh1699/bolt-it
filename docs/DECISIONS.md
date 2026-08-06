@@ -57,6 +57,38 @@ Not a fresh rewrite. `python-rebuild` already carries FastAPI + LangGraph + Post
 
 **Reverses if.** The feature gap turns out to be cheaper to close on `main` than to port.
 
+## 2026-08-05 — Runbooks removed; per-user memory is the only stored knowledge
+
+The runbook library is gone: the seeded set, the auto-extracted entry per
+resolved ticket, the `runbooks` table, the Runbooks tab, and the runbook dump in
+the planner and verifier prompts. `Citation.source` is now `"memory"` only.
+
+**Why.** Runbooks were a second knowledge system sitting beside `user_memory`,
+and the seeded ones had drifted into instructing the planner to use capabilities
+that no longer exist (Okta, MDM, Aside). One store, kept true, beats two where
+one lies.
+
+**Cost.** Nothing is shared across employees any more. A fix learned from one
+person's ticket does not help the next — memory is keyed per user. Tier 1's
+contract changes from "match a runbook or escalate" to "match this employee's
+own history or escalate", which will escalate more often. On a novel ticket the
+only grounding left is `kb.web_search` at tier 2+ and model priors.
+
+**Reverses if.** Escalation rate at tier 1 turns out to be dominated by problems
+another employee already had solved.
+
+## 2026-08-05 — One seeded employee, not nine
+
+`RAW_USERS` is Morgan Reilly alone; groups reduced to `everyone` and `it-staff`.
+
+**Why.** Eight of the nine existed to dress a demo. Morgan is the one that cannot
+be removed: `approveAndExecute` requires `isITStaff`, so without an IT-staff user
+no high-risk step could ever be approved and the interrupt would never clear.
+
+**Cost.** The seeded broken states are gone with bob/frank/eve, so
+`ad.unlock_account`, `ad.reset_password` and `ad.refresh_kerberos` have no
+account to act on until one is put into a broken state by hand.
+
 ## 2026-08-05 — Device work is judged by the device, not by the agent finishing
 
 Every device job is probe → act → probe. The before/after diff is the verdict:

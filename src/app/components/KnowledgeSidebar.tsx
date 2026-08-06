@@ -2,12 +2,12 @@
 
 import { useAppState } from "./StateProvider";
 import { Citation } from "@/lib/types";
-import { BookOpen, CloudCog, DatabaseZap, HardDrive, KeyRound, MessageSquare, ShieldCheck, User2 } from "lucide-react";
+import { CloudCog, DatabaseZap, HardDrive, KeyRound, ShieldCheck, User2 } from "lucide-react";
 
 type RowTone = "live" | "mock" | "off";
 
 export function KnowledgeSidebar() {
-  const { tickets, selectedTicketId, runbooks } = useAppState();
+  const { tickets, selectedTicketId } = useAppState();
   const ticket = tickets.find((t) => t.id === selectedTicketId);
 
   if (!ticket) {
@@ -23,7 +23,6 @@ export function KnowledgeSidebar() {
     );
   }
 
-  const runbookCites = ticket.citations.filter((c) => c.source === "runbook");
   const userCites = ticket.citations.filter((c) => c.source === "memory");
   const humanGated = ticket.plan.filter((s) => s.approvalMode === "human").length;
 
@@ -44,12 +43,6 @@ export function KnowledgeSidebar() {
           </span>
         </div>
         <div className="grid grid-cols-1 gap-2">
-          <SystemRow
-            icon={<BookOpen size={12} />}
-            label="Docs + runbooks"
-            value={`${runbooks.length} runbook${runbooks.length === 1 ? "" : "s"}`}
-            tone="live"
-          />
           <SystemRow
             icon={<KeyRound size={12} />}
             label="Identity actions"
@@ -85,24 +78,6 @@ export function KnowledgeSidebar() {
         </div>
       </section>
 
-      <section className="px-4 py-4 border-b border-neutral-800">
-        <div className="flex items-center gap-1.5 mb-3">
-          <BookOpen size={12} className="text-emerald-400" />
-          <span className="text-[11px] uppercase tracking-wider text-neutral-400">
-            Runbook hits
-          </span>
-          <span className="text-[10px] text-neutral-600 ml-auto">{runbookCites.length}</span>
-        </div>
-        {runbookCites.length === 0 && (
-          <p className="text-xs text-neutral-500">No runbook matches yet.</p>
-        )}
-        <ul className="space-y-2">
-          {runbookCites.map((c) => (
-            <CiteCard key={c.ref} cite={c} runbookCount={runbooks.length} />
-          ))}
-        </ul>
-      </section>
-
       <section className="px-4 py-4">
         <div className="flex items-center gap-1.5 mb-3">
           <User2 size={12} className="text-violet-400" />
@@ -117,7 +92,7 @@ export function KnowledgeSidebar() {
         ) : (
           <ul className="space-y-2">
             {userCites.map((c) => (
-              <CiteCard key={c.ref} cite={c} runbookCount={0} />
+              <CiteCard key={c.ref} cite={c} />
             ))}
           </ul>
         )}
@@ -152,7 +127,7 @@ function SystemRow({
   );
 }
 
-function CiteCard({ cite, runbookCount: _runbookCount }: { cite: Citation; runbookCount: number }) {
+function CiteCard({ cite }: { cite: Citation }) {
   return (
     <li className="bg-neutral-900/60 border border-neutral-800 rounded-md p-3">
       <div className="text-xs font-medium text-neutral-200 leading-snug mb-1">{cite.title}</div>

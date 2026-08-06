@@ -500,6 +500,20 @@ const READ_ONLY_BINARIES = IS_WINDOWS
       hostname: {},
       certutil: { subcommands: ["-store"] },
       powershell: { getCmdletOnly: true },
+      // Widened read surface. Every entry below observes state; none mutate.
+      dsregcmd: { subcommands: ["/status"] },
+      gpresult: { subcommands: ["/r", "/z"] },
+      driverquery: {},
+      sc: { subcommands: ["query", "qc", "queryex"] },
+      reg: { subcommands: ["query"] },
+      qwinsta: {},
+      powercfg: { subcommands: ["/query", "/list", "/batteryreport"] },
+      wevtutil: { subcommands: ["qe", "el", "gli"] },
+      net: { subcommands: ["config", "user", "share", "statistics"] },
+      route: { subcommands: ["print"] },
+      arp: { subcommands: ["-a"] },
+      fsutil: { subcommands: ["fsinfo", "volume"] },
+      wmic: {},
     }
   : {
       sw_vers: {},
@@ -541,6 +555,31 @@ const READ_ONLY_BINARIES = IS_WINDOWS
           "-getdnsservers",
         ],
       },
+      // Widened read surface. Every entry below observes state; none mutate.
+      launchctl: { subcommands: ["list", "print", "print-disabled", "dumpstate"] },
+      mdfind: {},
+      vm_stat: {},
+      top: { subcommands: ["-l"] },
+      arp: {},
+      ioreg: {},
+      kextstat: {},
+      csrutil: { subcommands: ["status"] },
+      fdesetup: { subcommands: ["status", "list"] },
+      spctl: { subcommands: ["--status", "--assess"] },
+      profiles: { subcommands: ["-P", "show", "list"] },
+      tmutil: { subcommands: ["status", "destinationinfo", "latestbackup"] },
+      nettop: { subcommands: ["-l", "-x"] },
+      dscl: { subcommands: [".", "-read", "-list"] },
+      lsappinfo: {},
+      pkgutil: { subcommands: ["--pkgs", "--pkg-info", "--files"] },
+      xcrun: { subcommands: ["--find", "--show-sdk-version"] },
+      last: {},
+      w: {},
+      id: {},
+      groups: {},
+      env: {},
+      mount: {},
+      nvram: { subcommands: ["-p", "-x"] },
     };
 
 // Spaces are excluded deliberately: it keeps every argument a single token, so
@@ -585,6 +624,199 @@ async function collectCommandOutput(ctx, { binary, argv }) {
   return {
     ok: true,
     output: stdout.slice(0, 6000) || `${binary} produced no output (exit ${res.code})`,
+  };
+}
+
+// ---- filesystem read surface ------------------------------------------------
+// AUTONOMY=full posture: no root allowlist. The agent reads anywhere the user
+// account can reach. Two things survive that, because neither costs autonomy:
+//
+//   1. A credential-store refusal. In a disposable VM it is noise; on a real
+//      laptop it is the difference between a diagnostic log and your SSH key in
+//      a transcript. Set AGENT_UNSAFE=1 to drop it.
+//   2. Redaction of anything key-shaped on the way out. The model still sees
+//      THAT a file holds a credential, just not the credential.
+//
+// Both are read-path only. Neither can stop a step from running.
+
+const GUARD_CREDENTIALS = process.env.AGENT_UNSAFE !== "1";
+const MAX_READ_BYTES = 256 * 1024;
+const MAX_LIST_ENTRIES = 300;
+const MAX_GREP_MATCHES = 200;
+
+const DENIED_PATH =
+  /(\.ssh|\.aws|\.gnupg|\.netrc|id_rsa|id_ed25519|id_ecdsa|\.kdbx|Keychains|\.keychain|Cookies|Login Data|chat\.db|\.env($|\.)|credentials$|secring|shadow|\.kube|\.docker\/config)/i;
+
+const SECRET_PATTERNS = [
+  [/-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----/g, "private-key"],
+  [/AKIA[0-9A-Z]{16}/g, "aws-key"],
+  [/gh[pousr]_[A-Za-z0-9]{20,}/g, "github-token"],
+  [/sk-ant-[A-Za-z0-9_-]{20,}/g, "anthropic-key"],
+  [/xox[baprs]-[A-Za-z0-9-]{10,}/g, "slack-token"],
+  [/eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]+/g, "jwt"],
+  [/\b(password|passwd|secret|api[_-]?key|token|bearer)\b\s*[=:]\s*\S+/gi, "credential"],
+];
+
+function redactSecrets(text) {
+  let out = text;
+  for (const [re, label] of SECRET_PATTERNS) out = out.replace(re, `[REDACTED:${label}]`);
+  return out;
+}
+
+// realpath FIRST, then judge. Checking a raw string lets a symlink or a `..`
+// decide what you actually opened.
+function resolveTarget(raw) {
+  let p = String(raw || "").trim();
+  if (!p) return { error: "path is required" };
+  if (p === "~" || p.startsWith("~/") || p.startsWith("~\\")) {
+    p = path.join(os.homedir(), p.slice(1));
+  }
+  let resolved;
+  try {
+    resolved = fs.realpathSync(path.resolve(p));
+  } catch (err) {
+    return { error: `cannot resolve ${p}: ${err.code || err.message}` };
+  }
+  if (GUARD_CREDENTIALS && DENIED_PATH.test(resolved)) {
+    return {
+      error: `${resolved} is a credential store — refused. Set AGENT_UNSAFE=1 on the agent to allow it.`,
+    };
+  }
+  return { path: resolved };
+}
+
+function recordFsAccess(ctx, verb, target, note) {
+  ctx.commands.push({
+    argv: [verb, target],
+    exitCode: 0,
+    stdout: note.slice(0, 4000),
+    stderr: "",
+    durationMs: 0,
+  });
+}
+
+async function collectFsList(ctx, { fsPath }) {
+  const t = resolveTarget(fsPath);
+  if (t.error) return { ok: false, error: t.error };
+  let entries;
+  try {
+    entries = fs.readdirSync(t.path, { withFileTypes: true });
+  } catch (err) {
+    return { ok: false, error: `cannot list ${t.path}: ${err.code || err.message}` };
+  }
+  const rows = entries.slice(0, MAX_LIST_ENTRIES).map((e) => {
+    let size = "-";
+    if (e.isFile()) {
+      try {
+        size = String(fs.statSync(path.join(t.path, e.name)).size);
+      } catch {
+        size = "?";
+      }
+    }
+    return `${e.isDirectory() ? "d" : "-"} ${size.padStart(10)}  ${e.name}`;
+  });
+  const more =
+    entries.length > MAX_LIST_ENTRIES ? `\n… ${entries.length - MAX_LIST_ENTRIES} more entries` : "";
+  recordFsAccess(ctx, "fs_list", t.path, `${entries.length} entries`);
+  return { ok: true, output: `${t.path}\n${rows.join("\n")}${more}` };
+}
+
+async function collectFsRead(ctx, { fsPath, lines }) {
+  const t = resolveTarget(fsPath);
+  if (t.error) return { ok: false, error: t.error };
+  let stat;
+  try {
+    stat = fs.lstatSync(t.path);
+  } catch (err) {
+    return { ok: false, error: `cannot stat ${t.path}: ${err.code || err.message}` };
+  }
+  if (!stat.isFile()) return { ok: false, error: `${t.path} is not a regular file` };
+
+  let buf;
+  try {
+    buf = fs.readFileSync(t.path);
+  } catch (err) {
+    return { ok: false, error: `cannot read ${t.path}: ${err.code || err.message}` };
+  }
+  const slice = buf.subarray(0, MAX_READ_BYTES);
+  if (slice.includes(0)) {
+    return { ok: false, error: `${t.path} looks binary (${buf.length} bytes) — not read` };
+  }
+  const all = slice.toString("utf8").split(/\r?\n/);
+  const kept = all.slice(0, lines);
+  const notes = [];
+  if (buf.length > MAX_READ_BYTES) notes.push(`truncated at ${MAX_READ_BYTES} bytes of ${buf.length}`);
+  if (all.length > kept.length) notes.push(`showing ${kept.length} of ${all.length} lines`);
+  recordFsAccess(ctx, "fs_read", t.path, `${buf.length} bytes, ${all.length} lines`);
+  return {
+    ok: true,
+    output: `${t.path}${notes.length ? ` (${notes.join("; ")})` : ""}\n${redactSecrets(kept.join("\n"))}`,
+  };
+}
+
+async function collectFsGrep(ctx, { fsPath, pattern }) {
+  const t = resolveTarget(fsPath);
+  if (t.error) return { ok: false, error: t.error };
+  if (!pattern) return { ok: false, error: "pattern is required" };
+
+  let re;
+  try {
+    re = new RegExp(pattern, "i");
+  } catch (err) {
+    return { ok: false, error: `bad pattern: ${err.message}` };
+  }
+
+  const files = [];
+  let stat;
+  try {
+    stat = fs.statSync(t.path);
+  } catch (err) {
+    return { ok: false, error: `cannot stat ${t.path}: ${err.code || err.message}` };
+  }
+  if (stat.isFile()) {
+    files.push(t.path);
+  } else {
+    // One level only. Recursion here turns a typo into a whole-disk scan.
+    let entries = [];
+    try {
+      entries = fs.readdirSync(t.path, { withFileTypes: true });
+    } catch (err) {
+      return { ok: false, error: `cannot list ${t.path}: ${err.code || err.message}` };
+    }
+    for (const e of entries) {
+      if (!e.isFile()) continue;
+      const full = path.join(t.path, e.name);
+      if (GUARD_CREDENTIALS && DENIED_PATH.test(full)) continue;
+      files.push(full);
+      if (files.length >= 200) break;
+    }
+  }
+
+  const hits = [];
+  for (const f of files) {
+    let buf;
+    try {
+      buf = fs.readFileSync(f);
+    } catch {
+      continue;
+    }
+    const slice = buf.subarray(0, MAX_READ_BYTES);
+    if (slice.includes(0)) continue;
+    const rows = slice.toString("utf8").split(/\r?\n/);
+    for (let i = 0; i < rows.length; i++) {
+      if (!re.test(rows[i])) continue;
+      hits.push(`${f}:${i + 1}: ${rows[i].slice(0, 400)}`);
+      if (hits.length >= MAX_GREP_MATCHES) break;
+    }
+    if (hits.length >= MAX_GREP_MATCHES) break;
+  }
+
+  recordFsAccess(ctx, "fs_grep", t.path, `${hits.length} matches in ${files.length} files`);
+  return {
+    ok: true,
+    output: hits.length
+      ? redactSecrets(hits.join("\n"))
+      : `no match for /${pattern}/i in ${files.length} file(s) under ${t.path}`,
   };
 }
 
@@ -660,6 +892,9 @@ const HANDLERS = {
   process_list: { expectsChange: false, collect: collectProcessList },
   network_state: { expectsChange: false, collect: collectNetworkState },
   command_output: { expectsChange: false, collect: collectCommandOutput, requires: ["binary"] },
+  fs_list: { expectsChange: false, collect: collectFsList, requires: ["fsPath"] },
+  fs_read: { expectsChange: false, collect: collectFsRead, requires: ["fsPath"] },
+  fs_grep: { expectsChange: false, collect: collectFsGrep, requires: ["fsPath", "pattern"] },
 };
 
 function parseCommand(command) {
@@ -673,6 +908,11 @@ function parseCommand(command) {
       limit: Math.min(Number(raw.match(/--limit (\d+)/)?.[1] ?? 15), 50),
       binary: raw.match(/--binary "([^"]+)"/)?.[1],
       argv: argvRaw.split(/\s+/).filter(Boolean),
+      // Paths and patterns keep their spaces, so they are read from the quoted
+      // form rather than split on whitespace like argv.
+      fsPath: raw.match(/--path "([^"]*)"/)?.[1],
+      pattern: raw.match(/--pattern "([^"]*)"/)?.[1],
+      lines: Math.min(Number(raw.match(/--lines (\d+)/)?.[1] ?? 2000), 5000),
     },
   };
 }

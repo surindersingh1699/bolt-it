@@ -8,11 +8,10 @@ import {
   useMemo,
   useState,
 } from "react";
-import { Ticket, Runbook, DeflectionStat } from "@/lib/types";
+import { Ticket, DeflectionStat } from "@/lib/types";
 
 interface AppState {
   tickets: Ticket[];
-  runbooks: Runbook[];
   stats: DeflectionStat;
   selectedTicketId: string | null;
   selectTicket: (id: string | null) => void;
@@ -23,7 +22,6 @@ const Ctx = createContext<AppState | null>(null);
 
 export function StateProvider({ children }: { children: React.ReactNode }) {
   const [tickets, setTickets] = useState<Ticket[]>([]);
-  const [runbooks, setRunbooks] = useState<Runbook[]>([]);
   const [stats, setStats] = useState<DeflectionStat>(emptyStats());
   const [selectedTicketId, setSelectedTicketId] = useState<string | null>(null);
 
@@ -32,7 +30,6 @@ export function StateProvider({ children }: { children: React.ReactNode }) {
     if (!res.ok) return;
     const data = await res.json();
     setTickets(data.tickets);
-    setRunbooks(data.runbooks);
     setStats(data.stats);
     setSelectedTicketId((curr) => {
       if (curr && data.tickets.some((t: Ticket) => t.id === curr)) return curr;
@@ -56,13 +53,12 @@ export function StateProvider({ children }: { children: React.ReactNode }) {
   const value = useMemo<AppState>(
     () => ({
       tickets,
-      runbooks,
       stats,
       selectedTicketId,
       selectTicket: setSelectedTicketId,
       refresh,
     }),
-    [tickets, runbooks, stats, selectedTicketId, refresh],
+    [tickets, stats, selectedTicketId, refresh],
   );
   return <Ctx.Provider value={value}>{children}</Ctx.Provider>;
 }

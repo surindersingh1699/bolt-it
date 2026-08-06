@@ -1,6 +1,5 @@
 "use server";
 
-import { insertRunbook } from "@/lib/data";
 import { rememberUserEpisode } from "@/lib/data";
 import { getCurrentWorkspaceId } from "@/lib/workspace";
 import { createTicket } from "./tickets";
@@ -15,9 +14,7 @@ export interface LogAnalysisResult {
   suggestedFixes: string[];
   userReply: string;
   savedPersonMemory: boolean;
-  savedCompanyRunbook: boolean;
   memoryId?: string;
-  runbookId?: string;
 }
 
 export async function analyzeLogsAction(formData: FormData): Promise<LogAnalysisResult> {
@@ -25,7 +22,6 @@ export async function analyzeLogsAction(formData: FormData): Promise<LogAnalysis
   const reporterEmail = String(formData.get("reporterEmail") || "guest@demo.local");
   const issue = String(formData.get("issue") || "Log analysis");
   const rawLogs = String(formData.get("logs") || "");
-  const saveScope = String(formData.get("saveScope") || "both");
 
   const analysis = analyzeLogs(issue, rawLogs);
   const ticketBody = [
@@ -60,59 +56,21 @@ export async function analyzeLogsAction(formData: FormData): Promise<LogAnalysis
   ].join("\n");
 
   const workspaceId = (await getCurrentWorkspaceId()) ?? "acme.test";
-  let memoryId: string | undefined;
-  if (saveScope === "person" || saveScope === "both") {
-    await rememberUserEpisode(workspaceId, reporterEmail, ticketId, memoryText.slice(0, 300));
-    memoryId = `episode:${ticketId}`;
-  }
-
-  let runbookId: string | undefined;
-  if (saveScope === "company" || saveScope === "both") {
-    runbookId = `rb-log-${ticketId.toLowerCase()}`;
-    const now = Date.now();
-    await insertRunbook({
-      id: runbookId,
-      workspaceId,
-      title: `Log finding: ${analysis.title}`,
-      tags: inferTags(`${issue}\n${rawLogs}`),
-      body: [
-        `Symptom: ${issue}`,
-        "",
-        `Likely root cause: ${analysis.rootCause}`,
-        `Severity: ${analysis.severity}`,
-        "",
-        "Important details:",
-        ...analysis.importantDetails.map((d) => `- ${d}`),
-        "",
-        "Evidence lines:",
-        ...analysis.evidence.map((d) => `- ${d}`),
-        "",
-        "Suggested fixes:",
-        ...analysis.suggestedFixes.map((d) => `- ${d}`),
-        "",
-        `Created from ticket ${ticketId}.`,
-      ].join("\n"),
-      sourceTicketIds: [ticketId],
-      createdAt: now,
-      updatedAt: now,
-      successCount: 0,
-      failureCount: 0,
-    });
-  }
+  // Per-user memory is the only store there is, so a finding always lands there.
+  await rememberUserEpisode(workspaceId, reporterEmail, ticketId, memoryText.slice(0, 300));
+  const memoryId = `episode:${ticketId}`;
 
   return {
     ticketId,
     ...analysis,
-    savedPersonMemory: Boolean(memoryId),
-    savedCompanyRunbook: Boolean(runbookId),
+    savedPersonMemory: true,
     memoryId,
-    runbookId,
   };
 }
 
 function analyzeLogs(issue: string, rawLogs: string): Omit<
   LogAnalysisResult,
-  "ticketId" | "savedPersonMemory" | "savedCompanyRunbook" | "memoryId" | "runbookId"
+  "ticketId" | "savedPersonMemory" | "memoryId"
 > {
   const text = `${issue}\n${rawLogs}`;
   const lower = text.toLowerCase();
@@ -195,7 +153,6 @@ function analyzeLogs(issue: string, rawLogs: string): Omit<
     suggestedFixes: [
       "Review the extracted lines and correlate with user impact.",
       "Ask for a screenshot or exact timestamp if needed.",
-      "Turn the final resolution into a runbook once confirmed.",
     ],
     userReply: "I extracted the important log lines and opened a ticket for review. I may ask for one more detail if the root cause is not clear.",
   };
@@ -211,11 +168,3 @@ function importantLines(rawLogs: string): string[] {
   return hits.length > 0 ? hits : lines.slice(0, 5);
 }
 
-function inferTags(text: string): string[] {
-  const lower = text.toLowerCase();
-  const tags: string[] = ["logs"];
-  for (const tag of ["vpn", "network", "password", "auth", "saml", "kerberos", "ad", "okta", "mdm", "printer", "crash"]) {
-    if (lower.includes(tag)) tags.push(tag);
-  }
-  return Array.from(new Set(tags));
-}

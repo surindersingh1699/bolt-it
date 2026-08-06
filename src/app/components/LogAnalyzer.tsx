@@ -15,7 +15,6 @@ export function LogAnalyzer({ currentUser }: { currentUser: PublicUser }) {
   const [issue, setIssue] = useState("CFO cannot access VPN after password change before board meeting");
   const [reporterEmail, setReporterEmail] = useState("frank@acme.test");
   const [logs, setLogs] = useState(SAMPLE_LOG);
-  const [saveScope, setSaveScope] = useState("both");
   const [result, setResult] = useState<LogAnalysisResult | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [pending, startTransition] = useTransition();
@@ -28,7 +27,6 @@ export function LogAnalyzer({ currentUser }: { currentUser: PublicUser }) {
     fd.set("reporterEmail", reporterEmail);
     fd.set("issue", issue);
     fd.set("logs", logs);
-    fd.set("saveScope", saveScope);
     startTransition(async () => {
       try {
         setResult(await analyzeLogsAction(fd));
@@ -79,26 +77,6 @@ export function LogAnalyzer({ currentUser }: { currentUser: PublicUser }) {
             className="mt-1 w-full resize-none rounded border border-neutral-800 bg-neutral-900 px-3 py-2 font-mono text-xs leading-5 text-neutral-100 placeholder:text-neutral-600 focus:border-neutral-600 focus:outline-none"
           />
         </label>
-
-        <div className="mb-4 grid grid-cols-3 gap-2">
-          {[
-            ["person", "Person"],
-            ["company", "Company"],
-            ["both", "Both"],
-          ].map(([value, label]) => (
-            <button
-              key={value}
-              onClick={() => setSaveScope(value)}
-              className={`rounded border px-2 py-2 text-xs transition-colors ${
-                saveScope === value
-                  ? "border-emerald-500/40 bg-emerald-500/15 text-emerald-200"
-                  : "border-neutral-800 bg-neutral-900 text-neutral-400 hover:text-neutral-200"
-              }`}
-            >
-              Save to {label}
-            </button>
-          ))}
-        </div>
 
         <button
           onClick={submit}
@@ -157,17 +135,12 @@ function AnalysisResult({ result }: { result: LogAnalysisResult }) {
         <p className="text-sm leading-6 text-neutral-200">{result.userReply}</p>
       </div>
 
-      <div className="grid grid-cols-1 gap-3 md:grid-cols-3">
+      <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
         <SaveCard label="Ticket created" value={result.ticketId} ok />
         <SaveCard
           label="Person memory"
           value={result.savedPersonMemory ? result.memoryId ?? "saved" : "not saved"}
           ok={result.savedPersonMemory}
-        />
-        <SaveCard
-          label="Company runbook"
-          value={result.savedCompanyRunbook ? result.runbookId ?? "saved" : "not saved"}
-          ok={result.savedCompanyRunbook}
         />
       </div>
     </div>

@@ -4,24 +4,22 @@ import { useState } from "react";
 import { useAppState } from "./StateProvider";
 import { Console } from "./Console";
 import { SlackChat } from "./SlackChat";
-import { RunbooksTab } from "./RunbooksTab";
 import { LogAnalyzer } from "./LogAnalyzer";
 import { DeflectionDashboard } from "./DeflectionDashboard";
 import { AgentStatusBadge } from "./AgentStatusBadge";
 import { FleetTab } from "./FleetTab";
 import { logoutAction } from "@/app/actions/auth";
 import clsx from "clsx";
-import { LayoutGrid, MessageSquare, BookOpen, LogOut, Mail, ScrollText, ShieldCheck, Users } from "lucide-react";
+import { LayoutGrid, MessageSquare, LogOut, Mail, ScrollText, ShieldCheck, Users } from "lucide-react";
 import { PublicUser } from "@/lib/types";
 
-type Tab = "console" | "slack" | "logs" | "runbooks" | "fleet";
+type Tab = "console" | "slack" | "logs" | "fleet";
 
 const ALL_TABS: { id: Tab; label: string; icon: React.ReactNode; itStaffOnly?: boolean }[] = [
   { id: "console", label: "Console", icon: <LayoutGrid size={14} /> },
   { id: "fleet", label: "Users & Devices", icon: <Users size={14} />, itStaffOnly: true },
   { id: "slack", label: "Chat", icon: <MessageSquare size={14} /> },
   { id: "logs", label: "Analyze logs", icon: <ScrollText size={14} /> },
-  { id: "runbooks", label: "Runbooks", icon: <BookOpen size={14} /> },
 ];
 
 interface AppShellProps {
@@ -31,7 +29,7 @@ interface AppShellProps {
 
 export function AppShell({ currentUser, workspaceName }: AppShellProps) {
   const [tab, setTab] = useState<Tab>(currentUser.isITStaff ? "console" : "slack");
-  const { stats, runbooks, tickets } = useAppState();
+  const { stats, tickets } = useAppState();
   const TABS = ALL_TABS.filter((t) => !t.itStaffOnly || currentUser.isITStaff);
 
   return (
@@ -62,9 +60,6 @@ export function AppShell({ currentUser, workspaceName }: AppShellProps) {
               >
                 {t.icon}
                 {t.label}
-                {t.id === "runbooks" && (
-                  <span className="text-[10px] text-neutral-500 ml-1">{runbooks.length}</span>
-                )}
                 {t.id === "slack" && tickets.length > 0 && (
                   <span className="text-[10px] text-neutral-500 ml-1">{tickets.length}</span>
                 )}
@@ -80,7 +75,6 @@ export function AppShell({ currentUser, workspaceName }: AppShellProps) {
         {tab === "fleet" && currentUser.isITStaff && <FleetTab currentUser={currentUser} />}
         {tab === "slack" && <SlackChat currentUser={currentUser} />}
         {tab === "logs" && <LogAnalyzer currentUser={currentUser} />}
-        {tab === "runbooks" && <RunbooksTab />}
       </main>
     </div>
   );

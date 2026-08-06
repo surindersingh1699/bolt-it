@@ -13,14 +13,15 @@ import {
 import { Citation, PlanStep, Ticket } from "@/lib/types";
 import { UserMemory, EMPTY_MEMORY, preferredName } from "@/lib/memory";
 import { DraftResult } from "@/lib/integrations/draft";
-import { classifyPlan } from "@/lib/policy";
+import { REVIEWER_MODEL, reviewPlan } from "@/lib/reviewer";
 import { directoryInvoke } from "@/lib/integrations/directory";
+import { knowledgeInvoke } from "@/lib/integrations/knowledge";
 import { aiGatewayDraft, synthesizeReply, verifyAndReplan, extractUserMemory } from "@/lib/integrations/ai-gateway";
 import { enqueueAgentJob, isAgentJobCapability } from "@/lib/agent-jobs";
 import { formatProofLines, isRealSuccess } from "@/lib/evidence";
-import { recordCleanExecution } from "@/lib/governance";
 import { appendTrace } from "@/lib/trace";
 import { readHeartbeat, HEARTBEAT_CONNECTED_WINDOW_MS } from "@/lib/agent-heartbeat";
+import { Tier, nextTier, tierSpec } from "@/lib/tiers";
 import {
   buildReplyEvidence,
   firstNameOf,
@@ -60,9 +61,10 @@ const TicketGraphState = Annotation.Root({
   citations: Annotation<Citation[]>({ reducer: overwrite, default: () => [] }),
   classifiedPlan: Annotation<PlanStep[]>({ reducer: overwrite, default: () => [] }),
   attempt: Annotation<number>({ reducer: overwrite, default: () => 1 }),
+  // Escalation depth. Every ticket starts at first-line and only ever moves down.
+  tier: Annotation<Tier>({ reducer: overwrite, default: () => 1 }),
   findings: Annotation<string[]>({ reducer: (cur, upd) => cur.concat(upd), default: () => [] }),
   pendingStepId: Annotation<string | null>({ reducer: overwrite, default: () => null }),
-  justApprovedCapability: Annotation<string | null>({ reducer: overwrite, default: () => null }),
   approver: Annotation<Approver | null>({ reducer: overwrite, default: () => null }),
 });
 
@@ -116,25 +118,47 @@ async function gatherDeviceContext(state: TState) {
   return { deviceContext: device ? detail : null };
 }
 
+/**
+ * One tier's attempt at the problem. Shared by the first-line draft node and by
+ * escalateTier, so a deeper tier reasons through exactly the same path — same
+ * memory, different model, prompt and capability set.
+ */
+async function draftAtTier(
+  state: TState,
+  ticket: Ticket,
+  tier: Tier,
+): Promise<DraftResult | null> {
+  const spec = tierSpec(tier);
+  return withTimeout(
+    aiGatewayDraft({
+      subject: ticket.subject,
+      body: ticket.body,
+      reporter: ticket.reporter,
+      reporterEmail: ticket.reporterEmail,
+      customerOrg: ticket.customerOrg,
+      workspaceId: ticket.workspaceId,
+      memory: state.memory,
+      tier,
+      priorFindings: state.findings,
+    }),
+    Math.max(DRAFT_TIMEOUT_MS, spec.budgetMs),
+    `draftPlan:tier${tier}`,
+  );
+}
+
 async function draftPlanNode(state: TState) {
   const t0 = Date.now();
-  appendTrace(state.ticketId, "draftPlan", "started", "LLM drafting from runbooks + memory");
+  const spec = tierSpec(state.tier);
+  appendTrace(
+    state.ticketId,
+    "draftPlan",
+    "started",
+    `tier ${state.tier} (${spec.label}, ${spec.model}) drafting from memory + device context`,
+  );
   const ticket = await getTicket(state.ticketId);
   if (!ticket) return {};
   try {
-    const draft = await withTimeout(
-      aiGatewayDraft({
-        subject: ticket.subject,
-        body: ticket.body,
-        reporter: ticket.reporter,
-        reporterEmail: ticket.reporterEmail,
-        customerOrg: ticket.customerOrg,
-        workspaceId: ticket.workspaceId,
-        memory: state.memory,
-      }),
-      DRAFT_TIMEOUT_MS,
-      "draftPlan",
-    );
+    const draft = await draftAtTier(state, ticket, state.tier);
     // No AI_GATEWAY_API_KEY, or the endpoint returned nothing usable. Treated
     // the same as a thrown error: fall through to the acknowledge-only plan
     // below rather than inventing steps we have no grounding for.
@@ -143,7 +167,10 @@ async function draftPlanNode(state: TState) {
       state.ticketId,
       "draftPlan",
       "completed",
-      `${draft.plan.length} step(s) via ${draft.source} · confidence ${Math.round(draft.confidence * 100)}%`,
+      draft.escalate
+        ? `tier ${state.tier} declined: ${draft.escalateReason}`
+        : `${draft.plan.length} step(s) via ${draft.source} · confidence ${Math.round(draft.confidence * 100)}%` +
+          (draft.hypothesis ? ` · hypothesis: ${draft.hypothesis}` : ""),
       Date.now() - t0,
     );
     return { draft };
@@ -166,6 +193,12 @@ async function draftPlanNode(state: TState) {
         { id: "step-0", kind: "reply", description: "Acknowledge and ask for more detail", status: "pending" },
       ],
       source: "fallback",
+      tier: state.tier,
+      // A drafting outage is not a reason to escalate: the deeper tier would hit
+      // the same dead provider. Acknowledge honestly and stop.
+      escalate: false,
+      escalateReason: "",
+      hypothesis: "",
     };
     return { draft: fallback };
   }
@@ -200,18 +233,16 @@ async function classifyRisk(state: TState) {
     ...step,
     params: substituteParams(step.params, ticket.reporterEmail),
   }));
-  const plan = await classifyPlan(rawPlan, ticket);
+  const plan = await reviewPlan(rawPlan, ticket);
 
   const gated = plan.filter((s) => s.approvalMode === "human").length;
-  const promoted = plan.filter((s) => s.governancePromoted).length;
-  const judged = plan.filter((s) => s.riskSource === "judge").length;
+  const blocked = plan.filter((s) => s.status === "failed").length;
   appendTrace(
     state.ticketId,
-    "classifyRisk",
+    "reviewPlan",
     "completed",
-    `${plan.length} step(s): ${gated} human-gated, ${plan.length - gated} auto` +
-      (promoted ? `, ${promoted} trust-promoted` : "") +
-      (judged ? ` · ${judged} via LLM judge` : " · allowlist only"),
+    `${plan.length} step(s) reviewed by ${REVIEWER_MODEL}: ${plan.length - gated} auto, ${gated} need a person` +
+      (blocked ? `, ${blocked} refused outright` : ""),
     Date.now() - t0,
   );
   return { citations, classifiedPlan: plan };
@@ -227,8 +258,14 @@ async function persistPlan(state: TState) {
     confidence: state.draft.confidence,
     draftResponse: state.draft.response,
     plan: state.classifiedPlan,
+    tier: state.tier,
   });
-  appendTrace(state.ticketId, "persistPlan", "completed", "plan saved · entering execute loop");
+  appendTrace(
+    state.ticketId,
+    "persistPlan",
+    "completed",
+    `plan saved at tier ${state.tier} (${tierSpec(state.tier).label}) · entering execute loop`,
+  );
 
   const updatedForSlack = await getTicket(state.ticketId);
   if (updatedForSlack) {
@@ -240,6 +277,149 @@ async function persistPlan(state: TState) {
     );
   }
   return {};
+}
+
+// Does this tier's draft deserve to run? Three ways it does not: the tier said
+// so itself, it asked for a capability above its depth (both arrive as
+// draft.escalate), or it is not confident enough to be worth the employee's
+// time. Any of them hands the problem down rather than executing a guess.
+function tierGate(state: TState) {
+  const draft = state.draft;
+  if (!draft) return new Command({ goto: "persistPlan" });
+  const spec = tierSpec(state.tier);
+
+  if (draft.escalate) {
+    return new Command({
+      goto: "escalateTier",
+      update: { findings: [`tier ${state.tier} declined: ${draft.escalateReason || draft.reasoning}`] },
+    });
+  }
+
+  // A fallback draft has no provider behind it — escalating would only re-run the
+  // same outage against a more expensive model.
+  if (draft.source !== "fallback" && draft.confidence < spec.confidenceFloor) {
+    appendTrace(
+      state.ticketId,
+      "tierGate",
+      "completed",
+      `tier ${state.tier} confidence ${Math.round(draft.confidence * 100)}% below floor ${Math.round(
+        spec.confidenceFloor * 100,
+      )}% — escalating rather than guessing`,
+    );
+    return new Command({
+      goto: "escalateTier",
+      update: {
+        findings: [
+          `tier ${state.tier} was only ${Math.round(draft.confidence * 100)}% confident: ${draft.reasoning}`,
+        ],
+      },
+    });
+  }
+
+  if (state.classifiedPlan.length === 0) {
+    return new Command({
+      goto: "escalateTier",
+      update: { findings: [`tier ${state.tier} produced no runnable steps`] },
+    });
+  }
+
+  return new Command({ goto: "persistPlan" });
+}
+
+// Hand the problem to the next tier down: stronger model, wider capability set,
+// and every finding so far in its context. The redraft happens here rather than
+// by looping back to draftPlan, because draftPlan sits behind a barrier join on
+// the three context branches and re-entering it alone would deadlock.
+async function escalateTier(state: TState) {
+  const ticket = await getTicket(state.ticketId);
+  if (!ticket) return new Command({ goto: END });
+
+  const next = nextTier(state.tier);
+  if (!next) {
+    appendTrace(
+      state.ticketId,
+      "escalate",
+      "completed",
+      `tier ${state.tier} is the deepest tier — handing to a human technician with findings`,
+    );
+    return new Command({ goto: "finalizeExecution" });
+  }
+
+  const spec = tierSpec(next);
+  const t0 = Date.now();
+  appendTrace(
+    state.ticketId,
+    `escalate:tier${next}`,
+    "started",
+    `tier ${state.tier} → tier ${next} (${spec.label}, ${spec.model})`,
+  );
+
+  const draft = await draftAtTier(state, ticket, next).catch(() => null);
+
+  if (!draft) {
+    appendTrace(
+      state.ticketId,
+      `escalate:tier${next}`,
+      "failed",
+      "no drafting provider available — handing to a human",
+      Date.now() - t0,
+    );
+    return new Command({ goto: "finalizeExecution", update: { tier: next } });
+  }
+
+  if (draft.escalate || draft.plan.length === 0) {
+    // This tier also declined. Self-loop: nextTier() returns null at 3, so the
+    // chain always terminates at the human handoff above.
+    appendTrace(
+      state.ticketId,
+      `escalate:tier${next}`,
+      "completed",
+      `tier ${next} also declined: ${draft.escalateReason || "no runnable steps"}`,
+      Date.now() - t0,
+    );
+    return new Command({
+      goto: "escalateTier",
+      update: {
+        tier: next,
+        attempt: 1,
+        findings: [`tier ${next} declined: ${draft.escalateReason || draft.reasoning}`],
+      },
+    });
+  }
+
+  const withParams = draft.plan.map((s) => ({
+    ...s,
+    params: substituteParams(s.params, ticket.reporterEmail),
+  }));
+  const classified = await reviewPlan(withParams, ticket);
+
+  await updateTicket(state.ticketId, {
+    status: "executing",
+    plan: [...ticket.plan, ...classified],
+    tier: next,
+  });
+
+  appendTrace(
+    state.ticketId,
+    `escalate:tier${next}`,
+    "completed",
+    `tier ${next} took the ticket: ${classified.length} step(s) — ${classified
+      .map((s) => s.capability ?? s.kind)
+      .join(", ")}` + (draft.hypothesis ? ` · hypothesis: ${draft.hypothesis}` : ""),
+    Date.now() - t0,
+  );
+
+  const firstName = firstNameOf(ticket.reporter);
+  await postUpdate(
+    ticket,
+    `⏫ Hi ${firstName} — this needs deeper diagnostics than the first pass could give it, so I've brought in more capable tooling. ` +
+      `Next: ${classified.map((s) => humanStepLabel(s)).join(", ")}.`,
+  );
+
+  return new Command({
+    goto: "runNextStep",
+    update: { tier: next, attempt: 1, draft, classifiedPlan: classified },
+  });
 }
 
 // Shared step dispatcher: one branch per kind, no vendor branding.
@@ -255,6 +435,12 @@ async function executeStepAndPersist(ticket: Ticket, step: PlanStep): Promise<{ 
   try {
     if (step.kind === "backend") {
       const r = await directoryInvoke(step, ticket.reporterEmail);
+      ok = r.ok;
+      log = r.log;
+    } else if (step.kind === "knowledge") {
+      // External lookup. Everything it returns is fenced as evidence — the tier
+      // prompts forbid acting on instructions found inside a fetched page.
+      const r = await knowledgeInvoke(step);
       ok = r.ok;
       log = r.log;
     } else if (step.kind === "device") {
@@ -339,13 +525,9 @@ async function runNextStep(state: TState) {
     state.ticketId,
     `execute:${step.capability ?? step.kind}`,
     ok ? "completed" : "failed",
-    `${humanStepLabel(step)}${step.governancePromoted ? " · ran on precedent (trusted)" : ""}`,
+    `${humanStepLabel(step)} · reviewer cleared this step to run unattended`,
     Date.now() - t0,
   );
-
-  if (ok && state.approver && state.justApprovedCapability && state.justApprovedCapability === step.capability) {
-    recordCleanExecution(ticket.workspaceId, step.capability!, state.approver);
-  }
 
   if (!ok) {
     await updateTicket(state.ticketId, { status: "escalated" });
@@ -353,7 +535,7 @@ async function runNextStep(state: TState) {
     return new Command({ goto: END });
   }
 
-  return new Command({ goto: "runNextStep", update: { justApprovedCapability: null } });
+  return new Command({ goto: "runNextStep" });
 }
 
 // One-time side effects for entering the pause: status flip + Slack ping. Kept
@@ -406,14 +588,11 @@ async function awaitApproval(state: TState) {
   return new Command({
     goto: "runNextStep",
     update: {
-      justApprovedCapability: step?.capability ?? null,
       pendingStepId: null,
       approver: decision.approver,
     },
   });
 }
-
-const MAX_ATTEMPTS = 3;
 
 // The troubleshooting loop: after every round of steps, look at what the
 // machine actually reported and decide — resolved, or try the next thing?
@@ -430,16 +609,21 @@ async function verifyOutcome(state: TState) {
   const jobsForTicket = allJobs.filter((j) => j.ticketId === state.ticketId);
   const evidence = buildReplyEvidence(fresh?.plan ?? [], jobsForTicket);
 
+  // How many rounds this tier gets before the ticket moves down is the tier's
+  // own budget, not one global number.
+  const maxAttempts = tierSpec(state.tier).maxAttempts;
+
   const verdict = await verifyAndReplan({
     subject: ticket.subject,
     body: ticket.body,
     attempt: state.attempt,
-    maxAttempts: MAX_ATTEMPTS,
+    maxAttempts,
     evidence,
     priorFindings: state.findings,
     userContext: state.profile ?? undefined,
     deviceContext: state.deviceContext ?? undefined,
     memory: state.memory,
+    tier: state.tier,
   }).catch(() => null);
 
   if (!verdict) {
@@ -447,26 +631,45 @@ async function verifyOutcome(state: TState) {
     return new Command({ goto: "finalizeExecution" });
   }
 
-  const finding = `${verdict.hypothesis || verdict.reasoning}`;
+  const finding = `tier ${state.tier}: ${verdict.hypothesis || verdict.reasoning}`;
   appendTrace(
     state.ticketId,
     "verifyOutcome",
     "completed",
-    `attempt ${state.attempt}/${MAX_ATTEMPTS} — ${verdict.resolved ? "believes RESOLVED" : "NOT resolved"} (${Math.round(
-      verdict.confidence * 100,
-    )}%): ${verdict.reasoning}`,
+    `tier ${state.tier} attempt ${state.attempt}/${maxAttempts} — ${
+      verdict.resolved ? "believes RESOLVED" : "NOT resolved"
+    } (${Math.round(verdict.confidence * 100)}%): ${verdict.reasoning}`,
     Date.now() - t0,
   );
 
-  if (verdict.resolved || verdict.nextSteps.length === 0 || state.attempt >= MAX_ATTEMPTS) {
-    if (!verdict.resolved) {
+  if (verdict.resolved) {
+    return new Command({ goto: "finalizeExecution", update: { findings: [finding] } });
+  }
+
+  const outOfAttempts = state.attempt >= maxAttempts;
+  const outOfIdeas = verdict.nextSteps.length === 0;
+
+  if (outOfAttempts || outOfIdeas) {
+    // This tier is done. If there is a deeper one, it gets the problem plus
+    // everything learned so far — that is the escalation, and it is the normal
+    // path, not a failure. Only the deepest tier hands off to a human.
+    if (nextTier(state.tier)) {
       appendTrace(
         state.ticketId,
         "exhausted",
         "completed",
-        `no fix after ${state.attempt} attempt(s) — handing to a human with findings`,
+        outOfIdeas
+          ? `tier ${state.tier} has no next step within its capabilities — escalating`
+          : `tier ${state.tier} used its ${maxAttempts} attempt(s) without a fix — escalating`,
       );
+      return new Command({ goto: "escalateTier", update: { findings: [finding] } });
     }
+    appendTrace(
+      state.ticketId,
+      "exhausted",
+      "completed",
+      `no fix after tier ${state.tier} — handing to a human with findings`,
+    );
     return new Command({ goto: "finalizeExecution", update: { findings: [finding] } });
   }
 
@@ -485,7 +688,7 @@ async function replan(state: TState) {
     ...s,
     params: substituteParams(s.params, ticket.reporterEmail),
   }));
-  const classified = await classifyPlan(withParams, ticket);
+  const classified = await reviewPlan(withParams, ticket);
 
   await updateTicket(state.ticketId, {
     status: "executing",
@@ -608,9 +811,13 @@ function buildGraph() {
     .addNode("gatherDeviceContext", gatherDeviceContext)
     .addNode("draftPlan", draftPlanNode)
     .addNode("classifyRisk", classifyRisk)
+    .addNode("tierGate", tierGate, { ends: ["persistPlan", "escalateTier"] })
+    .addNode("escalateTier", escalateTier, {
+      ends: ["runNextStep", "escalateTier", "finalizeExecution", END],
+    })
     .addNode("persistPlan", persistPlan)
     .addNode("runNextStep", runNextStep, { ends: ["runNextStep", "markAwaitingApproval", "verifyOutcome", END] })
-    .addNode("verifyOutcome", verifyOutcome, { ends: ["replan", "finalizeExecution", END] })
+    .addNode("verifyOutcome", verifyOutcome, { ends: ["replan", "escalateTier", "finalizeExecution", END] })
     .addNode("replan", replan, { ends: ["runNextStep", END] })
     .addNode("markAwaitingApproval", markAwaitingApproval)
     .addNode("awaitApproval", awaitApproval, { ends: ["runNextStep"] })
@@ -622,7 +829,7 @@ function buildGraph() {
     // Barrier join: classifyRisk must run exactly once, after ALL three
     // branches. Separate addEdge calls would fire it per-predecessor.
     .addEdge(["gatherProfile", "gatherDeviceContext", "draftPlan"], "classifyRisk")
-    .addEdge("classifyRisk", "persistPlan")
+    .addEdge("classifyRisk", "tierGate")
     .addEdge("persistPlan", "runNextStep")
     .addEdge("markAwaitingApproval", "awaitApproval")
     .addEdge("finalizeExecution", END)

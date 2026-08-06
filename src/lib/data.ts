@@ -10,7 +10,6 @@ import {
   DeflectionStat,
   Device,
   PlanStep,
-  Runbook,
   Ticket,
   TicketStatus,
   Workspace,
@@ -83,10 +82,10 @@ function ticketToRow(t: Ticket): DbRow {
     citations: t.citations,
     confidence: t.confidence,
     resolved_by_ai: t.resolvedByAi,
-    runbook_source_id: t.runbookSourceId ?? null,
     resolution_time_ms: t.resolutionTimeMs ?? null,
     troubleshooting_summary: t.troubleshootingSummary ?? null,
     attempts: t.attempts ?? null,
+    tier: t.tier ?? null,
   };
 }
 
@@ -109,10 +108,10 @@ function ticketFromRow(r: DbRow): Ticket {
     citations: (r.citations as Citation[] | null) ?? [],
     confidence: Number(r.confidence ?? 0),
     resolvedByAi: Boolean(r.resolved_by_ai),
-    runbookSourceId: (r.runbook_source_id as string | null) ?? undefined,
     resolutionTimeMs: r.resolution_time_ms == null ? undefined : Number(r.resolution_time_ms),
     troubleshootingSummary: (r.troubleshooting_summary as string) ?? undefined,
     attempts: r.attempts == null ? undefined : Number(r.attempts),
+    tier: r.tier == null ? undefined : (Number(r.tier) as Ticket["tier"]),
   };
 }
 
@@ -128,49 +127,7 @@ function ticketPatchToRow(patch: Partial<Ticket>): DbRow {
   if (patch.resolutionTimeMs !== undefined) out.resolution_time_ms = patch.resolutionTimeMs;
   if (patch.troubleshootingSummary !== undefined) out.troubleshooting_summary = patch.troubleshootingSummary;
   if (patch.attempts !== undefined) out.attempts = patch.attempts;
-  if (patch.runbookSourceId !== undefined) out.runbook_source_id = patch.runbookSourceId;
-  out.updated_at = Date.now();
-  return out;
-}
-
-function runbookToRow(r: Runbook): DbRow {
-  return {
-    id: r.id,
-    workspace_id: r.workspaceId,
-    title: r.title,
-    tags: r.tags,
-    body: r.body,
-    source_ticket_ids: r.sourceTicketIds,
-    created_at: r.createdAt,
-    updated_at: r.updatedAt,
-    success_count: r.successCount,
-    failure_count: r.failureCount,
-  };
-}
-
-function runbookFromRow(r: DbRow): Runbook {
-  return {
-    id: r.id as string,
-    workspaceId: (r.workspace_id as string) ?? "acme.test",
-    title: r.title as string,
-    tags: (r.tags as string[] | null) ?? [],
-    body: r.body as string,
-    sourceTicketIds: (r.source_ticket_ids as string[] | null) ?? [],
-    createdAt: Number(r.created_at),
-    updatedAt: Number(r.updated_at),
-    successCount: Number(r.success_count ?? 0),
-    failureCount: Number(r.failure_count ?? 0),
-  };
-}
-
-function runbookPatchToRow(patch: Partial<Runbook>): DbRow {
-  const out: DbRow = {};
-  if (patch.title !== undefined) out.title = patch.title;
-  if (patch.tags !== undefined) out.tags = patch.tags;
-  if (patch.body !== undefined) out.body = patch.body;
-  if (patch.sourceTicketIds !== undefined) out.source_ticket_ids = patch.sourceTicketIds;
-  if (patch.successCount !== undefined) out.success_count = patch.successCount;
-  if (patch.failureCount !== undefined) out.failure_count = patch.failureCount;
+  if (patch.tier !== undefined) out.tier = patch.tier;
   out.updated_at = Date.now();
   return out;
 }
@@ -513,58 +470,6 @@ export async function getTicket(id: string, workspaceId?: string): Promise<Ticke
   return db.getTicket(id, workspaceId);
 }
 
-// Runbooks
-
-export async function insertRunbook(r: Runbook): Promise<void> {
-  const ifg = isInsforgeEnabled() ? getInsforge() : null;
-  if (ifg) {
-    const { error } = await ifg.database.from("runbooks").insert([runbookToRow(r)]);
-    ifErr(error, "insertRunbook");
-    cacheInvalidate("runbooks:");
-    return;
-  }
-  db.insertRunbook(r);
-}
-
-export async function updateRunbook(id: string, patch: Partial<Runbook>): Promise<void> {
-  const ifg = isInsforgeEnabled() ? getInsforge() : null;
-  if (ifg) {
-    const row = runbookPatchToRow(patch);
-    if (Object.keys(row).length === 0) return;
-    const { error } = await ifg.database.from("runbooks").update(row).eq("id", id);
-    ifErr(error, "updateRunbook");
-    cacheInvalidate("runbooks:");
-    return;
-  }
-  db.updateRunbook(id, patch);
-}
-
-export async function listRunbooks(workspaceId?: string): Promise<Runbook[]> {
-  const ifg = isInsforgeEnabled() ? getInsforge() : null;
-  if (ifg) {
-    const key = `runbooks:${workspaceId ?? "*"}`;
-    const cached = cacheGet<Runbook[]>(key);
-    if (cached) return cached;
-    try {
-      let q = ifg.database.from("runbooks").select();
-      if (workspaceId) q = q.eq("workspace_id", workspaceId);
-      const { data, error } = await q.order("updated_at", { ascending: false });
-      ifErr(error, "listRunbooks");
-      const out = ((data as DbRow[]) ?? []).map(runbookFromRow);
-      cacheSet(key, out);
-      return out;
-    } catch (err) {
-      const stale = cacheStale<Runbook[]>(key);
-      if (stale) {
-        console.warn("[data] listRunbooks failed, serving stale cache:", (err as Error).message);
-        return stale;
-      }
-      throw err;
-    }
-  }
-  return db.listRunbooks(workspaceId);
-}
-
 // AD users / groups / accounts
 
 export async function insertADUser(u: ADUser): Promise<void> {
@@ -823,7 +728,7 @@ export async function reassignWorkspace(
 ): Promise<void> {
   const ifg = isInsforgeEnabled() ? getInsforge() : null;
   if (ifg) {
-    for (const table of ["tickets", "runbooks", "ad_users", "ad_groups", "ad_accounts", "agent_jobs"] as const) {
+    for (const table of ["tickets", "ad_users", "ad_groups", "ad_accounts", "agent_jobs"] as const) {
       const { error } = await ifg.database
         .from(table)
         .update({ workspace_id: toWorkspaceId })
@@ -836,7 +741,6 @@ export async function reassignWorkspace(
     return;
   }
   for (const t of db.listTickets(fromWorkspaceId)) t.workspaceId = toWorkspaceId;
-  for (const r of db.listRunbooks(fromWorkspaceId)) r.workspaceId = toWorkspaceId;
   for (const u of db.listADUsers(fromWorkspaceId)) u.workspaceId = toWorkspaceId;
   for (const g of db.listADGroups(fromWorkspaceId)) g.workspaceId = toWorkspaceId;
   for (const a of db.listADAccounts(fromWorkspaceId)) a.workspaceId = toWorkspaceId;

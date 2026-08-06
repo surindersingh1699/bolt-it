@@ -1,6 +1,6 @@
-# 10 demo scenarios — real employee problems, solved live
+# 7 demo scenarios — real employee problems, solved live
 
-Each scenario lists: the exact message to send (SlackChat tab or Slack once inbound is tunneled), the pre-state to arrange, what actually happens, and what's real vs simulated. Seeded users bob/frank/eve already start in broken states — scenarios 3–5 need zero setup.
+Each scenario lists: the exact message to send (Chat tab), the pre-state to arrange, and what actually happens. Every scenario here runs against a real backend — there is no "simulated but labeled" tier any more, because the adapters that had no backend were deleted. Seeded users bob/frank/eve already start in broken states, so scenarios 4–6 need zero setup.
 
 **Operational note:** run ONE local agent at a time (the VM *or* the Mac). Jobs are claimed by whichever agent polls first, and the fleet's live-device indicator tracks a single heartbeat.
 
@@ -45,31 +45,17 @@ Each scenario lists: the exact message to send (SlackChat tab or Slack once inbo
 - **What happens:** Kerberos log read → `ad.refresh_kerberos` → stale_kerberos → active, badge flips.
 - **Real?** Real state change; log excerpt labeled sample.
 
-## Tier 3 — governance & story scenarios (simulated backends, labeled)
+## Tier 3 — governance arc
 
-### 7. Lost Figma access after switching teams
-- **Send as:** Alex — *"I switched teams yesterday and now Figma says no access."*
-- **Wow:** Hyperspell memory hit ("Team-change handoff: Alex Reyes") grounds the diagnosis; `okta.add_to_group` is unclassified → LLM judge → approval gate.
-- **Real?** Hyperspell + judge real; Okta action simulated (labeled).
-
-### 8. CFO can't reach VPN before board meeting ⭐ governance arc
-- **Send as:** Frank — *"Board meeting in 20 minutes and my VPN keeps failing after my password change."*
-- **Wow:** run it 3 times approving `mdm.push_vpn_config` each time → 4th run **auto-executes with a violet "trusted · auto" badge** — the agent learned trust. Show the LangSmith trace of the pause/resume.
-- **Real?** Orchestration/governance/interrupts real; MDM push simulated (labeled).
-
-### 9. Locked out of Salesforce
-- **Send as:** Jordan — *"Got locked out of Salesforce after a failed login, need a reset."*
-- **Wow:** the Aside story — reset happens "in the user's own browser session," agent never holds credentials.
-- **Real?** Flow real; Aside browser action simulated (labeled).
-
-### 10. Flaky Wi-Fi
+### 7. Flaky Wi-Fi ⭐ the trust-earning scenario
 - **Send as:** anyone — *"Wi-Fi keeps dropping every few minutes."*
 - **Pre-state:** run the agent on the **Mac** (not the VM — VMs expose no Wi-Fi adapter).
-- **What happens:** `fix.toggle_wifi` genuinely cycles the Mac's Wi-Fi radio.
-- **Real?** 100% real on a physical machine.
+- **What happens:** `fix.toggle_wifi` is high risk (it drops the machine's network link), so the graph pauses on a real `interrupt()` and waits for a click.
+- **Wow:** run it 3 times, approving each time → the 4th run **auto-executes with a "trusted · auto" badge**. `PROMOTION_THRESHOLD` in `governance.ts` is 3; precedent is scoped per workspace *and* per capability, so nothing else got promoted along with it.
+- **Real?** 100% real on a physical machine — the radio genuinely cycles.
 
 ---
 
-## Slack wiring status
-- **Outbound (agent → Slack):** live now on the connected "Personal Productivity" workspace — every ticket update/reply posts for tickets created under that workspace.
-- **Inbound (Slack message → ticket):** needs the one-command tunnel (`cloudflared tunnel --url http://localhost:3000`) + pasting the URL into the Slack app's Event Subscriptions. Until then, file tickets from the SlackChat tab — visually identical for demos.
+## Intake
+
+There is no Slack integration. The **Chat** tab is the conversation surface: messages you send there create tickets, and every agent update posts back into the same thread. Nothing leaves the machine.
