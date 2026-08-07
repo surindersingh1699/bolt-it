@@ -1,39 +1,92 @@
 import { randomBytes } from "crypto";
 import { insertAgentJob, updateStep } from "./data";
+import { buildCommand, capabilitySpec, humanLabelFor } from "./capabilities";
 import { AgentJob, PlanStep, Ticket } from "./types";
 
-export function isAgentJobCapability(capability?: string): boolean {
-  return (
-    capability === "diag.system_info" ||
-    capability === "diag.app_status" ||
-    capability === "diag.app_logs" ||
-    capability === "fix.restart_app" ||
-    capability === "fix.clear_app_cache" ||
-    capability === "fix.toggle_wifi" ||
-    capability === "diag.process_list" ||
-    capability === "diag.network_state" ||
-    capability === "diag.command_output" ||
-    capability === "fs.list" ||
-    capability === "fs.read" ||
-    capability === "fs.grep"
-  );
-}
+export type EnqueueResult =
+  | { ok: true; job: AgentJob }
+  | { ok: false; reason: string };
 
-export async function enqueueAgentJob(ticket: Ticket, step: PlanStep): Promise<AgentJob> {
+function buildJob(
+  ticket: Ticket,
+  capability: string | undefined,
+  command: string,
+  instructions: string,
+  stepId?: string,
+): AgentJob {
   const now = Date.now();
-  const job: AgentJob = {
+  return {
     id: `job-${randomBytes(6).toString("hex")}`,
     workspaceId: ticket.workspaceId,
     ticketId: ticket.id,
-    stepId: step.id,
-    kind: jobKindForCapability(step.capability),
+    ...(stepId ? { stepId } : {}),
+    kind: jobKindForCapability(capability),
     targetUserEmail: ticket.reporterEmail,
-    instructions: instructionsForCapability(ticket, step),
-    allowlistedCommand: commandForCapability(step.capability, ticket.reporterEmail, step.params),
+    instructions,
+    allowlistedCommand: command,
     status: "queued",
     createdAt: now,
     updatedAt: now,
   };
+}
+
+/**
+ * A read-only probe run for observation rather than for a plan step.
+ *
+ * Carries no `stepId`, because there is no step: it runs before anything is
+ * planned. That absence is load-bearing — `buildReplyEvidence` matches jobs to
+ * steps by `stepId`, so an observation job never masquerades as proof that a
+ * planned action was carried out.
+ */
+export async function enqueueProbeJob(
+  ticket: Ticket,
+  capability: string,
+  params?: Record<string, unknown>,
+): Promise<EnqueueResult> {
+  const built = buildCommand(capability, params);
+  if (!built.ok) return { ok: false, reason: built.reason };
+
+  // The observation bundle must stay read-only: it runs on the START edge with
+  // no reviewer and no gate, so a mutating capability reaching it would execute
+  // completely unsupervised. observe.ts only ever asks for `diag.*`, and this is
+  // the second lock on that door.
+  const spec = capabilitySpec(capability);
+  if (spec && spec.risk !== 0) {
+    return { ok: false, reason: `${capability} changes state and cannot run as an observation probe` };
+  }
+
+  const job = buildJob(
+    ticket,
+    capability,
+    built.command,
+    [
+      `Ticket ${ticket.id}: ${ticket.subject}`,
+      `Reporter: ${ticket.reporter} <${ticket.reporterEmail}>`,
+      `Read-only observation: ${humanLabelFor(capability)}`,
+      "Run only the allowlisted command in the local sandbox. Change nothing.",
+      "Redact secrets, tokens, cookies, IPs if policy requires it.",
+    ].join("\n"),
+  );
+  await insertAgentJob(job);
+  return { ok: true, job };
+}
+
+export async function enqueueAgentJob(ticket: Ticket, step: PlanStep): Promise<EnqueueResult> {
+  const built = buildCommand(step.capability, step.params);
+  if (!built.ok) {
+    await updateStep(ticket.id, step.id, {
+      log: [`[Agent Queue] Refused before dispatch: ${built.reason}`],
+    });
+    return { ok: false, reason: built.reason };
+  }
+
+  const job = buildJob(
+    ticket,
+    step.capability,
+    built.command,
+    instructionsForCapability(ticket, step),
+    step.id,
+  );
   await insertAgentJob(job);
   await updateStep(ticket.id, step.id, {
     log: [
@@ -42,90 +95,15 @@ export async function enqueueAgentJob(ticket: Ticket, step: PlanStep): Promise<A
       `[Agent Queue] Sandboxed command (audit): ${job.allowlistedCommand}`,
     ],
   });
-  return job;
+  return { ok: true, job };
 }
 
-export function humanLabelFor(capability: string | undefined): string {
-  if (capability === "diag.system_info") return "Collect device hardware and OS info";
-  if (capability === "diag.app_status") return "Check whether the app is running";
-  if (capability === "diag.app_logs") return "Read the app's recent error events";
-  if (capability === "fix.restart_app") return "Restart the application";
-  if (capability === "fix.clear_app_cache") return "Clear application cache";
-  if (capability === "fix.toggle_wifi") return "Cycle the network adapter";
-  if (capability === "diag.process_list") return "List what's running on the machine";
-  if (capability === "diag.network_state") return "Read interfaces, routes and DNS";
-  if (capability === "diag.command_output") return "Read device state with a read-only command";
-  if (capability === "fs.list") return "List a directory on the machine";
-  if (capability === "fs.read") return "Read a file on the machine";
-  if (capability === "fs.grep") return "Search files on the machine";
-  return "Run device action";
-}
+export { humanLabelFor };
 
 function jobKindForCapability(capability?: string): AgentJob["kind"] {
   if (capability === "diag.system_info") return "system_info";
   if (capability === "diag.network_state") return "network_probe";
   return "app_diagnostic";
-}
-
-function sanitizeAppName(s: unknown): string {
-  return String(s ?? "").replace(/[^a-zA-Z0-9 _-]/g, "").slice(0, 64);
-}
-
-function sanitizeBinary(s: unknown): string {
-  return String(s ?? "").replace(/[^a-zA-Z0-9_.-]/g, "").slice(0, 32);
-}
-
-// Arguments are kept to single whitespace-free tokens so the audit string in the
-// job record is exactly the argv that will run. The agent re-validates all of
-// this against its own allowlist before executing — this is the outbound half.
-function sanitizeArgv(s: unknown): string {
-  return String(s ?? "")
-    .split(/\s+/)
-    .filter((tok) => tok.length > 0 && tok.length <= 256 && /^[A-Za-z0-9._\-/:@=+,%[\]]+$/.test(tok))
-    .slice(0, 12)
-    .join(" ");
-}
-
-// Paths routinely contain spaces ("Application Support"), so unlike sanitizeArgv
-// this keeps them. The audit string stays unambiguous because the double quote
-// that delimits the value is the one character stripped.
-function sanitizePath(s: unknown): string {
-  return String(s ?? "").replace(/["\r\n\0]/g, "").slice(0, 512);
-}
-
-function sanitizePattern(s: unknown): string {
-  return String(s ?? "").replace(/["\r\n\0]/g, "").slice(0, 200);
-}
-
-function commandForCapability(
-  capability: string | undefined,
-  email: string,
-  params: Record<string, unknown> | undefined,
-): string {
-  const user = email.replace(/[^a-zA-Z0-9@._-]/g, "");
-  const app = sanitizeAppName(params?.app);
-  if (capability === "diag.system_info") return `collect_system_info --user ${user}`;
-  if (capability === "diag.app_status") return `app_status --app "${app}"`;
-  if (capability === "diag.app_logs") return `app_event_logs --app "${app}" --limit 15`;
-  if (capability === "fix.restart_app") return `restart_app --app "${app}"`;
-  if (capability === "fix.clear_app_cache") return `clear_app_cache --app "${app}"`;
-  if (capability === "diag.process_list") return "process_list";
-  if (capability === "diag.network_state") return "network_state";
-  if (capability === "diag.command_output") {
-    const args = sanitizeArgv(
-      Array.isArray(params?.args) ? (params.args as unknown[]).join(" ") : params?.args,
-    );
-    return `command_output --binary "${sanitizeBinary(params?.binary)}" --args "${args}"`;
-  }
-  if (capability === "fs.list") return `fs_list --path "${sanitizePath(params?.path)}"`;
-  if (capability === "fs.read") {
-    const lines = Math.min(Number(params?.lines) || 2000, 5000);
-    return `fs_read --path "${sanitizePath(params?.path)}" --lines ${lines}`;
-  }
-  if (capability === "fs.grep") {
-    return `fs_grep --path "${sanitizePath(params?.path)}" --pattern "${sanitizePattern(params?.pattern)}"`;
-  }
-  return "toggle_wifi";
 }
 
 function instructionsForCapability(ticket: Ticket, step: PlanStep): string {

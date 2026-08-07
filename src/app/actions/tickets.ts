@@ -8,7 +8,8 @@ import {
   insertTicket,
   updateTicket,
 } from "@/lib/data";
-import { Ticket } from "@/lib/types";
+import { Attachment, Ticket } from "@/lib/types";
+import { uploadAttachment } from "@/lib/attachments";
 import { ensureSeeded } from "@/lib/seed";
 import { getCurrentUser } from "@/lib/auth";
 import { ACME_WORKSPACE_ID, getCurrentWorkspaceId } from "@/lib/workspace";
@@ -25,12 +26,31 @@ export interface CreateTicketInput {
   workspaceId?: string;
 }
 
-export async function createTicket(input: CreateTicketInput): Promise<string> {
+/**
+ * Screenshots are uploaded BEFORE the ticket is inserted, not after.
+ *
+ * The graph is started from `after()` the moment the row exists, and its very
+ * first expensive call reads the attachments. Uploading afterwards would race
+ * that: sometimes the strategist sees the screenshot, sometimes it does not,
+ * and the difference would look like model flakiness rather than a race.
+ */
+export async function createTicket(
+  input: CreateTicketInput,
+  formData?: FormData,
+): Promise<string> {
   await ensureSeeded();
   const id = `T-${Math.floor(Math.random() * 9000 + 1000)}`;
   const now = Date.now();
   const workspaceId =
     input.workspaceId ?? (await getCurrentWorkspaceId()) ?? ACME_WORKSPACE_ID;
+  const attachments: Attachment[] = [];
+  for (const entry of formData?.getAll("file") ?? []) {
+    if (!(entry instanceof File) || entry.size === 0) continue;
+    const result = await uploadAttachment(id, entry);
+    if (result.ok) attachments.push(result.attachment);
+    else console.warn(`[createTicket] ${id} attachment rejected: ${result.error}`);
+  }
+
   const ticket: Ticket = {
     id,
     workspaceId,
@@ -45,6 +65,7 @@ export async function createTicket(input: CreateTicketInput): Promise<string> {
     updatedAt: now,
     plan: [],
     citations: [],
+    attachments,
     confidence: 0,
     resolvedByAi: false,
   };

@@ -46,15 +46,16 @@ describe("summarizeAgentMetrics", () => {
     expect(m.escalated).toBe(1);
   });
 
-  it("buckets tickets by the tier they reached, defaulting to 1", () => {
+  it("buckets tickets by how many diagnostic looks they needed", () => {
     const m = summarizeAgentMetrics([
-      ticket({ tier: 3 }),
-      ticket({ id: "t-2", tier: 1 }),
+      ticket({ attempts: 2 }),
+      ticket({ id: "t-2", attempts: 1 }),
       ticket({ id: "t-3" }),
     ]);
-    expect(m.byTier[3]).toBe(1);
-    expect(m.byTier[1]).toBe(2);
-    expect(m.deep).toBe(1);
+    expect(m.byLooks[2]).toBe(1);
+    // A ticket with no recorded attempts has had exactly one look.
+    expect(m.byLooks[1]).toBe(2);
+    expect(m.multiLook).toBe(1);
   });
 
   it("counts failures by kind, ordered by how often they happen", () => {

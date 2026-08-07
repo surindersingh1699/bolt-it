@@ -191,7 +191,10 @@ describe("reviewStep — verdicts the reviewer does own", () => {
     process.env.AI_GATEWAY_API_KEY = "test-key";
     stubReviewer(verdictBody('{"verdict":"allow","risk":"low","reason":"read-only status check"}'));
     const out = await reviewStep(step({ capability: "diag.app_status" }), ticketFrom());
-    expect(out).toEqual({ verdict: "allow", risk: "low", reason: "read-only status check" });
+    // toMatchObject, not toEqual: the reviewer now also returns the structural
+    // claims policy.ts reasons over. The verdict surface is unchanged.
+    expect(out).toMatchObject({ verdict: "allow", risk: "low", reason: "read-only status check" });
+    expect(out.source).toBe("model");
   });
 
   it("passes a block through", async () => {
@@ -226,7 +229,7 @@ describe("reviewPlan — AUTONOMY=gated", () => {
     const [out] = await reviewPlan([step({ capability: "fix.toggle_wifi" })], ticketFrom());
     expect(out.status).toBe("failed");
     expect(out.approvalMode).toBe("human");
-    expect(out.log?.join("\n")).toContain("BLOCKED");
+    expect(out.log?.join("\n")).toContain("rule=reviewer-refused");
   });
 });
 
@@ -240,15 +243,18 @@ describe("reviewPlan — AUTONOMY=full", () => {
     stubReviewer(verdictBody('{"verdict":"ask_human","risk":"high","reason":"changes account state"}'));
     const [out] = await reviewPlan([step({ capability: "ad.unlock_account" })], ticketFrom());
     expect(out.approvalMode).toBe("auto");
-    expect(out.log?.join("\n")).toContain("AUTONOMY=full, running unapproved");
+    expect(out.log?.join("\n")).toContain("rule=autonomy-bypass");
   });
 
-  // Documents a deliberate choice: full autonomy bypasses the ALWAYS_ASK floor
-  // too, because that floor expresses itself as ask_human. If this behaviour is
-  // ever meant to change, this test is where it gets caught.
-  it("also bypasses the ALWAYS_ASK floor", async () => {
+  // CHANGED, deliberately. This used to pin the opposite: full autonomy bypassed
+  // the ALWAYS_ASK floor because that floor expressed itself as ask_human.
+  // ad.reset_password is risk 3, and policy.ts holds risk >= 3 for a person on
+  // every rung, so the floor is now enforced by a declared structural rule
+  // rather than by a special case autonomy was permitted to skip.
+  it("no longer bypasses the ALWAYS_ASK floor — it is risk 3", async () => {
     const [out] = await reviewPlan([step({ kind: "backend", capability: "ad.reset_password" })], ticketFrom());
-    expect(out.approvalMode).toBe("auto");
+    expect(out.approvalMode).toBe("human");
+    expect(out.log?.join("\n")).toContain("rule=persistent-change");
   });
 
   it("also bypasses target binding", async () => {
@@ -270,10 +276,13 @@ describe("reviewPlan — AUTONOMY=full", () => {
   it("still fails closed to a blocked-or-gated posture when the provider is down", async () => {
     delete process.env.AI_GATEWAY_API_KEY;
     const [out] = await reviewPlan([step({ capability: "ad.unlock_account" })], ticketFrom());
-    // Under full autonomy an unavailable reviewer does NOT stop the line — the
-    // fail-closed ask_human is bypassed like any other. Pinned so the blast
-    // radius of AUTONOMY=full is written down rather than discovered.
-    expect(out.approvalMode).toBe("auto");
-    expect(out.log?.join("\n")).toContain("unavailable");
+    // CHANGED, deliberately. This used to assert "auto": the fail-closed
+    // ask_human was bypassed like any other, so a reviewer outage produced
+    // unsupervised writes on employees' machines. A change with no reviewer is
+    // now REFUSED outright — there is no human queue to fall back to when the
+    // thing that would have described the risk never ran.
+    expect(out.approvalMode).toBe("human");
+    expect(out.status).toBe("failed");
+    expect(out.log?.join("\n")).toContain("rule=reviewer-unavailable");
   });
 });

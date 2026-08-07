@@ -1,4 +1,4 @@
-# Bolt-it device agent — one-time install on a Windows VM.
+# Bolt-it device agent -- one-time install on a Windows VM.
 #
 # After this runs once, the machine pulls the current scripts/local-agent.mjs
 # from the app on every start and relaunches itself if it ever exits. You never
@@ -10,7 +10,7 @@
 #   .\install-agent.ps1 -Token "<LOCAL_AGENT_TOKEN from .env.local>" -AppUrl "http://10.0.2.2:3000"
 #
 #   AppUrl is http://10.0.2.2:3000 on UTM, http://192.168.217.1:3000 on VMware
-#   Fusion — see WINDOWS_VM_DEMO.md section 3.
+#   Fusion -- see WINDOWS_VM_DEMO.md section 3.
 #
 # Remove everything again:
 #   schtasks /delete /tn "Bolt-it agent" /f ; Remove-Item -Recurse C:\ProgramData\BoltIt
@@ -26,7 +26,7 @@ $ErrorActionPreference = "Stop"
 
 if (-not ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()
     ).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
-  throw "Run this in an elevated PowerShell — the agent needs admin to cycle a network adapter."
+  throw "Run this in an elevated PowerShell -- the agent needs admin to cycle a network adapter."
 }
 
 if (-not (Get-Command node -ErrorAction SilentlyContinue)) {
@@ -60,7 +60,7 @@ $env:IT_SUPPORT_APP_URL = $cfg.AppUrl
 
 while ($true) {
   # Pull the current agent. If the app is unreachable, fall back to the copy
-  # from last time rather than sitting idle — a stale agent still beats none.
+  # from last time rather than sitting idle -- a stale agent still beats none.
   try {
     Invoke-WebRequest -Uri "$($cfg.AppUrl)/api/agent/script" `
       -Headers @{ Authorization = "Bearer $($cfg.Token)" } `
@@ -70,7 +70,7 @@ while ($true) {
   } catch {
     Write-Host "[bolt-it] could not pull agent ($($_.Exception.Message))"
     if (-not (Test-Path $agent)) {
-      Write-Host "[bolt-it] and no local copy yet — retrying in 15s"
+      Write-Host "[bolt-it] and no local copy yet -- retrying in 15s"
       Start-Sleep -Seconds 15
       continue
     }
@@ -78,7 +78,7 @@ while ($true) {
   }
 
   node $agent
-  Write-Host "[bolt-it] agent exited ($LASTEXITCODE) — restarting in 5s"
+  Write-Host "[bolt-it] agent exited ($LASTEXITCODE) -- restarting in 5s"
   Start-Sleep -Seconds 5
 }
 '@

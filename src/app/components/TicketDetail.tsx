@@ -311,7 +311,7 @@ function TechnicalDetail({ ticket }: { ticket: Ticket }) {
         Technical detail
         <span className="text-neutral-400">
           · {ticket.attempts ?? 1} attempt{(ticket.attempts ?? 1) > 1 ? "s" : ""}
-          {ticket.tier ? ` · tier ${ticket.tier}` : ""}
+          {ticket.attempts && ticket.attempts > 1 ? ` · ${ticket.attempts} looks` : ""}
           {ticket.confidence > 0 ? ` · confidence ${Math.round(ticket.confidence * 100)}%` : ""}
         </span>
       </button>
@@ -337,7 +337,7 @@ function TechnicalDetail({ ticket }: { ticket: Ticket }) {
                     <span>{s.status}</span>
                     {s.risk && (
                       <span className={s.approvalMode === "human" ? "text-amber-700" : "text-neutral-400"}>
-                        {s.risk} risk · {s.governancePromoted ? "trusted, auto" : s.approvalMode}
+                        {s.risk} risk · {s.approvalMode}
                       </span>
                     )}
                   </div>

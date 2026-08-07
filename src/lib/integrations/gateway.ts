@@ -21,18 +21,29 @@ import { UsageCall, recordUsage, tokensFrom } from "../usage";
 
 const AI_GATEWAY_URL = process.env.AI_GATEWAY_URL || "https://ai-gateway.vercel.sh/v1";
 
+/**
+ * One piece of a multimodal turn. The endpoint behind AI_GATEWAY_URL is
+ * OpenAI-compatible, which means `content` already accepts either a bare string
+ * or these parts — carrying a screenshot needs no new dependency and no second
+ * transport, only a wider type here.
+ */
+export type GatewayContentPart =
+  | { type: "text"; text: string }
+  | { type: "image_url"; image_url: { url: string } };
+
+export type GatewayContent = string | GatewayContentPart[];
+
 export interface GatewayRequest {
   model: string;
   system: string;
-  user: string;
+  /** A plain string, or content parts when an image rides along. */
+  user: GatewayContent;
   temperature?: number;
   timeoutMs?: number;
   /** Which call this is, for the cost breakdown. */
   call: UsageCall;
   /** Ticket to bill. Omitted only for calls that belong to no ticket. */
   ticketId?: string;
-  /** Escalation depth being served, where there is one. */
-  tier?: number;
 }
 
 const DEFAULT_TIMEOUT_MS = 25_000;
@@ -53,7 +64,6 @@ export async function gatewayChat(req: GatewayRequest): Promise<string | null> {
       ticketId: req.ticketId,
       call: req.call,
       model: req.model,
-      tier: req.tier,
       promptTokens,
       completionTokens,
       latencyMs: Date.now() - t0,

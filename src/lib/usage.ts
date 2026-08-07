@@ -4,8 +4,10 @@
  * Every model call this system makes is recorded here: which call it was, which
  * model served it, how many tokens each way, how long it took, and whether it
  * came back at all. The question this exists to answer without guessing is
- * "why is tier 3 expensive" — and the answer is only available if the tier, the
- * model and the call site are all on the same row.
+ * "where did the money go" — and the answer is only available if the model and
+ * the call site are on the same row. Strategist calls are few and expensive;
+ * operator calls are many and cheap, and the ratio between them is the whole
+ * design bet.
  *
  * In-memory, same posture as [trace.ts](./trace.ts): the UI reads it live via
  * /api/state. It is deliberately not a billing ledger. Prices move, per-account
@@ -15,19 +17,22 @@
  */
 
 export type UsageCall =
-  | "draft"
+  /** The expensive one: diagnosis and what to authorise. Called rarely. */
+  | "strategist"
+  /** The cheap one: carrying the strategy out. Called often. */
+  | "operator"
   | "review"
-  | "verify"
+  /** The plan-level intent check: does this follow from what was reported? */
+  | "intent"
   | "communicate"
   | "reply"
-  | "memory";
+  /** The research distiller — the one call that reads untrusted web text. */
+  | "research";
 
 export interface UsageEvent {
   ticketId: string;
   call: UsageCall;
   model: string;
-  /** Escalation depth this call was serving, where the call has one. */
-  tier?: number;
   promptTokens: number;
   completionTokens: number;
   /** Wall clock, including transport — the number a waiting employee feels. */

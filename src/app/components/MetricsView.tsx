@@ -4,7 +4,7 @@
  * Operational read on the agent itself, rather than on any one ticket.
  *
  * Everything here is computed from what the tickets already carry — the failure
- * taxonomy, the tier each ticket reached, and the per-ticket cost ledger. There
+ * taxonomy, how many diagnostic looks each took, and the per-ticket cost ledger. There
  * is no separate metrics pipeline to fall out of sync, and nothing is estimated:
  * a number that cannot be derived from a real ticket is not shown at all.
  *
@@ -65,9 +65,9 @@ export function MetricsView({ currentUser }: { currentUser: PublicUser }) {
         />
         <Stat
           icon={<Layers size={14} />}
-          label="Reached tier 3"
-          value={pct(m.deep, m.total)}
-          sub="the expensive path"
+          label="Needed a second look"
+          value={pct(m.multiLook, m.total)}
+          sub="one pass was not enough"
         />
         <Stat
           icon={<Coins size={14} />}
@@ -79,16 +79,16 @@ export function MetricsView({ currentUser }: { currentUser: PublicUser }) {
 
       <div className="mt-6 grid gap-4 lg:grid-cols-2">
         <Panel
-          title="Where tickets end up"
-          hint="A ticket that reaches a deeper tier is not a failure — it is the escalation working. Tier 3 is simply where the costly reasoning happens."
+          title="How many looks a ticket took"
+          hint="A look is one call to the expensive model. The operator's rounds are not counted here — those are cheap by design. This distribution is the whole cost story."
         >
-          {[1, 2, 3].map((tier) => (
+          {([1, 2, 3, 4] as const).map((n) => (
             <Bar
-              key={tier}
-              label={`Tier ${tier}`}
-              value={m.byTier[tier] ?? 0}
+              key={n}
+              label={n === 1 ? "One look was enough" : n === 4 ? "4 or more looks" : `${n} looks`}
+              value={m.byLooks[n] ?? 0}
               total={m.total}
-              tone={tier === 3 ? "amber" : "blue"}
+              tone={n >= 3 ? "amber" : "blue"}
             />
           ))}
         </Panel>

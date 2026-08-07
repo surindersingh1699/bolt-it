@@ -6,6 +6,7 @@ import {
   ADGroup,
   ADUser,
   AgentJob,
+  Attachment,
   Citation,
   Device,
   PlanStep,
@@ -85,7 +86,7 @@ function ticketToRow(t: Ticket): DbRow {
     resolution_time_ms: t.resolutionTimeMs ?? null,
     troubleshooting_summary: t.troubleshootingSummary ?? null,
     attempts: t.attempts ?? null,
-    tier: t.tier ?? null,
+    attachments: t.attachments ?? [],
   };
 }
 
@@ -111,7 +112,7 @@ function ticketFromRow(r: DbRow): Ticket {
     resolutionTimeMs: r.resolution_time_ms == null ? undefined : Number(r.resolution_time_ms),
     troubleshootingSummary: (r.troubleshooting_summary as string) ?? undefined,
     attempts: r.attempts == null ? undefined : Number(r.attempts),
-    tier: r.tier == null ? undefined : (Number(r.tier) as Ticket["tier"]),
+    attachments: (r.attachments as Attachment[] | null) ?? [],
   };
 }
 
@@ -127,7 +128,7 @@ function ticketPatchToRow(patch: Partial<Ticket>): DbRow {
   if (patch.resolutionTimeMs !== undefined) out.resolution_time_ms = patch.resolutionTimeMs;
   if (patch.troubleshootingSummary !== undefined) out.troubleshooting_summary = patch.troubleshootingSummary;
   if (patch.attempts !== undefined) out.attempts = patch.attempts;
-  if (patch.tier !== undefined) out.tier = patch.tier;
+  if (patch.attachments !== undefined) out.attachments = patch.attachments;
   out.updated_at = Date.now();
   return out;
 }

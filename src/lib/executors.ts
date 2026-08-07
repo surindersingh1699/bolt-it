@@ -21,9 +21,10 @@
 
 import { ActionKind, PlanStep, StepFailure, Ticket } from "./types";
 import { directoryInvoke } from "./integrations/directory";
-import { knowledgeInvoke } from "./integrations/knowledge";
 import { synthesizeReply } from "./integrations/ai-gateway";
 import { enqueueAgentJob } from "./agent-jobs";
+import { buildCommand, capabilitySpec } from "./capabilities";
+import { autonomyNote, isDryRun } from "./autonomy";
 import { formatProofLines, isRealSuccess } from "./evidence";
 import { getTicket, listAgentJobs } from "./data";
 import { buildReplyEvidence, firstNameOf, postUpdate, waitForAgentJobs, waitForJob } from "./ticket-helpers";
@@ -36,6 +37,12 @@ export interface StepResult {
   log: string[];
   /** Required whenever `ok` is false. */
   failure?: StepFailure;
+  /**
+   * The step was computed but never sent to the machine. `ok` is true — nothing
+   * went wrong — but the step must be recorded as `simulated`, not `succeeded`,
+   * or a dry run could close a ticket on work that never happened.
+   */
+  simulated?: boolean;
 }
 
 export type StepExecutor = (ticket: Ticket, step: PlanStep) => Promise<StepResult>;
@@ -53,31 +60,49 @@ const executeBackend: StepExecutor = async (ticket, step) => {
 };
 
 /**
- * External lookup. Everything it returns is fenced as evidence — the tier
- * prompts forbid acting on instructions found inside a fetched page.
- */
-const executeKnowledge: StepExecutor = async (_ticket, step) => {
-  const r = await knowledgeInvoke(step);
-  return {
-    ok: r.ok,
-    log: r.log,
-    failure: r.ok
-      ? undefined
-      : {
-          kind: "dependency_unavailable",
-          detail: "external knowledge lookup did not return a usable result",
-        },
-  };
-};
-
-/**
  * Work on the employee's machine, decided BY the machine. No parallel narration
  * from the cloud: the before/after probe diff is the verdict, and a job that
  * changed nothing fails the step however clean its exit code was.
  */
 const executeDevice: StepExecutor = async (ticket, step) => {
   const log: string[] = [];
-  const job = await enqueueAgentJob(ticket, step);
+
+  // Dry-run rungs: reads still run — a simulation with no readings tells you
+  // nothing about whether the plan was reasonable — but a write is computed,
+  // recorded, and dropped. The command is built through the same registry path
+  // as a real one, so what the artifact shows is exactly what would have run.
+  const spec = capabilitySpec(step.capability);
+  if (isDryRun() && spec && spec.risk >= 1) {
+    const built = buildCommand(step.capability, step.params);
+    if (!built.ok) {
+      log.push(`[Dry Run] Nothing computed — ${built.reason}`);
+      return { ok: false, log, failure: { kind: "capability_missing", detail: built.reason } };
+    }
+    log.push(
+      `[Dry Run] ${autonomyNote()}`,
+      `[Dry Run] Would run on ${ticket.reporterEmail}'s machine: ${built.command}`,
+      `[Dry Run] Risk ${spec.risk} · reversible=${spec.reversible} · rollback=${spec.rollback ?? "none"}`,
+      `[Dry Run] Nothing was sent. This step is recorded as simulated, not succeeded.`,
+    );
+    return { ok: true, log, simulated: true };
+  }
+
+  const queued = await enqueueAgentJob(ticket, step);
+
+  // Nothing was dispatched: either the capability has no device command or the
+  // params did not parse. The old code had no way to express this — it coerced
+  // bad params and fell through to `toggle_wifi` for an unknown capability, so
+  // "we could not build this command" ran as "cycle the employee's adapter".
+  if (!queued.ok) {
+    log.push(`[Agent Queue] Nothing dispatched — ${queued.reason}`);
+    return {
+      ok: false,
+      log,
+      failure: { kind: "capability_missing", detail: queued.reason },
+    };
+  }
+
+  const job = queued.job;
   log.push(`[Agent Queue] Job ${job.id} dispatched to the device agent`);
   log.push(`[Agent Queue] ${job.allowlistedCommand}`);
 
@@ -168,7 +193,6 @@ const executeReply: StepExecutor = async (ticket, step) => {
 
 export const EXECUTORS: Record<ActionKind, StepExecutor> = {
   backend: executeBackend,
-  knowledge: executeKnowledge,
   device: executeDevice,
   reply: executeReply,
 };

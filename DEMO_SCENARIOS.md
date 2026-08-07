@@ -1,6 +1,6 @@
 # 7 demo scenarios — real employee problems, solved live
 
-Each scenario lists: the exact message to send (Chat tab), the pre-state to arrange, and what actually happens. Every scenario here runs against a real backend — there is no "simulated but labeled" tier any more, because the adapters that had no backend were deleted. Seeded users bob/frank/eve already start in broken states, so scenarios 4–6 need zero setup.
+Each scenario lists: the exact message to send (the `#it-support` channel, signed in as a non-IT-staff account), the pre-state to arrange, and what actually happens. Every scenario here runs against a real backend — there is no "simulated but labeled" tier any more, because the adapters that had no backend were deleted. Seeded users bob/frank/eve already start in broken states, so scenarios 4–6 need zero setup.
 
 **Operational note:** run ONE local agent at a time (the VM *or* the Mac). Jobs are claimed by whichever agent polls first, and the fleet's live-device indicator tracks a single heartbeat.
 
@@ -58,4 +58,4 @@ Each scenario lists: the exact message to send (Chat tab), the pre-state to arra
 
 ## Intake
 
-There is no Slack integration. The **Chat** tab is the conversation surface: messages you send there create tickets, and every agent update posts back into the same thread. Nothing leaves the machine.
+There is no real Slack integration — no workspace to install into, no token, nothing leaves the machine. Instead the employee surface *is* a Slack: sign in as a non-IT-staff account and the whole app is a `#it-support` channel talking to the **Bolt IT** app. Messages create tickets, every agent update posts back into the channel, and "Yes, it's working" / "No, still broken" (or just replying `yes` / `no`) closes or escalates. Staff accounts still get the inbox.

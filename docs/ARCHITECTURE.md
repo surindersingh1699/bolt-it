@@ -3,15 +3,15 @@
 > How `main` works today. Update this as part of the change that makes it wrong.
 > Why we chose things → [DECISIONS.md](DECISIONS.md). What we're doing now → [STATE.md](STATE.md).
 
-**Verified against the code on:** 2026-08-04
+**Verified against the code on:** 2026-08-07
 
 ---
 
 ## 1. In one paragraph
 
-A message becomes a ticket. A LangGraph state machine gathers context from three sources in parallel, drafts a plan with an LLM, and classifies every proposed step into a risk tier. Low and medium risk steps execute immediately; high risk steps pause the graph on a real `interrupt()` until a human approves. Steps execute one at a time — some against a real machine through a local device agent. After each round the agent reads what the machine actually reported and decides whether the problem is fixed; if not, it re-plans and tries again, up to 3 attempts, before handing a written record to a human.
+A message becomes a ticket, optionally with a screenshot. Before anything is reasoned about, a read-only probe bundle runs on the reporter's machine. A strategist (opus) then looks at the problem, the screenshot and those readings, diagnoses it, and authorises a set of actions. An operator (sonnet) carries them out — binding real app names and paths, retrying what fails mechanically, running extra reads to get unstuck — while a separate safety reviewer rules on every step and high-risk ones pause the graph on a real `interrupt()`. When the authorised work is done or the operator is blocked, the strategist looks again.
 
-The two things that make this more than a script: the approval gate is **structural** (a graph interrupt, not an `if`), and "the fix step succeeded" is **not** accepted as "the problem is solved."
+Four things make this more than a script: the approval gate is **structural** (a graph interrupt, not an `if`); "the fix step succeeded" is **not** accepted as "the problem is solved"; the cheap model **cannot author a change** the expensive one did not authorise; and **no model routes** — models emit data, the graph emits control flow.
 
 ---
 
@@ -34,30 +34,35 @@ The two things that make this more than a script: the approval gate is **structu
 ## 3. The graph
 
 ```
-            ┌─ gatherProfile   (directory record) ───────┐
-START ──────┼─ gatherMemory    (facts + past tickets) ───┤   barrier join
-            └─ gatherDeviceContext (fleet + heartbeat) ──┤
-                        └─► draftPlan (LLM) ─────────────┘
-                                    │
-                              classifyRisk ─► persistPlan
-                                    │
-        ┌─────────────────── runNextStep ◄──────────────┐
-        │  approvalMode "human"? ─► markAwaitingApproval │
-        │                           └─► awaitApproval    │
-        │                               interrupt() ─────┘ Command({resume})
-        │  step failed? ─► escalate ─► END
-        ▼
-   verifyOutcome  (LLM verdict from real machine output + memory)
-        │  not resolved & attempt < 3 ─► replan ─► runNextStep
-        ▼
-   finalizeExecution ─► awaiting_confirmation ─► user confirms ─► resolved
+START ─► observe ─► strategist (OPUS) ◄─────────────────────┐
+       (reads the         │                                 │
+        machine)          │ diagnosis + AUTHORISED actions  │ done, or blocked,
+                          ▼                                 │ or refused resolution
+                     operator (SONNET) ────────────────────►┤
+                          │  binds params, clears roadblocks│
+                          ▼                                 │
+                     reviewSteps  (safety, per step)        │
+                          │                                 │
+                          ▼                                 │
+        ┌──────────► runNextStep ──► markAwaitingApproval    │
+        │                 │           └► awaitApproval       │
+        │                 │              interrupt() ────────┘ Command({resume})
+        └── steps left ───┘
+                          │ round done ──► operator
+                          │ refused step ─► strategist
+                          ▼
+              finalize ─► awaiting_confirmation ─► employee confirms ─► resolved
+              humanHandoff ─► escalated (terminal, writes the artifact)
+
+              researcher ◄─ strategist asks a question ─► back to strategist
 ```
 
-Three details that are easy to get wrong when editing:
+Ten nodes. Four details that are easy to get wrong when editing:
 
-- **The barrier join.** `classifyRisk` is wired with a single `addEdge([...three predecessors], "classifyRisk")`. Three separate `addEdge` calls would fire it three times.
-- **`markAwaitingApproval` is separate from `awaitApproval` on purpose.** On resume, LangGraph re-runs the whole node function from the top. Anything placed before `interrupt()` fires twice — so the status flip and the chat ping live in their own node.
-- **Resume never restarts.** `Command({resume})` continues from the paused step.
+- **There is no barrier join.** Only `observe` feeds the strategist, so nothing can deadlock and both loops re-enter their own node freely. This is why escalation-style re-entry is a state update rather than a duplicated path.
+- **The inner loop must stay cheap.** `runNextStep` returns to the **operator**, not the strategist. If finished steps went straight back to the strategist, every mechanical retry would cost an opus call. `ticket-graph.test.ts` asserts the edge.
+- **`markAwaitingApproval` is separate from `awaitApproval` on purpose.** On resume, LangGraph re-runs the whole node from the top; anything before `interrupt()` fires twice.
+- **Only the operator reaches the reviewer.** The strategist cannot put a step on the ticket by itself — it authorises, the operator selects, the reviewer rules, and only then does anything run.
 
 ---
 
@@ -107,12 +112,18 @@ All in [src/lib/integrations/](../src/lib/integrations/). Every execution adapte
 
 | Adapter | Real backend | Notes |
 |---|---|---|
-| [ai-gateway.ts](../src/lib/integrations/ai-gateway.ts) | Yes | Tiered drafting, verifier, service-desk voice, reply synthesis, memory extraction |
-| [memory.ts](../src/lib/memory.ts) | Yes | Per-user facts + episodes in the `user_memory` table |
+| [ai-gateway.ts](../src/lib/integrations/ai-gateway.ts) | Yes | `runStrategist` (opus), `runOperator` (sonnet), service-desk voice, reply synthesis |
+| [memory.ts](../src/lib/memory.ts) | Yes, but **unwired** | Per-user facts + episodes. Nothing calls it today; coming back |
+| [attachments.ts](../src/lib/attachments.ts) | Yes | Screenshots → private `ticket-attachments` bucket → data URI for the strategist |
 | [directory.ts](../src/lib/integrations/directory.ts) | Yes | AD reads/writes against seeded state. Every branch touches real rows |
-| [knowledge.ts](../src/lib/integrations/knowledge.ts) | Yes | `kb.*` external lookup, tier 2+. Results are fenced as evidence, never instructions |
+| [knowledge.ts](../src/lib/integrations/knowledge.ts) | Yes | Transport only — raw web search and domain-allowlisted page extraction. Its output reaches nothing but [research.ts](../src/lib/research.ts) |
 
 Device work has no adapter here by design: it goes through [agent-jobs.ts](../src/lib/agent-jobs.ts) to the local agent, and the machine's own before/after probe is the verdict.
+
+Two roles are graph nodes rather than adapters, because neither is an action taken on the company's behalf:
+
+- **[observe.ts](../src/lib/observe.ts)** runs a fixed read-only probe bundle on the employee's machine *before* anything is planned, enqueuing the whole bundle before waiting on any of it — one agent poll cycle, not one per probe. The planner then drafts against readings instead of spending its first round acquiring them. No agent, or no heartbeat, and it returns `collected: false` immediately; that answer reaches the prompt verbatim, because a planner that thinks it has evidence it does not have is worse than one that knows it is guessing.
+- **[research.ts](../src/lib/research.ts)** is the quarantine boundary for external text. Raw pages enter the distiller and never leave it; what leaves is at most five one-sentence claims, each attributed to a URL that was actually retrieved. Anything in a page addressed to the reader comes back as a `flag` and lands in the findings rather than being silently dropped. With no distiller available, nothing from the web is admitted at all.
 
 Anything without a real backend appends `· simulated` to its log lines. **Output labeled simulated can never justify a "resolved" verdict** — the verifier enforces this.
 
@@ -134,11 +145,14 @@ Auth is a single shared bearer token (`LOCAL_AGENT_TOKEN`). One agent at a time;
 
 1. Status transitions happen only in the graph and the ticket Server Actions.
 2. No path reaches a high-risk step without the `interrupt()`.
-3. Action `kind` is one of `device | backend | reply`. No general-purpose tool.
-4. Adapters return failures, never throw.
-5. Components never write to the store. Component → Server Action → `data.ts`.
-6. Anything simulated says so, in the log line the user sees.
-7. No branching on ticket text or reporter email to force a demo outcome.
+3. Action `kind` is one of `device | backend | reply`. No general-purpose tool. External lookup is deliberately not among them — it touches no company system, so charging it a plan slot, a safety review and an approval decision bought nothing.
+4. **Models emit data; the graph emits control flow.** No LLM returns a `goto`. This is what keeps the approval interrupt structural rather than advisory.
+5. **The cheap model cannot author a change.** The operator may run any read and any write the strategist authorised — nothing else. Enforced in `authorizeOperatorSteps`, not in a prompt.
+6. **A resolution is checked, not trusted.** `resolved` is a model's claim; `resolutionSupported` decides.
+7. Adapters return failures, never throw.
+8. Components never write to the store. Component → Server Action → `data.ts`.
+9. Anything simulated says so, in the log line the user sees.
+10. No branching on ticket text or reporter email to force a demo outcome.
 
 ---
 

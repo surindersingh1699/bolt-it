@@ -3,13 +3,19 @@ import os from "node:os";
 import fs from "node:fs";
 import path from "node:path";
 import { spawn } from "node:child_process";
+import { fileURLToPath } from "node:url";
 
 const appUrl = process.env.IT_SUPPORT_APP_URL || "http://localhost:3000";
 const token = process.env.LOCAL_AGENT_TOKEN;
 const intervalMs = Number(process.env.LOCAL_AGENT_POLL_MS || 3000);
 const speak = process.env.LOCAL_AGENT_SPEAK === "1";
 
-if (!token) {
+// True only when run as the CLI (`pnpm agent`), false when imported by a test
+// harness. Guards the token requirement and the poll loop so `executeJob` can be
+// exercised directly without a token or a running server.
+const IS_ENTRYPOINT = process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url);
+
+if (IS_ENTRYPOINT && !token) {
   console.error("LOCAL_AGENT_TOKEN is required.");
   process.exit(1);
 }
@@ -46,6 +52,11 @@ function humanLabel(command) {
     return `Clearing ${m?.[1] || "app"} cache`;
   }
   if (c.startsWith("toggle_wifi")) return "Cycling the network adapter";
+  if (c.startsWith("set_dns_servers")) {
+    const m = c.match(/--servers "([^"]*)"/);
+    return `Setting DNS resolvers to ${m?.[1] === "empty" || !m?.[1] ? "DHCP" : m[1]}`;
+  }
+  if (c.startsWith("flush_dns")) return "Flushing the DNS resolver cache";
   if (c.startsWith("collect_system_info")) return "Collecting computer hardware/OS info";
   if (c.startsWith("app_status ")) return "Checking whether the app is running";
   if (c.startsWith("app_event_logs ")) return "Reading the app's recent error events";
@@ -253,6 +264,69 @@ async function probeNetwork(ctx, label) {
   };
 }
 
+// The resolver configuration is the fact a DNS fix is judged on. `resolvers` is
+// the ordered override list (empty when the service is on DHCP-assigned DNS),
+// which is exactly what set_dns_servers moves — so the before/after diff of this
+// probe IS the proof the fix landed.
+async function probeDns(ctx, label, service) {
+  if (IS_WINDOWS) {
+    const svc = await winDnsService(ctx, service);
+    const res = await runRecorded(ctx, "netsh", ["interface", "ipv4", "show", "dnsservers", svc]);
+    const addrs = (res.stdout.match(/\b\d{1,3}(?:\.\d{1,3}){3}\b/g) ?? []).join(",");
+    const dhcp = /DHCP/i.test(res.stdout) && !addrs;
+    return {
+      label,
+      command: `netsh interface ipv4 show dnsservers "${svc}"`,
+      exitCode: res.code,
+      facts: { service: svc, resolvers: dhcp ? "" : addrs, mode: dhcp ? "dhcp" : "static" },
+    };
+  }
+  const svc = await macDnsService(ctx, service);
+  const res = await runRecorded(ctx, "networksetup", ["-getdnsservers", svc]);
+  // networksetup prints "There aren't any DNS Servers set on <svc>." when the
+  // service is back on DHCP-assigned resolvers — that string means empty.
+  const isEmpty = /aren't any DNS Servers/i.test(res.stdout);
+  const resolvers = isEmpty
+    ? ""
+    : (res.stdout.match(/\b\d{1,3}(?:\.\d{1,3}){3}\b/g) ?? []).join(",");
+  return {
+    label,
+    command: `networksetup -getdnsservers "${svc}"`,
+    exitCode: res.code,
+    facts: { service: svc, resolvers, mode: isEmpty ? "dhcp" : "static" },
+  };
+}
+
+// The employee names a symptom, not a network service. Resolve the service the
+// fix should act on: the first Wi-Fi/Ethernet service that is actually up, or a
+// name the caller passed explicitly.
+async function macDnsService(ctx, requested) {
+  if (requested && requested !== "auto") return requested;
+  const list = await runRecorded(ctx, "networksetup", ["-listallnetworkservices"]);
+  const services = list.stdout
+    .split(/\r?\n/)
+    .slice(1) // first line is an explanatory header
+    .map((s) => s.replace(/^\*/, "").trim())
+    .filter(Boolean);
+  const preferred = services.find((s) => /wi-?fi|airport/i.test(s)) || services.find((s) => /ethernet|lan/i.test(s));
+  return preferred || services[0] || "Wi-Fi";
+}
+
+// The Windows connection name netsh acts on ("Ethernet", "Ethernet0", "Wi-Fi").
+// A VM almost never has a "Wi-Fi" adapter, so defaulting to it is how a DNS fix
+// silently targets nothing. Resolve the first physical adapter that is actually
+// Up, exactly as probeNetwork does, unless the caller named one explicitly.
+async function winDnsService(ctx, requested) {
+  if (requested && requested !== "auto") return requested;
+  const res = await runRecordedPs(
+    ctx,
+    `Get-NetAdapter -Physical -ErrorAction SilentlyContinue | ` +
+      `Sort-Object -Property @{Expression={$_.Status -eq 'Up'}; Descending=$true} | ` +
+      `Select-Object -First 1 -ExpandProperty Name`,
+  );
+  return res.stdout.trim() || "Ethernet";
+}
+
 // ---- actions ---------------------------------------------------------------
 // Each action returns { ok, error?, note? }. It never decides whether it
 // "worked" — that verdict comes from the probes taken around it.
@@ -364,6 +438,56 @@ async function actToggleWifi(ctx, _args, helpers) {
   if (on.code !== 0) return { ok: false, error: on.stderr.trim() || `exit ${on.code}` };
   await new Promise((r) => setTimeout(r, 3000));
   return { ok: true, note: "cycled en0" };
+}
+
+// Set (or clear) the DNS resolvers on a network service. servers="empty"
+// restores the DHCP-assigned resolvers — that is the reversal, and it is the
+// same command with a different argument, so a wrong resolver is undone by
+// re-running with the value the probe recorded before the change.
+async function actSetDnsServers(ctx, { service, servers }) {
+  const wanted = String(servers || "empty");
+  const list = wanted === "empty" ? [] : wanted.split(",").filter(Boolean);
+
+  if (IS_WINDOWS) {
+    const svc = await winDnsService(ctx, service);
+    if (list.length === 0) {
+      const res = await runRecorded(ctx, "netsh", ["interface", "ipv4", "set", "dnsservers", svc, "dhcp"]);
+      if (res.code !== 0) return { ok: false, error: res.stderr.trim() || `exit ${res.code} — run the agent as Administrator` };
+    } else {
+      const first = await runRecorded(ctx, "netsh", ["interface", "ipv4", "set", "dnsservers", svc, "static", list[0], "primary"]);
+      if (first.code !== 0) return { ok: false, error: first.stderr.trim() || `exit ${first.code} — run the agent as Administrator` };
+      for (let i = 1; i < list.length; i++) {
+        await runRecorded(ctx, "netsh", ["interface", "ipv4", "add", "dnsservers", svc, list[i], `index=${i + 1}`]);
+      }
+    }
+    return { ok: true, note: `set ${svc} DNS to ${list.length ? list.join(", ") : "DHCP"}` };
+  }
+
+  const svc = await macDnsService(ctx, service);
+  // networksetup takes "empty" as a literal to clear the override.
+  const args = list.length === 0 ? ["-setdnsservers", svc, "empty"] : ["-setdnsservers", svc, ...list];
+  const res = await runRecorded(ctx, "networksetup", args);
+  if (res.code !== 0) return { ok: false, error: res.stderr.trim() || `exit ${res.code}` };
+  return { ok: true, note: `set ${svc} DNS to ${list.length ? list.join(", ") : "DHCP-assigned"}` };
+}
+
+// Flush the resolver cache. Deliberately expectsChange:false — a cache flush
+// leaves no stable before/after fact to diff, so it is recorded as an action
+// that ran, never as a verified change. The verifiable fix is set_dns_servers;
+// this supports it.
+async function actFlushDns(ctx) {
+  if (IS_WINDOWS) {
+    const res = await runRecorded(ctx, "ipconfig", ["/flushdns"]);
+    return res.code === 0
+      ? { ok: true, note: "flushed the Windows DNS resolver cache" }
+      : { ok: false, error: res.stderr.trim() || `exit ${res.code}` };
+  }
+  const flush = await runRecorded(ctx, "dscacheutil", ["-flushcache"]);
+  const hup = await runRecorded(ctx, "killall", ["-HUP", "mDNSResponder"]);
+  if (flush.code !== 0 && hup.code !== 0) {
+    return { ok: false, error: hup.stderr.trim() || flush.stderr.trim() || "flush failed — may need sudo" };
+  }
+  return { ok: true, note: "flushed the macOS DNS cache and signalled mDNSResponder" };
 }
 
 // ---- read-only collectors --------------------------------------------------
@@ -882,6 +1006,12 @@ const HANDLERS = {
     probe: (ctx, label) => probeNetwork(ctx, label),
     act: actToggleWifi,
   },
+  set_dns_servers: {
+    expectsChange: true,
+    probe: (ctx, label, args) => probeDns(ctx, label, args.service),
+    act: actSetDnsServers,
+  },
+  flush_dns: { expectsChange: false, collect: (ctx) => actFlushDns(ctx) },
   collect_system_info: { expectsChange: false, collect: collectSystemInfo },
   app_status: {
     expectsChange: false,
@@ -913,6 +1043,8 @@ function parseCommand(command) {
       fsPath: raw.match(/--path "([^"]*)"/)?.[1],
       pattern: raw.match(/--pattern "([^"]*)"/)?.[1],
       lines: Math.min(Number(raw.match(/--lines (\d+)/)?.[1] ?? 2000), 5000),
+      service: raw.match(/--service "([^"]*)"/)?.[1],
+      servers: raw.match(/--servers "([^"]*)"/)?.[1],
     },
   };
 }
@@ -1049,6 +1181,93 @@ function appendJournal(envelope, result) {
   }
 }
 
+// ---- change record + system log: fingerprints a human finds without us -------
+// The journal above is our own format. These two are for the sysadmin who does
+// NOT know this tool exists: a per-change record with the exact command to undo
+// it, and a line in the OS's own event log so it surfaces in `log show` (macOS)
+// or Event Viewer (Windows) next to everything else that touched the machine.
+// Both are best-effort — a fingerprint that fails to write must never fail the
+// job whose effect is already real.
+
+function changesDir() {
+  if (IS_WINDOWS) return path.join(process.env.ProgramData || "C:\\ProgramData", "BoltIt", "changes");
+  return path.join(os.homedir(), ".bolt-it", "changes");
+}
+
+// The reversal for a change, derived from the probes taken around it. For a DNS
+// change the "before" resolver list is the undo argument; for anything else we
+// still record the field-level before/after so a technician can reverse by hand.
+function revertFor(command, envelope) {
+  const before = envelope.probes[0]?.facts ?? {};
+  if (command.startsWith("set_dns_servers")) {
+    const svc = before.service ?? "Wi-Fi";
+    const prior = before.resolvers ? before.resolvers.split(",").join(" ") : "empty";
+    return IS_WINDOWS
+      ? `netsh interface ipv4 set dnsservers "${svc}" ${prior === "empty" ? "dhcp" : `static ${prior.split(" ")[0]} primary`}`
+      : `networksetup -setdnsservers "${svc}" ${prior}`;
+  }
+  return `restore fields: ${envelope.effect.diff
+    .map((d) => `${d.field} back to ${d.before ?? "unset"}`)
+    .join("; ") || "(no field-level diff recorded)"}`;
+}
+
+function recordChange(job, envelope, result) {
+  // Only real state changes get a change record — a read or a no-effect run has
+  // nothing to undo.
+  if (!envelope.expectsChange || !envelope.effect.changed) return null;
+  const dir = changesDir();
+  const file = path.join(dir, `${job.ticketId || "adhoc"}.jsonl`);
+  const record = {
+    at: Date.now(),
+    ticketId: job.ticketId ?? null,
+    jobId: job.id,
+    host: envelope.host,
+    capability: humanLabel(job.allowlistedCommand),
+    command: job.allowlistedCommand,
+    before: envelope.probes[0]?.facts ?? {},
+    after: envelope.probes[envelope.probes.length - 1]?.facts ?? {},
+    effect: envelope.effect.summary,
+    revert: revertFor(String(job.allowlistedCommand), envelope),
+    ok: result.ok !== false,
+  };
+  try {
+    fs.mkdirSync(dir, { recursive: true });
+    fs.appendFileSync(file, `${JSON.stringify(record)}\n`, "utf8");
+    return { file, revert: record.revert };
+  } catch (err) {
+    console.warn(`[local-agent] change record write failed (${file}): ${err.message}`);
+    return null;
+  }
+}
+
+// A line in the OS's own log, in the place a sysadmin actually looks:
+//  - Windows: the Application event log, source "BoltIt" (Event Viewer).
+//  - macOS: ~/Library/Logs/bolt-it.log, which Console.app shows under
+//    "Log Reports". `logger` is also emitted, but modern macOS filters external
+//    logger output out of `log show`, so the file is the reliable fingerprint.
+function writeSystemLog(job, envelope, result) {
+  const verdict = result.ok === false ? "FAILED" : envelope.effect.changed ? "CHANGED" : "no-effect";
+  const msg = `bolt-it ${job.ticketId || "adhoc"} ${job.id} ${verdict} :: ${job.allowlistedCommand} :: ${envelope.effect.summary}`;
+  try {
+    if (IS_WINDOWS) {
+      const script =
+        `if (-not [System.Diagnostics.EventLog]::SourceExists('BoltIt')) { New-EventLog -LogName Application -Source 'BoltIt' }; ` +
+        `Write-EventLog -LogName Application -Source 'BoltIt' -EventId 1000 -EntryType ${result.ok === false ? "Error" : "Information"} -Message "${psEscape(msg)}"`;
+      spawn("powershell", psArgs(script), { stdio: "ignore", detached: true }).unref();
+    } else {
+      const logFile = path.join(os.homedir(), "Library", "Logs", "bolt-it.log");
+      try {
+        fs.appendFileSync(logFile, `${new Date().toISOString()} ${msg}\n`, "utf8");
+      } catch {
+        // Directory missing on a stripped-down system — fall through to logger.
+      }
+      spawn("logger", ["-p", "user.notice", "-t", "bolt-it", msg], { stdio: "ignore", detached: true }).unref();
+    }
+  } catch (err) {
+    console.warn(`[local-agent] system-log write failed: ${err.message}`);
+  }
+}
+
 // ---- console + desktop feedback -------------------------------------------
 
 console.log(`${ANSI.cyan}${ANSI.bold}╔════════════════════════════════════════════════════════════╗${ANSI.reset}`);
@@ -1165,6 +1384,18 @@ async function handleJob(job) {
 
   // Journal first: the device's own record must not depend on the upload.
   envelope.journalPath = appendJournal(envelope, result) ?? undefined;
+  // Then the fingerprints a sysadmin finds without knowing this tool exists: a
+  // per-change record carrying the undo command, and a line in the OS event log.
+  const change = recordChange(job, envelope, result);
+  writeSystemLog(job, envelope, result);
+  if (change) {
+    // Carry the fingerprint onto the ticket too, so the audit trail on the
+    // server names the exact undo command, not just "something changed".
+    envelope.changeRecordPath = change.file;
+    envelope.revertCommand = change.revert;
+    console.log(`${ANSI.dim}  change:${ANSI.reset} ${change.file}`);
+    console.log(`${ANSI.dim}  revert:${ANSI.reset} ${change.revert}`);
+  }
 
   const ms = Date.now() - startedAt;
   const noEffect = result.ok !== false && envelope.expectsChange && !envelope.effect.changed;
@@ -1208,5 +1439,10 @@ async function handleJob(job) {
   chime(result.ok !== false && !noEffect ? "Hero" : "Basso");
 }
 
-await poll();
-setInterval(poll, intervalMs);
+// Exported so a test harness can drive the real execution path without a server.
+export { executeJob, recordChange, writeSystemLog, appendJournal, HANDLERS, parseCommand };
+
+if (IS_ENTRYPOINT) {
+  await poll();
+  setInterval(poll, intervalMs);
+}

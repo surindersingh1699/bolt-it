@@ -1,4 +1,4 @@
-import { Ticket, PlanStep, ADUser, ADGroup, ADAccount, Workspace, AgentJob, CapabilityPrecedent, Device } from "./types";
+import { Ticket, PlanStep, ADUser, ADGroup, ADAccount, Workspace, AgentJob, Device } from "./types";
 
 declare global {
   // eslint-disable-next-line no-var
@@ -12,7 +12,6 @@ class ITDB {
   adGroups: Map<string, ADGroup> = new Map();
   adAccounts: Map<string, ADAccount> = new Map();
   agentJobs: Map<string, AgentJob> = new Map();
-  capabilityPrecedents: Map<string, CapabilityPrecedent> = new Map();
   devices: Map<string, Device> = new Map();
   subscribers: Set<() => void> = new Set();
 
@@ -161,15 +160,6 @@ class ITDB {
     const existing = this.agentJobs.get(id);
     if (!existing) return;
     this.agentJobs.set(id, { ...existing, ...patch, updatedAt: Date.now() });
-    this.emit();
-  }
-
-  getCapabilityPrecedent(workspaceId: string, capability: string): CapabilityPrecedent | undefined {
-    return this.capabilityPrecedents.get(`${workspaceId}:${capability}`);
-  }
-
-  upsertCapabilityPrecedent(precedent: CapabilityPrecedent) {
-    this.capabilityPrecedents.set(`${precedent.workspaceId}:${precedent.capability}`, precedent);
     this.emit();
   }
 

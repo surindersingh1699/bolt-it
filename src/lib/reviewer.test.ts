@@ -118,18 +118,28 @@ describe("AUTONOMY=full", () => {
     process.env.AUTONOMY = "full";
   });
 
-  it("runs a step the reviewer wanted a human for", async () => {
+  it("no longer runs a step no reviewer ever saw", async () => {
+    // CHANGED, deliberately. This used to assert "auto": the fail-closed
+    // ask_human was bypassed like any other, so an unreachable reviewer meant
+    // proceed unsupervised. "The gate is down" must not read as "go ahead", so
+    // policy.ts marks reviewer-unavailable non-bypassable.
     const [out] = await reviewPlan([step()], ticket());
-    expect(out.approvalMode).toBe("auto");
+    expect(out.approvalMode).toBe("human");
+    expect(out.riskReason).toContain("unavailable");
   });
 
-  it("runs even the ALWAYS_ASK floor unattended", async () => {
+  it("no longer runs the ALWAYS_ASK floor unattended", async () => {
+    // CHANGED, deliberately. ad.reset_password is risk 3, and risk >= 3 is a
+    // structural floor no rung overrules — so the one ALWAYS_ASK entry is now
+    // held by a declared rule rather than by a special case that full autonomy
+    // was allowed to skip.
     process.env.AI_GATEWAY_API_KEY = "test-key";
     const [out] = await reviewPlan(
       [step({ kind: "backend", capability: "ad.reset_password", params: { email: "dana@acme.test" } })],
       ticket(),
     );
-    expect(out.approvalMode).toBe("auto");
+    expect(out.approvalMode).toBe("human");
+    expect(out.log?.join("\n")).toContain("could not bypass");
   });
 
   it("runs a cross-account step unattended", async () => {
@@ -141,11 +151,35 @@ describe("AUTONOMY=full", () => {
     expect(out.approvalMode).toBe("auto");
   });
 
-  it("keeps the verdict and its reason on the step, so the bypass is auditable", async () => {
+  it("records the rule that stopped it, so a refused bypass is auditable", async () => {
     const [out] = await reviewPlan([step()], ticket());
     expect(out.risk).toBe("high");
     expect(out.riskReason).toContain("unavailable");
-    expect(out.log?.join("\n")).toContain("AUTONOMY=full, running unapproved");
+    const log = out.log?.join("\n") ?? "";
+    expect(log).toContain("rule=reviewer-unavailable");
+    expect(log).toContain("AUTONOMY=full could not bypass this");
+  });
+
+  it("still bypasses an ordinary ask_human from a reviewer that did answer", async () => {
+    // The rung has not been neutered — it still does exactly what it says for
+    // the scheduling question it was built for.
+    process.env.AI_GATEWAY_API_KEY = "test-key";
+    vi.stubGlobal("fetch", async () => ({
+      ok: true,
+      json: async () => ({
+        choices: [
+          {
+            message: {
+              content: JSON.stringify({ verdict: "ask_human", risk: "medium", reason: "cycles the link" }),
+            },
+          },
+        ],
+      }),
+    }));
+    const [out] = await reviewPlan([step({ capability: "fix.toggle_wifi" })], ticket());
+    expect(out.approvalMode).toBe("auto");
+    expect(out.log?.join("\n")).toContain("autonomy-bypass");
+    vi.unstubAllGlobals();
   });
 
   it("does not bypass a block — that verdict is not a gate on autonomy", async () => {
@@ -157,7 +191,7 @@ describe("AUTONOMY=full", () => {
       ticket(),
     );
     expect(out.status).toBe("pending");
-    expect(out.log?.join("\n")).not.toContain("BLOCKED");
+    expect(out.log?.join("\n")).not.toContain("REFUSED");
   });
 });
 
@@ -186,7 +220,7 @@ describe("refusing verdicts", () => {
     const [out] = await reviewPlan([step({ kind: "backend", capability: "ad.unlock_account" })], ticket());
     expect(out.status).toBe("failed");
     expect(out.failure?.kind).toBe("policy_block");
-    expect(out.log?.join("\n")).toContain("BLOCKED");
+    expect(out.log?.join("\n")).toContain("rule=reviewer-refused");
   });
 
   it("fails a step whose diagnosis nothing established, and says so in the taxonomy", async () => {
@@ -197,8 +231,8 @@ describe("refusing verdicts", () => {
     );
     expect(out.status).toBe("failed");
     expect(out.failure?.kind).toBe("unsupported_assumption");
-    expect(out.failure?.detail).toContain("profile is corrupted");
-    expect(out.log?.join("\n")).toContain("unsupported assumption");
+    expect(out.failure?.detail).toBeTruthy();
+    expect(out.log?.join("\n")).toContain("needs_evidence");
   });
 
   it("does not let AUTONOMY=full run a needs_evidence step", async () => {

@@ -3,8 +3,9 @@ import { __testing } from "./knowledge";
 
 const { hostAllowedForFetch } = __testing;
 
-// kb.fetch_page pulls a whole page into the planner's prompt, and that planner's
-// output becomes commands on an employee's machine. This guard is the boundary.
+// fetchPageRaw pulls a whole page into the research distiller, whose output
+// reaches the planner, whose output becomes commands on an employee's machine.
+// The distiller is the semantic boundary; this is the network one.
 describe("hostAllowedForFetch", () => {
   it("allows vendor documentation hosts", () => {
     for (const url of [

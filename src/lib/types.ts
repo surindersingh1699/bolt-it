@@ -7,12 +7,31 @@ export type TicketStatus =
   | "resolved"
   | "escalated";
 
-export type ActionStatus = "pending" | "running" | "succeeded" | "failed" | "skipped";
+/**
+ * `simulated` is deliberately NOT a flavour of `succeeded`.
+ *
+ * On the simulation and shadow rungs a write is computed and never sent, so the
+ * step "completed" in the sense that nothing went wrong and in no sense at all
+ * regarding the employee's machine. Marking it succeeded would let
+ * `resolutionSupported` — which counts succeeded steps — close a ticket on work
+ * that never happened, which is the exact failure `no_effect` exists to prevent.
+ */
+export type ActionStatus =
+  | "pending"
+  | "running"
+  | "succeeded"
+  | "failed"
+  | "skipped"
+  | "simulated";
 
 // device = runs on the user's machine via the local agent.
 // backend = directory/account action in our own store.
 // reply = message to the user.
-export type ActionKind = "device" | "backend" | "knowledge" | "reply";
+//
+// There is no "knowledge" kind. External lookup is not an action taken on the
+// company's behalf and never was — it touches no system, changes nothing, and
+// needs no approval. It is a graph node now (research.ts), not a plan step.
+export type ActionKind = "device" | "backend" | "reply";
 
 export type StepRisk = "low" | "medium" | "high";
 export type StepApprovalMode = "auto" | "human";
@@ -48,6 +67,19 @@ export interface StepFailure {
   detail: string;
 }
 
+/**
+ * A file the reporter attached — in practice, a screenshot of the thing that is
+ * wrong. `key` is what Storage needs to fetch or delete it and cannot be derived
+ * from `url`, so both are kept.
+ */
+export interface Attachment {
+  key: string;
+  url: string;
+  mimeType: string;
+  bytes: number;
+  uploadedAt: number;
+}
+
 export interface Citation {
   source: "memory";
   title: string;
@@ -69,18 +101,8 @@ export interface PlanStep {
   approvalMode?: StepApprovalMode;
   riskReason?: string;
   riskSource?: RiskSource;
-  governancePromoted?: boolean;
   /** Set on every step that reaches `status: "failed"`. */
   failure?: StepFailure;
-}
-
-export interface CapabilityPrecedent {
-  workspaceId: string;
-  capability: string;
-  cleanExecutions: number;
-  lastApprovedAt: number;
-  lastApprovedBy?: string;
-  promotedAt?: number;
 }
 
 export interface Workspace {
@@ -96,6 +118,8 @@ export type AgentJobStatus =
   | "succeeded"
   /** Ran cleanly, but the device's own state never moved — not a fix. */
   | "no_effect"
+  /** Computed on a dry-run rung and never sent to the machine. */
+  | "simulated"
   | "failed";
 
 /** One `Get-*`/`pgrep` style read of device state, taken around an action. */
@@ -141,11 +165,30 @@ export interface ExecutionEnvelope {
   durationMs: number;
   /** Whether this command is a fix (must change state) or a read-only probe. */
   expectsChange: boolean;
+  /**
+   * True when this was computed on a dry-run rung and never sent to the machine.
+   *
+   * Load-bearing rather than cosmetic: without it `deriveJobStatus` reaches its
+   * `expectsChange && !changed` rule, which is true of EVERY simulated write, so
+   * a whole simulation run would read as universal `no_effect` failure.
+   */
+  simulated?: boolean;
+  /**
+   * Steps whose before-probe could not be satisfied because an earlier write in
+   * the same plan was simulated rather than performed. A known artifact of the
+   * rung, not a defect in the plan — recorded as a warning so a healthy plan is
+   * not routed to a human handoff by the act of dry-running it.
+   */
+  simulatedDependencyUnmet?: string[];
   probes: DeviceProbe[];
   commands: DeviceCommand[];
   effect: { changed: boolean; diff: EffectDiff[]; summary: string };
   /** Where the append-only copy lives on the device itself. */
   journalPath?: string;
+  /** Where the human-readable change record (with the undo command) lives. */
+  changeRecordPath?: string;
+  /** The exact command a technician runs to reverse this change. */
+  revertCommand?: string;
 }
 
 export interface AgentJob {
@@ -186,14 +229,14 @@ export interface Ticket {
   draftResponse?: string;
   plan: PlanStep[];
   citations: Citation[];
+  /** Screenshots the reporter attached. Read by the strategist on its first look. */
+  attachments?: Attachment[];
   confidence: number;
   resolvedByAi: boolean;
   resolutionTimeMs?: number;
   /** What the agent tried and concluded across troubleshooting attempts. */
   troubleshootingSummary?: string;
   attempts?: number;
-  /** Escalation depth reached: 1 service desk, 2 systems engineer, 3 escalation engineer. */
-  tier?: import("./tiers").Tier;
   /** Populated by /api/state from the in-memory trace store (not persisted). */
   trace?: import("./trace").TraceEvent[];
   /** Populated by /api/state from the in-memory chat transcript (not persisted). */

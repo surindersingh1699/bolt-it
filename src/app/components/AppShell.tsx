@@ -8,7 +8,7 @@ import { PublicUser } from "@/lib/types";
 import { useAppState } from "./StateProvider";
 import { AgentStatusBadge } from "./AgentStatusBadge";
 import { InboxView } from "./InboxView";
-import { MyTicketView } from "./MyTicketView";
+import { EmployeePortal } from "./EmployeePortal";
 import { FleetTab } from "./FleetTab";
 import { LogAnalyzer } from "./LogAnalyzer";
 import { MetricsView } from "./MetricsView";
@@ -22,13 +22,13 @@ interface AppShellProps {
 }
 
 export function AppShell({ currentUser, workspaceName }: AppShellProps) {
+  // Employees get the helpdesk portal full-bleed: a rail of their own tickets
+  // plus a per-ticket thread, so several issues can be reported and worked in
+  // parallel rather than flattened into one channel.
   if (!currentUser.isITStaff) {
     return (
-      <div className="flex h-screen max-h-screen flex-col overflow-hidden bg-white">
-        <TopBar currentUser={currentUser} workspaceName={workspaceName} showAgent={false} />
-        <main className="min-h-0 flex-1 overflow-y-auto">
-          <MyTicketView currentUser={currentUser} />
-        </main>
+      <div className="flex h-screen max-h-screen overflow-hidden bg-white">
+        <EmployeePortal currentUser={currentUser} />
       </div>
     );
   }

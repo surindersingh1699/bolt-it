@@ -32,7 +32,10 @@
 import { PlanStep, StepFailure, StepRisk, Ticket } from "./types";
 import { extractJsonObject } from "./integrations/json";
 import { gatewayChat } from "./integrations/gateway";
-import { isFullyAutonomous } from "./autonomy";
+import { executionMode } from "./autonomy";
+import { ReviewScore, decide, policyLogLine } from "./policy";
+import { capabilitySpec } from "./capabilities";
+import type { IntentVerdict } from "./intent";
 
 export const REVIEWER_MODEL = process.env.REVIEWER_MODEL || "anthropic/claude-sonnet-5";
 const REVIEW_TIMEOUT_MS = 15_000;
@@ -50,6 +53,19 @@ export interface StepReview {
   verdict: ReviewVerdict;
   risk: StepRisk;
   reason: string;
+  /**
+   * Where this review came from. Policy needs to tell three cases apart that all
+   * used to look like "ask_human": a floor it may never bypass, a model that
+   * asked for a person, and a reviewer that could not be reached at all. The
+   * last one is the dangerous one — it used to resolve to "auto" under full
+   * autonomy, i.e. the gate being down meant proceed.
+   */
+  source: "floor" | "model" | "unavailable";
+  /** The structural claims. Present only when a model actually answered. */
+  rollbackAvailable?: boolean;
+  verificationAvailable?: boolean;
+  leastPrivilege?: boolean;
+  blastRadius?: "low" | "medium" | "high";
 }
 
 // Capabilities the reviewer cannot wave through. Not a risk tier — a list of
@@ -88,12 +104,27 @@ const REVIEWER_PROMPT = `You are the safety reviewer for an IT support agent tha
 
 You are not reviewing whether the step is a GOOD fix. A different part of the system judges that. You are reviewing whether it is SAFE to run without a person watching.
 
+You do not make the final decision. A deterministic policy engine does, using the assessment you return. Report what you observe; do not argue for an outcome.
+
 Return ONLY JSON:
 {
   "verdict": "allow" | "ask_human" | "block" | "needs_evidence",
   "risk": "low" | "medium" | "high",
+  "rollbackAvailable": true | false,
+  "verificationAvailable": true | false,
+  "leastPrivilege": true | false,
+  "blastRadius": "low" | "medium" | "high",
   "reason": "one sentence, concrete, naming what you actually looked at"
 }
+
+THE STRUCTURAL FIELDS
+These are claims about the step that a person could check, which is why they are separate from your verdict.
+- "rollbackAvailable": could this be undone, either because the machine restores itself or because the prior state is captured first?
+- "verificationAvailable": is there a before/after reading that would show whether it actually worked?
+- "leastPrivilege": does it ask for no more access than the job needs?
+- "blastRadius": low = this employee's own session. medium = their whole machine. high = anything shared, or anything other people depend on.
+
+Notice there is no confidence field. Do not add one. An uncalibrated number is the easiest thing in this response for a hostile ticket to inflate, and the policy engine will not read it.
 
 VERDICTS
 - "allow": read-only, or a reversible change confined to the reporter's own session or machine. The employee could undo it themselves in under a minute.
@@ -177,10 +208,21 @@ async function askReviewer(
       parsed.risk === "low" || parsed.risk === "medium" || parsed.risk === "high"
         ? parsed.risk
         : "high";
+    const blast =
+      parsed.blastRadius === "low" || parsed.blastRadius === "medium" || parsed.blastRadius === "high"
+        ? parsed.blastRadius
+        : "high";
     return {
       verdict: parsed.verdict,
       risk,
       reason: typeof parsed.reason === "string" && parsed.reason.trim() ? parsed.reason : "no reason given",
+      source: "model",
+      // Each structural claim defaults to the pessimistic reading when the model
+      // omits it, so a truncated response cannot look safer than a complete one.
+      rollbackAvailable: parsed.rollbackAvailable === true,
+      verificationAvailable: parsed.verificationAvailable === true,
+      leastPrivilege: parsed.leastPrivilege === true,
+      blastRadius: blast,
     };
   } catch (err) {
     // Malformed JSON from the reviewer. Null here means reviewStep will fail
@@ -201,7 +243,7 @@ export async function reviewStep(
 ): Promise<StepReview> {
   // A reply carries no capability and changes nothing outside the thread.
   if (step.kind === "reply") {
-    return { verdict: "allow", risk: "low", reason: "reply: user-visible message only" };
+    return { verdict: "allow", risk: "low", reason: "reply: user-visible message only", source: "floor" };
   }
 
   if (step.capability && ALWAYS_ASK.has(step.capability)) {
@@ -209,6 +251,7 @@ export async function reviewStep(
       verdict: "ask_human",
       risk: "high",
       reason: `${step.capability} always requires a person — it invalidates the employee's credential and they cannot undo it`,
+      source: "floor",
     };
   }
 
@@ -218,6 +261,7 @@ export async function reviewStep(
       verdict: "ask_human",
       risk: "high",
       reason: `step targets ${foreign}, not the reporter (${ticket.reporterEmail}) — a person confirms any cross-account action`,
+      source: "floor",
     };
   }
 
@@ -227,9 +271,33 @@ export async function reviewStep(
       verdict: "ask_human",
       risk: "high",
       reason: "safety reviewer unavailable — failing closed to human approval",
+      source: "unavailable",
     };
   }
   return review;
+}
+
+/** Which floor, if any, produced this review — policy treats them differently. */
+function floorOf(step: PlanStep, review: StepReview): "always_ask" | "cross_account" | null {
+  if (review.source !== "floor") return null;
+  if (step.capability && ALWAYS_ASK.has(step.capability)) return "always_ask";
+  return review.verdict === "ask_human" ? "cross_account" : null;
+}
+
+/** Turn a review into the structural claims the policy engine reasons over. */
+function scoreOf(review: StepReview): ReviewScore | null {
+  // "unavailable" is the one case that must NOT become a score. A score means a
+  // reviewer looked; there was no reviewer.
+  if (review.source === "unavailable") return null;
+  return {
+    risk: review.risk,
+    rollbackAvailable: review.rollbackAvailable ?? false,
+    verificationAvailable: review.verificationAvailable ?? false,
+    leastPrivilege: review.leastPrivilege ?? false,
+    blastRadius: review.blastRadius ?? "high",
+    requiresHuman: review.verdict === "ask_human",
+    reasoning: [review.reason],
+  };
 }
 
 /**
@@ -238,54 +306,61 @@ export async function reviewStep(
  * path then escalates the ticket, which is the correct outcome for a step the
  * reviewer refused.
  */
-export async function reviewPlan(plan: PlanStep[], ticket: Ticket): Promise<PlanStep[]> {
+export async function reviewPlan(
+  plan: PlanStep[],
+  ticket: Ticket,
+  intent?: IntentVerdict | null,
+): Promise<PlanStep[]> {
   const executedSoFar = ticket.plan.filter((s) => s.status === "succeeded" || s.status === "failed");
-  const full = isFullyAutonomous();
+  const mode = executionMode();
+  const unexplained = new Set(intent?.unexplained ?? []);
 
   const reviews = await Promise.all(plan.map((step) => reviewStep(step, ticket, executedSoFar)));
 
   return plan.map((step, i) => {
     const review = reviews[i];
-    const refused = REFUSING.has(review.verdict);
 
-    // AUTONOMY=full: nothing waits for a person, so every "ask_human" runs —
-    // including the ALWAYS_ASK floor and the target-binding check, which both
-    // express themselves as ask_human.
-    //
-    // The refusing verdicts are deliberately NOT bypassed. Neither is a gate on
-    // autonomy. "block" is returned when a step does not follow from the ticket,
-    // which is the shape a successful prompt injection takes; "needs_evidence"
-    // is returned when a change rests on a diagnosis nothing established. There
-    // is no human to route either to, so bypassing would not remove a wait — it
-    // would just run the step the reviewer identified as wrong. A correct,
-    // evidenced step is never refused, so this costs no autonomy on real work.
-    const bypassed = full && review.verdict === "ask_human";
-    const approvalMode = review.verdict === "allow" || bypassed ? ("auto" as const) : ("human" as const);
+    // The reviewer reports; policy.ts decides. Everything that used to be
+    // resolved here — the autonomy bypass, the refusing verdicts, the floors —
+    // is now one call to a pure function with a truth table behind it.
+    const outcome = decide({
+      spec: capabilitySpec(step.capability),
+      kind: step.kind,
+      score: scoreOf(review),
+      refusal: REFUSING.has(review.verdict) ? (review.verdict as "block" | "needs_evidence") : null,
+      floor: floorOf(step, review),
+      intent: intent?.outcome ?? "clear",
+      intentUnexplained: unexplained.has(step.id),
+      mode,
+    });
 
-    const failure: StepFailure | undefined =
-      review.verdict === "block"
-        ? { kind: "policy_block", detail: review.reason }
-        : review.verdict === "needs_evidence"
-          ? { kind: "unsupported_assumption", detail: review.reason }
-          : undefined;
+    const refused = outcome.decision === "refuse";
+    const failure: StepFailure | undefined = refused
+      ? {
+          kind:
+            review.verdict === "needs_evidence"
+              ? "unsupported_assumption"
+              : outcome.rule === "unknown-capability"
+                ? "capability_missing"
+                : "policy_block",
+          detail: outcome.reason,
+        }
+      : undefined;
 
     return {
       ...step,
       risk: review.risk,
-      approvalMode,
-      riskReason: review.reason,
+      approvalMode: outcome.decision === "auto" ? ("auto" as const) : ("human" as const),
+      riskReason: outcome.reason,
       riskSource: "judge" as const,
       status: refused ? ("failed" as const) : step.status,
       ...(failure ? { failure } : {}),
       log: [
         ...(step.log ?? []),
-        review.verdict === "block"
-          ? `[Reviewer] BLOCKED (${REVIEWER_MODEL}): ${review.reason}`
-          : review.verdict === "needs_evidence"
-            ? `[Reviewer] REFUSED — unsupported assumption (${REVIEWER_MODEL}): ${review.reason}`
-            : bypassed
-              ? `[Reviewer] ask_human · ${review.risk} risk (${REVIEWER_MODEL}): ${review.reason} · AUTONOMY=full, running unapproved`
-              : `[Reviewer] ${review.verdict} · ${review.risk} risk (${REVIEWER_MODEL}): ${review.reason}`,
+        `[Reviewer] ${review.verdict} · ${review.risk} risk (${
+          review.source === "model" ? REVIEWER_MODEL : review.source
+        }): ${review.reason}`,
+        policyLogLine(outcome),
       ],
     };
   });

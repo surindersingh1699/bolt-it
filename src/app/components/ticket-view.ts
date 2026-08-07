@@ -190,7 +190,10 @@ export function avatarColor(seed: string): string {
  * in the escalation rate is not a cosmetic bug.
  */
 export function summarizeAgentMetrics(tickets: Ticket[]) {
-  const byTier: Record<number, number> = {};
+  // How many diagnostic looks a ticket needed. This is the number the
+  // architecture turns on: the whole bet is that one strong model with the
+  // machine's readings in hand needs fewer looks than a ladder of weaker ones.
+  const byLooks: Record<number, number> = {};
   const failureCounts = new Map<StepFailureKind, number>();
   const callTokens = new Map<string, number>();
   let tokens = 0;
@@ -199,7 +202,8 @@ export function summarizeAgentMetrics(tickets: Ticket[]) {
   let refused = 0;
 
   for (const t of tickets) {
-    byTier[t.tier ?? 1] = (byTier[t.tier ?? 1] ?? 0) + 1;
+    const looks = Math.min(t.attempts ?? 1, 4);
+    byLooks[looks] = (byLooks[looks] ?? 0) + 1;
 
     for (const s of t.plan) {
       steps += 1;
@@ -227,8 +231,8 @@ export function summarizeAgentMetrics(tickets: Ticket[]) {
     autonomous: tickets.filter((t) => t.status === "resolved" || t.status === "awaiting_confirmation").length,
     escalated: tickets.filter((t) => t.status === "escalated").length,
     awaitingApproval: tickets.filter((t) => t.status === "awaiting_approval").length,
-    deep: tickets.filter((t) => (t.tier ?? 1) === 3).length,
-    byTier,
+    multiLook: tickets.filter((t) => (t.attempts ?? 1) > 1).length,
+    byLooks,
     failures,
     failureTotal: failures.reduce((n, [, v]) => n + v, 0),
     byCall: [...callTokens.entries()].sort((a, b) => b[1] - a[1]),

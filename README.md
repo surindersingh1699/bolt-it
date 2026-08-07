@@ -76,7 +76,7 @@ Ten rehearsed scenarios with exact trigger phrases, tiered by realness, in [DEMO
 
 - In-memory graph checkpointer, trace store, and fleet — a process restart drops in-flight interrupts (tickets persist via InsForge). Production would use a Postgres checkpointer.
 - Single global device-agent heartbeat — one live agent at a time; jobs are not routed per-device yet.
-- No Slack integration. The Chat tab is the conversation surface.
+- No real Slack. The employee surface is our own Slack-shaped `#it-support` channel inside the app ([SlackView](src/app/components/SlackView.tsx)) — nothing leaves the machine, and there is no workspace to install into.
 - The device agent is copied to the machine by hand — no self-update channel.
 
 MIT
