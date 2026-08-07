@@ -49,7 +49,17 @@ export async function POST(req: Request) {
 export async function PUT(req: Request) {
   const session = await getCurrentSession().catch(() => null);
   if (!session) return NextResponse.json({ error: "unauthorized" }, { status: 401 });
-  await requireITStaff();
+
+  // requireITStaff throws. Left uncaught it becomes a 500 with an empty body,
+  // which tells the caller nothing about why they were refused.
+  try {
+    await requireITStaff();
+  } catch {
+    return NextResponse.json(
+      { error: "only IT staff can add a machine to the fleet" },
+      { status: 403 },
+    );
+  }
 
   const parsed = mintSchema.safeParse(await req.json().catch(() => ({})));
   if (!parsed.success) return NextResponse.json({ error: "invalid body" }, { status: 400 });
