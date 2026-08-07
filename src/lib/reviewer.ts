@@ -75,6 +75,10 @@ const ALWAYS_ASK: ReadonlySet<string> = new Set([
   // Invalidates the employee's working credential. A wrong call here locks a
   // person out of everything and cannot be undone from their side.
   "ad.reset_password",
+  // Takes effect only after a reboot and cannot be undone without another one,
+  // so the employee loses their network stack until they restart — which is not
+  // something to discover mid-call.
+  "fix.reset_winsock",
 ]);
 
 /** Emails appearing in a step's params, for the target-binding check. */

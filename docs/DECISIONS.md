@@ -568,3 +568,183 @@ come back once the two-model loop is proven on real tickets.
 category set and the write-path discipline later. The cost of leaving them is a
 header comment.
 
+
+---
+
+## 2026-08-07 — The dangerous thing is the reasoning chain, not the capability
+
+**Decision.** Add an `intentValidator` node between `operator` and `reviewSteps`
+— the only stage that sees a proposed plan as a whole.
+
+**Why.** Every other gate in this system rules on one step at a time.
+`reviewPlan` literally maps `reviewStep` across the plan in parallel. That
+leaves a class of attack no per-step check can see:
+
+    Ticket: "my computer is slow."
+    Plan:   fs.find "*.pem" · fs.grep "password" · fs.grep "secret" · fs.grep ".env"
+
+Every one of those steps is risk 0, read-only, acts on the reporter's own
+machine, and passes the reviewer, `ALWAYS_ASK`, target binding and
+`authorizeOperatorSteps`. Individually safe steps composing into a credential
+harvest. `DENIED_PATH` stopped the agent *reading* `~/.ssh/id_rsa`; nothing
+stopped it grepping all of `~` for `BEGIN PRIVATE KEY`.
+
+**The ordering is the design.** A query denylist runs first, in code, before any
+model call, so no wording in a ticket can argue past it — the same shape as
+`ALWAYS_ASK`. But it is documented as the *cheap floor*, not the gate.
+Normalization (NFKC, homoglyphs, percent/hex/unicode escapes, regex classes,
+separator collapse) raises the cost of evasion and does not close it: base64, a
+synonym, or a range-built regex all survive it. The responsiveness check is the
+real backstop, because it reasons about *fit to the reported symptom* rather
+than spelling. A test pins exactly that: a plan whose terms are all
+normalization-clean must still be held.
+
+**What we rejected.** Folding this into the reviewer prompt. "Is this step safe"
+and "does this plan follow from what was reported" are different questions, and
+a stage that answers both answers neither reliably.
+
+---
+
+## 2026-08-07 — The reviewer reports; a deterministic engine decides
+
+**Decision.** `policy.ts` — a pure, I/O-free `decide()`. The reviewer returns a
+structured assessment instead of a verdict.
+
+**Why.** The verdict *was* the decision, which put the final call inside a model
+reading a ticket body somebody else wrote. Now the whole policy is a truth table:
+predictable, testable without a network, and auditable to a named rule.
+
+**No confidence score, deliberately.** The obvious design is a confidence float
+with an auto-approve threshold. A model-reported confidence is uncalibrated and
+is precisely the number a prompt injection targets — "this is definitely safe,
+confidence 0.99" is a sentence an attacker can put in a ticket. Structure is
+checkable; a float is not.
+
+**Two behaviour changes, both tightening.**
+
+1. **An unreachable reviewer now refuses a change.** Under `AUTONOMY=full` the
+   fail-closed `ask_human` was bypassed like any other, so a reviewer outage
+   produced unsupervised writes on employees' machines. "The gate is down" must
+   never read as "go ahead". A read with no reviewer still only waits.
+2. **`ad.reset_password` can no longer run unattended on any rung.** It is risk
+   3, and `risk >= 3` is a structural floor. The one `ALWAYS_ASK` entry is now
+   enforced by a declared rule rather than by a special case autonomy was
+   permitted to skip.
+
+**Still bypassable under `full`:** cross-account target binding. Preserved from
+the old behaviour rather than chosen. Worth revisiting.
+
+---
+
+## 2026-08-07 — Capabilities become data, with provenance
+
+**Decision.** One `CapabilitySpec` record replaces the id list, the help map, the
+read-only set, `humanLabelFor`, the `commandForCapability` branch and the agent
+handler's implicit contract.
+
+**Why.** Six places is five chances to disagree, and the one that mattered was
+the read-only set — maintained by hand next to the id list, where getting it
+wrong in the permissive direction lets the cheap model author a mutation.
+`risk === 0` is now read-only by derivation.
+
+Two bugs the shape removed rather than fixed:
+
+- `commandForCapability` ended in `return "toggle_wifi"`, so an unmapped
+  capability cycled the employee's network adapter.
+- `sanitizeDnsServers` coerced an unparseable resolver list to `"empty"`, which
+  does not decline the action — it performs a *different* one.
+
+**Provenance** (`source`, `version`, `author`, `approvedBy`, `expiresAt`) is
+enforceable rather than decorative: policy refuses an expired lease and caps a
+`temporary` grant at risk 1, and every audit record names the spec version that
+ran. It also gives the model-proposes/human-merges path its record —
+`source: "approved_pr"`, `approvedBy: "Name, PR #N"` — without a runtime
+registry.
+
+**Still not building:** autonomous capability authoring. The defence offered for
+it ("the LLM never writes PowerShell, it asks for `windows.firewall.disable`")
+holds in the execution path and fails in the proposal path, which is where the
+danger is — writing the PowerShell *is* the proposal.
+
+---
+
+## 2026-08-07 — A write that did not take is undone, not left
+
+**Decision.** `executeJob` becomes probe → act → probe → rollback-if-unchanged.
+A rollback that itself fails escalates rather than being swallowed.
+
+**Why.** `no_effect` said "the machine did not change" and left it wherever it
+landed — possibly half-applied, with nobody told which half.
+
+**The subtlety worth recording.** The effect diff is computed over the
+*pre-rollback* probes only. Without that, a rollback appends an after-rollback
+probe, the diff walks consecutive pairs, and a SUCCESSFUL restore reads as "the
+machine changed" — i.e. as the fix having worked.
+
+---
+
+## 2026-08-07 — Simulation needed its own status, not a flavour of success
+
+**Decision.** `simulated` is a distinct `ActionStatus` and `AgentJobStatus`,
+checked in `deriveJobStatus` *before* the `no_effect` rule and excluded from
+`isRealSuccess`.
+
+**Why, twice over.** Both heads of this bite:
+
+1. Every simulated write satisfies `expectsChange && !changed`. Checked second,
+   a whole simulation run reports as universal `no_effect` failure and the rung
+   is useless for the thing it exists to do.
+2. `resolutionSupported` counts *succeeded* steps. Recording a dry run as
+   succeeded would let it close a ticket on work that never reached a machine —
+   the exact failure `no_effect` exists to prevent.
+
+A dependent step whose pre-probe cannot be satisfied logs
+`simulated_dependency_unmet` as a **warning**, not a `StepFailureKind`: it is an
+artifact of the rung, and treating it as a defect would route a healthy plan to
+a human handoff for the crime of being dry-run.
+
+`envelope.simulated` had been sitting in the zod schema, produced by nothing, and
+was about to be deleted as dead. It is now load-bearing.
+
+---
+
+## 2026-08-07 — One token per device
+
+**Decision.** Per-device tokens, jobs bound to a `deviceId`, and an atomic claim.
+
+**Why.** The agent polled `/api/agent/jobs` with no workspace filter; the route
+listed every queued job in every workspace, marked them claimed in a non-atomic
+loop, and returned the lot. `job.targetUserEmail` recorded whose machine the work
+was for and nothing ever compared it to who was asking. Any machine holding
+`LOCAL_AGENT_TOKEN` would read another employee's files, restart their apps and
+change their DNS — and the ticket would record it as having happened on the right
+machine.
+
+Only the SHA-256 of a token is stored, so a leak of the device table is not a
+leak of every agent's credential. The shared token survives behind
+`ALLOW_SHARED_AGENT_TOKEN=1` for the current dev machine, reports as `shared`
+rather than as a device, and can only drain jobs never bound to one.
+
+---
+
+## 2026-08-07 — Consent for a screenshot lives on the device
+
+**Decision.** `diag.screenshot` asks the employee on their own machine. Deny or
+timeout is `policy_block`; **no session to ask in is `dependency_unavailable`**.
+
+**Why on the device.** A gate in the cloud is subject to the autonomy rung. A
+dialog on the employee's own screen is not, and a screen can hold anything.
+
+**Why the two failures must stay distinct.** On Windows the agent runs as a
+scheduled task in session 0, which has its own invisible desktop. A dialog raised
+there does not error — it renders where nobody can see it, waits out its timeout,
+and returns no answer. Collapsing that into "the employee declined" would make a
+broken helper indistinguishable from a person saying no, on every screenshot,
+forever, with nobody ever finding it. Both the prompt and the capture go through
+one interactive-session helper, which is why it is one piece of work rather than
+two.
+
+The same class of silent failure appears in the capture itself: without Screen
+Recording permission, macOS `screencapture` writes a **black image and exits 0**.
+A size floor catches it, because uploading "successfully" would put a black
+rectangle in front of the planner and call it evidence.

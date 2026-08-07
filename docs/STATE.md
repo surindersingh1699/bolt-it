@@ -7,14 +7,32 @@
 
 ## Current focus
 
-Making the agent do **real, reversible fixes on the machine** and leave fingerprints, on top of the role-restructured graph. Landed on `feat/incident-memory-and-agent-observability`: observation before planning, a re-entrant planner, two depth rungs instead of three, web lookup behind a quarantine boundary (design → [ROLES.md](ROLES.md)), and now the first network-config write fixes plus a change-record/OS-log fingerprint layer verified against the agent's real execution path. Design → [ROLES.md](ROLES.md); the fix + fingerprint decisions are in [DECISIONS.md](DECISIONS.md) (2026-08-07).
+**The execution side.** Planning worked; execution was six scattered places pretending to be a capability, one shared bearer token, and a per-step gate that could not see a plan. Landed as three layers on `feat/incident-memory-and-agent-observability`: a governed executor (identity, intent validation, policy, audit, verification/rollback, redaction), a capability contract, and the capabilities themselves. Design → [ROLES.md](ROLES.md); decisions → [DECISIONS.md](DECISIONS.md) (2026-08-07).
+
+Pipeline is now: **Planner → Intent Validator → Reviewer → Policy → Capability → Executor → Verification**.
 
 ## Just landed (2026-08-07)
 
-- **`fix.set_dns_servers` + `fix.flush_dns`** — first device writes beyond restart/cache/wifi. Escalation tier only, reviewer-gated, fully reversible. Makes the "VPN connected but nothing resolves" scenario resolve for real with before/after DNS-probe proof.
-- **Fingerprint layer** — every state change writes `~/.bolt-it/changes/<ticketId>.jsonl` (with the exact undo command) and an OS-log line (Windows Application event log / macOS `~/Library/Logs/bolt-it.log`), alongside the existing journal. Revert command + change-record path ride back on the envelope onto the ticket.
-- **Dead code removed** — `CapabilityPrecedent` + `db.ts` precedent maps, `PlanStep.governancePromoted`, unused `isAgentJobCapability`.
-- **Verified on the real path** — `local-agent.mjs` is now importable (guarded entrypoint); a harness drives the actual `executeJob` for a DNS break→fix on this Mac. Same code the Windows VM runs. typecheck clean, 118 tests green.
+- **Capabilities are data** — one `CapabilitySpec` per capability with risk 0-4, a zod params schema, probe, rollback, reversibility, blast radius and provenance. `risk === 0` *is* read-only, derived rather than restated. `commandForCapability`'s `return "toggle_wifi"` fallthrough — which cycled the employee's adapter for any unmapped capability — is gone.
+- **Intent validator** — the first stage that sees a plan as a whole. Catches the harvest that no per-step gate can: four risk-0 reads on the reporter's own machine, each individually fine, together sweeping their disk for credentials under cover of "my computer is slow".
+- **Policy engine** — pure `decide()`, a truth table. Reviewer reports; policy decides. No confidence float, deliberately.
+- **Rollback on failed verification** — a write that did not take is undone rather than left half-applied.
+- **Per-device identity** — jobs carry a `deviceId` and go only to that machine. The agent used to receive every queued job in every workspace.
+- **Redaction everywhere** — was applied to 2 of 10 read paths; now the whole payload, both ends.
+- **Two writes removed from the read-only allowlist** — `wmic process call create` and `dscl . -create` both passed the old checks.
+- **Layer 2 capabilities** — `diag.screenshot` (device-side consent, Session 0 helper), `fs.find`, and six settings fixes with probes and rollbacks.
+
+## Two intentional behaviour changes
+
+- An **unreachable reviewer now refuses a change** instead of running it. Under `AUTONOMY=full` the fail-closed `ask_human` used to become `auto`, so the gate being down meant proceed.
+- **`ad.reset_password` can no longer run unattended on any rung**, because risk 3 is a structural floor rather than a bypassable `ALWAYS_ASK` entry.
+
+## Next
+
+1. **One real ticket end-to-end on a live machine.** Still unmet, and now the only thing that matters. Enrol this Mac, run `simulation` → `shadow` → `gated`, confirm the consent dialog is genuinely visible on the Windows VM (the Session 0 failure is silent by nature), and paste a revert command out of the change record to check it works.
+2. **Cross-account target binding is still bypassable under `AUTONOMY=full`.** Preserved from the old behaviour rather than chosen. Worth making non-bypassable.
+3. **Delete `.github/workflows/pdd-secrets-dispatch.yml`** and rotate — it sends all repo secrets to a caller-supplied `callback_url`.
+4. Collapse `data.ts` to InsForge only.
 
 ## Deferred, deliberately
 

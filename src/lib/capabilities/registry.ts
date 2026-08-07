@@ -342,6 +342,57 @@ export const CAPABILITY_SPECS: CapabilitySpec[] = [
     provenance: BUILT_IN,
   }),
   defineCapability({
+    id: "fs.find",
+    kind: "device",
+    label: "Find files by name on the machine",
+    help:
+      'params {"path", "glob"} — find files by NAME (not contents) under a directory. ' +
+      "Bounded: depth 4, 100 results. Scope it to where the problem is; a search rooted at the " +
+      "home directory needs a person and a search for credential material is refused outright",
+    risk: 0,
+    os: BOTH,
+    requiresElevation: false,
+    params: z
+      .object({
+        path: fsPath,
+        glob: z
+          .string()
+          .trim()
+          .min(1)
+          .max(120)
+          .refine((s) => !/["\r\n\0]/.test(s), "glob may not contain quotes, newlines or nulls"),
+      })
+      .strict(),
+    command: (p) => `fs_find --path "${p.path}" --pattern "${p.glob}"`,
+    probe: null,
+    rollback: null,
+    reversible: "self",
+    blastRadius: "device",
+    provenance: BUILT_IN,
+  }),
+  defineCapability({
+    id: "diag.screenshot",
+    kind: "device",
+    label: "Ask the employee for a screenshot of their screen",
+    help:
+      "no params — asks the employee ON THEIR OWN MACHINE for permission, then captures one " +
+      "screenshot. They see a dialog naming this ticket and can refuse. Use only when the problem " +
+      "is visual and they have not already attached one",
+    // Risk 0 by the ladder — it reads and changes nothing. The gate that matters
+    // for this one is not the risk number, it is the consent prompt on the
+    // device, which no autonomy rung can reach.
+    risk: 0,
+    os: BOTH,
+    requiresElevation: false,
+    params: emptyParams,
+    command: () => "screenshot",
+    probe: null,
+    rollback: null,
+    reversible: "self",
+    blastRadius: "user-session",
+    provenance: BUILT_IN,
+  }),
+  defineCapability({
     id: "ad.lookup_user",
     kind: "backend",
     label: "Look up the directory record",
@@ -444,7 +495,134 @@ export const CAPABILITY_SPECS: CapabilitySpec[] = [
     provenance: BUILT_IN,
   }),
 
+  defineCapability({
+    id: "fix.restart_service",
+    kind: "device",
+    label: "Restart a system service",
+    help: 'params {"service"} — restart a named OS service (spooler, dns client, etc.)',
+    risk: 1,
+    os: BOTH,
+    requiresElevation: true,
+    params: z
+      .object({
+        service: z
+          .string()
+          .trim()
+          .min(1)
+          .max(64)
+          .regex(/^[a-zA-Z0-9 ._-]+$/, "service name contains unsupported characters"),
+      })
+      .strict(),
+    command: (p) => `restart_service --service "${p.service}"`,
+    probe: "probeService",
+    rollback: "start the service again if it was left stopped",
+    reversible: "self",
+    blastRadius: "device",
+    provenance: BUILT_IN,
+  }),
+  defineCapability({
+    id: "fix.clear_print_queue",
+    kind: "device",
+    label: "Clear the stuck print queue",
+    help: "no params — stops the spooler, discards queued jobs, starts it again",
+    risk: 1,
+    os: BOTH,
+    requiresElevation: true,
+    params: emptyParams,
+    command: () => "clear_print_queue",
+    probe: "probePrintQueue",
+    rollback: "start the spooler again if it was left stopped",
+    reversible: "self",
+    blastRadius: "device",
+    provenance: BUILT_IN,
+  }),
+  defineCapability({
+    id: "fix.renew_dhcp_lease",
+    kind: "device",
+    label: "Release and renew the DHCP lease",
+    help: "no params — drops the current address and asks for a new one; briefly interrupts the link",
+    risk: 1,
+    os: BOTH,
+    requiresElevation: true,
+    params: emptyParams,
+    command: () => "renew_dhcp_lease",
+    probe: "probeDhcp",
+    rollback: "renew again if the interface was left without an address",
+    reversible: "self",
+    blastRadius: "device",
+    provenance: BUILT_IN,
+  }),
+  defineCapability({
+    id: "fix.gpupdate",
+    kind: "device",
+    label: "Re-apply group policy",
+    help: "Windows only, no params — forces a group policy refresh",
+    risk: 1,
+    os: ["win32"],
+    requiresElevation: true,
+    params: emptyParams,
+    command: () => "gpupdate",
+    probe: "probeGpo",
+    // Re-applying policy is what the domain would do on its own schedule; there
+    // is nothing to undo, and pretending otherwise would be worse than saying so.
+    rollback: null,
+    reversible: "self",
+    blastRadius: "device",
+    provenance: BUILT_IN,
+  }),
+
   // ---------------------------------------------------------------- risk 2
+  defineCapability({
+    id: "fix.set_proxy",
+    kind: "device",
+    label: "Set or clear the HTTP proxy",
+    help:
+      'params {"server"?, "port"?} — set the system HTTP/HTTPS proxy, or omit both to clear it. ' +
+      "Reversible: the existing proxy configuration is captured before the change",
+    risk: 2,
+    os: BOTH,
+    requiresElevation: true,
+    params: z
+      .object({
+        server: z
+          .string()
+          .trim()
+          .max(253)
+          .regex(/^[a-zA-Z0-9.-]*$/, "proxy host must be a bare hostname or IP")
+          .default(""),
+        port: z.number().int().min(1).max(65535).optional(),
+      })
+      .strict(),
+    command: (p) =>
+      p.server
+        ? `set_proxy --server "${p.server}" --port ${p.port ?? 8080}`
+        : `set_proxy --server "" --port 0`,
+    probe: "probeProxy",
+    rollback: "re-apply the proxy configuration captured by the before-probe",
+    reversible: "recorded",
+    blastRadius: "device",
+    provenance: BUILT_IN,
+  }),
+  defineCapability({
+    id: "fix.reset_winsock",
+    kind: "device",
+    label: "Reset the Windows network stack",
+    help:
+      "Windows only, no params — resets the Winsock catalog. Takes effect only after a REBOOT, " +
+      "and cannot be undone without one. Always requires a person",
+    risk: 2,
+    os: ["win32"],
+    requiresElevation: true,
+    params: emptyParams,
+    command: () => "reset_winsock",
+    probe: "probeWinsock",
+    // No undo that does not itself require a reboot. Declared honestly, which is
+    // what makes policy hold it for a person.
+    rollback: null,
+    reversible: "none",
+    blastRadius: "device",
+    provenance: BUILT_IN,
+  }),
   defineCapability({
     id: "fix.clear_app_cache",
     kind: "device",

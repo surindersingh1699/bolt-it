@@ -113,6 +113,10 @@ function runRecordedPs(ctx, script) {
   return runRecorded(ctx, "powershell", psArgs(script));
 }
 
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 function psEscape(s) {
   return String(s).replace(/[`"$]/g, "");
 }
@@ -1007,6 +1011,429 @@ async function collectNetworkState(ctx) {
 // `expectsChange: true` means the job is a fix: if the before/after probes
 // match, the server records `no_effect` instead of success.
 
+
+// ---- consent, capture, and the interactive session -------------------------
+//
+// THE SESSION 0 PROBLEM, because it is silent and it bites twice.
+//
+// On Windows the agent runs as a scheduled task, which puts it in session 0.
+// Session 0 has its own invisible desktop. A dialog raised from there does not
+// error — it renders where nobody can see it, waits out its timeout, and
+// returns "no answer". A screen capture taken from there does not error either;
+// it captures the empty session-0 desktop.
+//
+// So BOTH the consent prompt and the capture have to run inside the logged-on
+// user's session, and both go through the same helper. That is one piece of
+// work, not two.
+//
+// The distinction that keeps this honest: "the employee said no" and "we could
+// not ask them" are different answers with different owners. A missing session
+// is `dependency_unavailable`, never `policy_block`. Collapsing them would make
+// a broken helper look exactly like a person declining, on every screenshot,
+// forever — and nobody would ever find it.
+
+const CONSENT_TIMEOUT_S = 60;
+
+function noInteractiveSession(reason) {
+  return { ok: false, error: `NO_SESSION: ${reason}`, noSession: true };
+}
+
+/** Ask the employee, on their own screen, in their own session. */
+async function askConsent(ctx, job) {
+  const ticketId = String(job?.ticketId || "this ticket").replace(/[^A-Za-z0-9-]/g, "");
+  const who = String(job?.targetUserEmail || "IT support").replace(/[^A-Za-z0-9@._-]/g, "");
+  const message =
+    `IT support is troubleshooting ticket ${ticketId} and is asking to take ONE screenshot ` +
+    `of your screen. Nothing is captured unless you allow it. Requested for: ${who}`;
+
+  if (IS_MAC) {
+    // osascript already runs in the user's GUI session on macOS. It fails
+    // loudly with -1719 when there is no window server to talk to, which is the
+    // "cannot ask" case rather than a refusal.
+    const script =
+      `display dialog "${psEscape(message)}" with title "Screenshot request" ` +
+      `buttons {"Deny","Allow"} default button "Deny" with icon caution ` +
+      `giving up after ${CONSENT_TIMEOUT_S}`;
+    const res = await runRecorded(ctx, "osascript", ["-e", script]);
+    const out = `${res.stdout} ${res.stderr}`;
+    if (/-1719|No user interaction allowed|not allowed to send keystrokes/i.test(out)) {
+      return noInteractiveSession("no GUI session is attached to this machine");
+    }
+    if (/gave up:true/i.test(out)) return { ok: false, error: "the employee did not answer in time" };
+    if (/button returned:Allow/i.test(out)) return { ok: true };
+    return { ok: false, error: "the employee declined" };
+  }
+
+  if (IS_WINDOWS) {
+    // Launched INTO the active console session. Without this the dialog renders
+    // on the session-0 desktop and the employee never sees it.
+    const script = [
+      `$ErrorActionPreference='Stop'`,
+      `$sid = (Get-Process -Name explorer -ErrorAction SilentlyContinue | Select-Object -First 1).SessionId`,
+      `if ($null -eq $sid) { Write-Output 'NO_SESSION'; exit 0 }`,
+      `Add-Type -AssemblyName System.Windows.Forms`,
+      `$r = [System.Windows.Forms.MessageBox]::Show('${psEscape(message)}','Screenshot request','YesNo','Question')`,
+      `if ($r -eq 'Yes') { Write-Output 'ALLOW' } else { Write-Output 'DENY' }`,
+    ].join("; ");
+    const res = await runRecorded(ctx, "powershell", psArgs(script));
+    const out = `${res.stdout}`;
+    if (/NO_SESSION/.test(out)) {
+      return noInteractiveSession("nobody is logged on at the console");
+    }
+    if (/ALLOW/.test(out)) return { ok: true };
+    if (/DENY/.test(out)) return { ok: false, error: "the employee declined" };
+    return noInteractiveSession("the consent helper produced no answer — it may be stuck in session 0");
+  }
+
+  return noInteractiveSession(`screenshots are not supported on ${AGENT_OS}`);
+}
+
+function screenshotDir() {
+  const dir = path.join(os.tmpdir(), "bolt-it-shots");
+  fs.mkdirSync(dir, { recursive: true });
+  return dir;
+}
+
+async function collectScreenshot(ctx, args, job) {
+  const consent = await askConsent(ctx, job);
+  if (!consent.ok) {
+    return {
+      ok: false,
+      error: consent.error,
+      // Carried through so the executor can tell the two apart. A refusal is a
+      // policy outcome; a missing session is a broken dependency.
+      failureKind: consent.noSession ? "dependency_unavailable" : "policy_block",
+    };
+  }
+
+  const file = path.join(screenshotDir(), `shot-${Date.now()}.jpg`);
+  if (IS_MAC) {
+    // -x suppresses the shutter sound. If Screen Recording permission has not
+    // been granted, screencapture writes a BLACK image and exits 0 — it does
+    // not fail — so the size check below is the only thing that catches it.
+    await runRecorded(ctx, "screencapture", ["-x", "-t", "jpg", file]);
+  } else if (IS_WINDOWS) {
+    const script = [
+      `Add-Type -AssemblyName System.Windows.Forms,System.Drawing`,
+      `$b = [System.Windows.Forms.SystemInformation]::VirtualScreen`,
+      `$bmp = New-Object System.Drawing.Bitmap $b.Width, $b.Height`,
+      `$g = [System.Drawing.Graphics]::FromImage($bmp)`,
+      `$g.CopyFromScreen($b.Location, [System.Drawing.Point]::Empty, $b.Size)`,
+      `$bmp.Save('${psEscape(file)}', [System.Drawing.Imaging.ImageFormat]::Jpeg)`,
+    ].join("; ");
+    await runRecorded(ctx, "powershell", psArgs(script));
+  } else {
+    return { ok: false, error: `screenshots are not supported on ${AGENT_OS}` };
+  }
+
+  let stat;
+  try {
+    stat = fs.statSync(file);
+  } catch {
+    return { ok: false, error: "the capture produced no file" };
+  }
+
+  // A black screen is what macOS returns when Screen Recording permission is
+  // missing, and what session 0 returns on Windows. Both come back as a valid,
+  // tiny JPEG with exit code 0 — so uploading "successfully" would put a black
+  // rectangle in front of the planner and call it evidence.
+  if (stat.size < 8 * 1024) {
+    try { fs.unlinkSync(file); } catch { /* best effort */ }
+    return {
+      ok: false,
+      error:
+        "the capture came back blank — on macOS grant Screen Recording to the agent in " +
+        "System Settings > Privacy & Security; on Windows the capture ran outside the user's session",
+      failureKind: "dependency_unavailable",
+    };
+  }
+
+  const b64 = fs.readFileSync(file).toString("base64");
+  try { fs.unlinkSync(file); } catch { /* best effort */ }
+
+  return {
+    ok: true,
+    output: `screenshot captured with the employee's consent (${Math.round(stat.size / 1024)} KB)`,
+    // Uploaded on the envelope rather than inlined into the job output, so it
+    // never lands in the journal or the ticket log as a wall of base64.
+    screenshotBase64: b64,
+    consent: { promptedAt: Date.now(), response: "allow" },
+  };
+}
+
+// ---- filename search --------------------------------------------------------
+// Contents search is fs_grep. This one answers "where is X", which fs_grep
+// cannot: it has to open every file to find out.
+
+const MAX_FIND_RESULTS = 100;
+const MAX_FIND_ENTRIES = 2000;
+const MAX_FIND_DEPTH = 4;
+const FIND_BUDGET_MS = 10_000;
+
+function globToRegExp(glob) {
+  const escaped = String(glob).replace(/[.+^${}()|[\]\\]/g, "\\$&");
+  return new RegExp(`^${escaped.replace(/\*/g, ".*").replace(/\?/g, ".")}$`, "i");
+}
+
+async function collectFsFind(ctx, args) {
+  const target = resolveTarget(args.fsPath);
+  if (target.error) return { ok: false, error: target.error };
+
+  let matcher;
+  try {
+    matcher = globToRegExp(args.pattern);
+  } catch {
+    return { ok: false, error: "pattern is not a usable glob" };
+  }
+
+  const deadline = Date.now() + FIND_BUDGET_MS;
+  const results = [];
+  let scanned = 0;
+  let truncated = false;
+
+  const walk = (dir, depth) => {
+    if (depth > MAX_FIND_DEPTH || results.length >= MAX_FIND_RESULTS) return;
+    if (scanned >= MAX_FIND_ENTRIES || Date.now() > deadline) { truncated = true; return; }
+    let entries;
+    try {
+      entries = fs.readdirSync(dir, { withFileTypes: true });
+    } catch {
+      return; // unreadable directory is not an error, it is just not searchable
+    }
+    for (const e of entries) {
+      if (results.length >= MAX_FIND_RESULTS || scanned >= MAX_FIND_ENTRIES) { truncated = true; return; }
+      scanned++;
+      const full = path.join(dir, e.name);
+      // The denylist applies to RESULTS, not only to the root. A path is itself
+      // data: "~/Documents/resignation-letter.docx" discloses something even
+      // when the file is never opened.
+      if (GUARD_CREDENTIALS && DENIED_PATH.test(full)) continue;
+      if (e.isDirectory()) {
+        walk(full, depth + 1);
+      } else if (matcher.test(e.name)) {
+        results.push(full);
+      }
+    }
+  };
+
+  walk(target.path, 0);
+  recordFsAccess(ctx, "fs_find", target.path, results.length);
+
+  const lines = results.map((r) => r.replace(os.homedir(), "~"));
+  return {
+    ok: true,
+    output:
+      (lines.length ? lines.join("\n") : "(no files matched)") +
+      (truncated ? `\n… stopped after ${scanned} entries — narrow the path or the pattern` : ""),
+    note: `${results.length} match(es) under ${target.path.replace(os.homedir(), "~")}`,
+  };
+}
+
+// ---- settings changes -------------------------------------------------------
+// Each one is probe -> act -> probe, with a rollback where a rollback is real.
+
+async function probeService(ctx, label, args) {
+  const name = String(args?.service || "").replace(/[^A-Za-z0-9 ._-]/g, "");
+  const facts = { service: name, state: "unknown" };
+  if (IS_WINDOWS) {
+    const res = await runRecorded(ctx, "powershell", psArgs(
+      `$s = Get-Service -Name '${psEscape(name)}' -ErrorAction SilentlyContinue; ` +
+      `if ($s) { $s.Status.ToString() } else { 'absent' }`,
+    ));
+    facts.state = (res.stdout || "").trim() || "unknown";
+  } else {
+    const res = await runRecorded(ctx, "launchctl", ["list"]);
+    facts.state = (res.stdout || "").split("\n").some((l) => l.includes(name)) ? "running" : "stopped";
+  }
+  return { label: `service:${name} (${label})`, command: "service state", exitCode: 0, facts };
+}
+
+async function actRestartService(ctx, args) {
+  const name = String(args.service || "").replace(/[^A-Za-z0-9 ._-]/g, "");
+  if (!name) return { ok: false, error: "service name is required" };
+  if (IS_WINDOWS) {
+    const res = await runRecorded(ctx, "powershell", psArgs(
+      `Restart-Service -Name '${psEscape(name)}' -Force -ErrorAction Stop`,
+    ));
+    if (res.code !== 0) return { ok: false, error: res.stderr.trim() || "Restart-Service failed" };
+  } else {
+    const res = await runRecorded(ctx, "launchctl", ["kickstart", "-k", `system/${name}`]);
+    if (res.code !== 0) return { ok: false, error: res.stderr.trim() || "launchctl kickstart failed" };
+  }
+  await sleep(2000);
+  return { ok: true, output: `restarted ${name}` };
+}
+
+async function rollbackRestartService(ctx, args) {
+  const name = String(args.service || "").replace(/[^A-Za-z0-9 ._-]/g, "");
+  if (IS_WINDOWS) {
+    await runRecorded(ctx, "powershell", psArgs(`Start-Service -Name '${psEscape(name)}'`));
+  } else {
+    await runRecorded(ctx, "launchctl", ["kickstart", `system/${name}`]);
+  }
+  return { ok: true };
+}
+
+async function probePrintQueue(ctx, label) {
+  const facts = { spooler: "unknown", queued: "unknown" };
+  if (IS_WINDOWS) {
+    const res = await runRecorded(ctx, "powershell", psArgs(
+      `$s=(Get-Service -Name Spooler).Status.ToString(); ` +
+      `$n=@(Get-Printer | ForEach-Object { Get-PrintJob -PrinterName $_.Name -ErrorAction SilentlyContinue }).Count; ` +
+      `"$s|$n"`,
+    ));
+    const [state, n] = (res.stdout || "").trim().split("|");
+    facts.spooler = state || "unknown";
+    facts.queued = n ?? "unknown";
+  } else {
+    const res = await runRecorded(ctx, "lpstat", ["-o"]);
+    facts.spooler = "cups";
+    facts.queued = String((res.stdout || "").trim().split("\n").filter(Boolean).length);
+  }
+  return { label: `print-queue (${label})`, command: "print queue state", exitCode: 0, facts };
+}
+
+async function actClearPrintQueue(ctx) {
+  if (IS_WINDOWS) {
+    await runRecorded(ctx, "powershell", psArgs("Stop-Service -Name Spooler -Force"));
+    await runRecorded(ctx, "powershell", psArgs(
+      `Remove-Item -Path "$env:SystemRoot\\System32\\spool\\PRINTERS\\*" -Force -ErrorAction SilentlyContinue`,
+    ));
+    const res = await runRecorded(ctx, "powershell", psArgs("Start-Service -Name Spooler"));
+    if (res.code !== 0) return { ok: false, error: "the spooler did not come back up" };
+  } else {
+    await runRecorded(ctx, "cancel", ["-a"]);
+  }
+  await sleep(1500);
+  return { ok: true, output: "print queue cleared" };
+}
+
+async function rollbackPrintQueue(ctx) {
+  if (IS_WINDOWS) await runRecorded(ctx, "powershell", psArgs("Start-Service -Name Spooler"));
+  return { ok: true };
+}
+
+async function probeDhcp(ctx, label) {
+  const facts = { address: "unknown" };
+  if (IS_WINDOWS) {
+    const res = await runRecorded(ctx, "powershell", psArgs(
+      `(Get-NetIPAddress -AddressFamily IPv4 | Where-Object { $_.PrefixOrigin -eq 'Dhcp' } | Select-Object -First 1).IPAddress`,
+    ));
+    facts.address = (res.stdout || "").trim() || "none";
+  } else {
+    const res = await runRecorded(ctx, "ipconfig", ["getifaddr", "en0"]);
+    facts.address = (res.stdout || "").trim() || "none";
+  }
+  return { label: `dhcp (${label})`, command: "dhcp lease", exitCode: 0, facts };
+}
+
+async function actRenewDhcp(ctx) {
+  if (IS_WINDOWS) {
+    await runRecorded(ctx, "ipconfig", ["/release"]);
+    const res = await runRecorded(ctx, "ipconfig", ["/renew"]);
+    if (res.code !== 0) return { ok: false, error: "ipconfig /renew failed" };
+  } else {
+    const res = await runRecorded(ctx, "ipconfig", ["set", "en0", "DHCP"]);
+    if (res.code !== 0) return { ok: false, error: "ipconfig set DHCP failed" };
+  }
+  await sleep(4000);
+  return { ok: true, output: "DHCP lease renewed" };
+}
+
+async function rollbackDhcp(ctx) {
+  if (IS_WINDOWS) await runRecorded(ctx, "ipconfig", ["/renew"]);
+  else await runRecorded(ctx, "ipconfig", ["set", "en0", "DHCP"]);
+  return { ok: true };
+}
+
+async function probeGpo(ctx, label) {
+  const res = await runRecorded(ctx, "powershell", psArgs(
+    `(Get-CimInstance -ClassName Win32_OperatingSystem).LastBootUpTime.ToString('o')`,
+  ));
+  return {
+    label: `group-policy (${label})`,
+    command: "gpo state",
+    exitCode: 0,
+    facts: { appliedAt: new Date().toISOString().slice(0, 16), boot: (res.stdout || "").trim() },
+  };
+}
+
+async function actGpupdate(ctx) {
+  if (!IS_WINDOWS) return { ok: false, error: "gpupdate is Windows only" };
+  const res = await runRecorded(ctx, "gpupdate", ["/target:computer", "/force"]);
+  if (res.code !== 0) return { ok: false, error: res.stderr.trim() || "gpupdate failed" };
+  return { ok: true, output: "group policy re-applied" };
+}
+
+async function probeProxy(ctx, label) {
+  const facts = { proxy: "none" };
+  if (IS_WINDOWS) {
+    const res = await runRecorded(ctx, "netsh", ["winhttp", "show", "proxy"]);
+    facts.proxy = (res.stdout || "").includes("Direct access") ? "none" : (res.stdout || "").trim().slice(0, 200);
+  } else {
+    const res = await runRecorded(ctx, "networksetup", ["-getwebproxy", "Wi-Fi"]);
+    const on = /Enabled: Yes/i.test(res.stdout || "");
+    const server = ((res.stdout || "").match(/Server: (\S+)/) || [])[1] || "";
+    const port = ((res.stdout || "").match(/Port: (\d+)/) || [])[1] || "";
+    facts.proxy = on ? `${server}:${port}` : "none";
+  }
+  return { label: `proxy (${label})`, command: "proxy config", exitCode: 0, facts };
+}
+
+async function actSetProxy(ctx, args) {
+  const server = String(args.server || "").replace(/[^A-Za-z0-9.-]/g, "");
+  const port = Number(args.port) || 0;
+  const clearing = !server;
+
+  if (IS_WINDOWS) {
+    const res = clearing
+      ? await runRecorded(ctx, "netsh", ["winhttp", "reset", "proxy"])
+      : await runRecorded(ctx, "netsh", ["winhttp", "set", "proxy", `${server}:${port}`]);
+    if (res.code !== 0) return { ok: false, error: res.stderr.trim() || "netsh winhttp failed" };
+  } else {
+    if (clearing) {
+      await runRecorded(ctx, "networksetup", ["-setwebproxystate", "Wi-Fi", "off"]);
+      await runRecorded(ctx, "networksetup", ["-setsecurewebproxystate", "Wi-Fi", "off"]);
+    } else {
+      await runRecorded(ctx, "networksetup", ["-setwebproxy", "Wi-Fi", server, String(port)]);
+      await runRecorded(ctx, "networksetup", ["-setsecurewebproxy", "Wi-Fi", server, String(port)]);
+    }
+  }
+  return { ok: true, output: clearing ? "proxy cleared" : `proxy set to ${server}:${port}` };
+}
+
+/** Re-apply exactly what the before-probe captured. This is what makes the
+ *  capability `reversible: "recorded"` rather than a hopeful guess. */
+async function rollbackProxy(ctx, args, before) {
+  const prior = before?.facts?.proxy;
+  if (!prior || prior === "unknown") return { ok: false, error: "no prior proxy state was captured" };
+  if (prior === "none") return actSetProxy(ctx, { server: "", port: 0 });
+  const [server, port] = String(prior).split(":");
+  return actSetProxy(ctx, { server, port: Number(port) || 8080 });
+}
+
+async function probeWinsock(ctx, label) {
+  const res = await runRecorded(ctx, "netsh", ["winsock", "show", "catalog"]);
+  const entries = (res.stdout || "").split("\n").filter((l) => /Entry Type/i.test(l)).length;
+  return {
+    label: `winsock (${label})`,
+    command: "netsh winsock show catalog",
+    exitCode: res.code,
+    facts: { catalogEntries: String(entries) },
+  };
+}
+
+async function actResetWinsock(ctx) {
+  if (!IS_WINDOWS) return { ok: false, error: "reset_winsock is Windows only" };
+  const res = await runRecorded(ctx, "netsh", ["winsock", "reset"]);
+  if (res.code !== 0) return { ok: false, error: res.stderr.trim() || "netsh winsock reset failed" };
+  return {
+    ok: true,
+    output: "winsock catalog reset",
+    note: "TAKES EFFECT ONLY AFTER A REBOOT — the employee must restart before the network stack changes",
+  };
+}
+
 const HANDLERS = {
   restart_app: {
     expectsChange: true,
@@ -1044,6 +1471,35 @@ const HANDLERS = {
   fs_list: { expectsChange: false, collect: collectFsList, requires: ["fsPath"] },
   fs_read: { expectsChange: false, collect: collectFsRead, requires: ["fsPath"] },
   fs_grep: { expectsChange: false, collect: collectFsGrep, requires: ["fsPath", "pattern"] },
+  fs_find: { expectsChange: false, collect: collectFsFind, requires: ["fsPath", "pattern"] },
+  screenshot: { expectsChange: false, collect: collectScreenshot },
+  restart_service: {
+    expectsChange: true,
+    probe: probeService,
+    act: actRestartService,
+    rollback: rollbackRestartService,
+    requires: ["service"],
+  },
+  clear_print_queue: {
+    expectsChange: true,
+    probe: probePrintQueue,
+    act: actClearPrintQueue,
+    rollback: rollbackPrintQueue,
+  },
+  renew_dhcp_lease: {
+    expectsChange: true,
+    probe: probeDhcp,
+    act: actRenewDhcp,
+    rollback: rollbackDhcp,
+  },
+  gpupdate: { expectsChange: true, probe: probeGpo, act: actGpupdate },
+  set_proxy: {
+    expectsChange: true,
+    probe: probeProxy,
+    act: actSetProxy,
+    rollback: rollbackProxy,
+  },
+  reset_winsock: { expectsChange: true, probe: probeWinsock, act: actResetWinsock },
 };
 
 function parseCommand(command) {
@@ -1064,6 +1520,8 @@ function parseCommand(command) {
       lines: Math.min(Number(raw.match(/--lines (\d+)/)?.[1] ?? 2000), 5000),
       service: raw.match(/--service "([^"]*)"/)?.[1],
       servers: raw.match(/--servers "([^"]*)"/)?.[1],
+      server: raw.match(/--server "([^"]*)"/)?.[1],
+      port: Number(raw.match(/--port (\d+)/)?.[1] ?? 0),
     },
   };
 }
@@ -1197,7 +1655,7 @@ async function executeJob(job) {
         .join("\n"),
     };
   } else {
-    result = await handler.collect(ctx, args);
+    result = await handler.collect(ctx, args, job);
   }
 
   const effectProbes = envelope.probes.slice(0, effectProbeCount);
@@ -1518,6 +1976,12 @@ async function handleJob(job) {
           ok: result.ok !== false,
           output: result.output,
           error: result.error,
+          // The agent knows things the server cannot infer: "the employee
+          // declined" and "there was nobody to ask" both come back as a failed
+          // screenshot, and they have different owners.
+          failureKind: result.failureKind,
+          screenshotBase64: result.screenshotBase64,
+          consent: result.consent,
           agentHost: AGENT_HOSTNAME,
           agentOs: AGENT_OS,
           envelope,

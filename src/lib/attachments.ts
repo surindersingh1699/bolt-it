@@ -79,6 +79,44 @@ export async function uploadAttachment(ticketId: string, file: File): Promise<Up
 }
 
 /**
+ * Store a screenshot the device agent captured, with the employee's consent.
+ *
+ * Same PRIVATE bucket as the reporter's own attachments, and deliberately not a
+ * new one: a screenshot of somebody's desktop is at least as sensitive as one
+ * they chose to send, and there is no version of this that belongs anywhere
+ * public.
+ *
+ * Never inlined into the job output or the device journal on the way here — a
+ * base64 image in a log line is unreadable, unbounded, and impossible to delete
+ * afterwards.
+ */
+export async function storeAgentScreenshot(
+  ticketId: string,
+  base64: string,
+): Promise<{ key: string; bytes: number } | null> {
+  const insforge = getInsforge();
+  if (!insforge) return null;
+
+  let bytes: Buffer;
+  try {
+    bytes = Buffer.from(base64, "base64");
+  } catch {
+    return null;
+  }
+  if (bytes.length === 0 || bytes.length > MAX_ATTACHMENT_BYTES) return null;
+
+  const key = `${ticketId}/agent-${Date.now()}-screenshot.jpg`;
+  try {
+    const file = new File([new Uint8Array(bytes)], "screenshot.jpg", { type: "image/jpeg" });
+    const { data, error } = await insforge.storage.from(ATTACHMENT_BUCKET).upload(key, file);
+    if (error || !data) return null;
+    return { key: data.key, bytes: bytes.length };
+  } catch {
+    return null;
+  }
+}
+
+/**
  * Fetch attachments back as data URIs for a model call.
  *
  * Capped at MAX_ATTACHMENTS_PER_CALL: three screenshots of the same error are

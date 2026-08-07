@@ -137,7 +137,7 @@ The drafting contract itself lives in [draft.ts](../src/lib/integrations/draft.t
 
 The agent is copied onto the target machine by hand. There is no HTTP-served copy and no self-update: an unsigned update channel that also served a token-bearing `setup.ps1` was not worth the convenience.
 
-Auth is a single shared bearer token (`LOCAL_AGENT_TOKEN`). One agent at a time; jobs are not routed per-device.
+Auth is one token per device, traded for a single-use enrollment code and stored as a SHA-256. Jobs carry a `deviceId` and are only handed to that machine. The shared `LOCAL_AGENT_TOKEN` survives behind `ALLOW_SHARED_AGENT_TOKEN=1` and can only drain jobs never bound to a device.
 
 ---
 
@@ -159,5 +159,5 @@ Auth is a single shared bearer token (`LOCAL_AGENT_TOKEN`). One agent at a time;
 ## 9. Known gaps
 
 - `MemorySaver` is in-memory — a restart drops in-flight interrupts. `python-rebuild` uses a Postgres checkpointer.
-- No tests. The safety rules in §5 are enforced by review only.
+- 357 tests. The safety rules in §5 are enforced by policy.test.ts, reviewer.gate.test.ts, intent.test.ts and registry.test.ts.
 - [data.ts](../src/lib/data.ts) carries ~340 lines of mechanical row↔object mapping and repeats the `isInsforgeEnabled()` branch in ~30 functions.

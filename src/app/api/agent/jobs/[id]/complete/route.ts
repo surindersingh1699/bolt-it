@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { redactDeep, redactSecrets } from "@/lib/redact";
+import { storeAgentScreenshot } from "@/lib/attachments";
 import { z } from "zod";
 import { getAgentJob, updateAgentJob, updateStep } from "@/lib/data";
 import { deriveJobStatus, formatProofLines } from "@/lib/evidence";
@@ -80,6 +81,25 @@ const bodySchema = z.object({
   agentHost: z.string().max(253).optional(),
   agentOs: z.string().max(200).optional(),
   envelope: envelopeSchema.optional(),
+  /**
+   * The agent's own classification of a failure.
+   *
+   * The device knows things the server cannot infer. A screenshot that did not
+   * happen is either "the employee declined" (policy_block) or "there was
+   * nobody to ask, because the helper never reached their session"
+   * (dependency_unavailable). Those have different owners, and collapsing them
+   * would make a broken Session 0 helper look exactly like a person saying no —
+   * on every screenshot, forever, with nobody ever finding it.
+   */
+  failureKind: z.enum(["policy_block", "dependency_unavailable", "execution"]).optional(),
+  /** Base64 JPEG, uploaded to the private bucket and never persisted inline. */
+  screenshotBase64: z.string().max(12_000_000).optional(),
+  consent: z
+    .object({
+      promptedAt: z.number(),
+      response: z.enum(["allow", "deny", "timeout"]),
+    })
+    .optional(),
 });
 
 export async function POST(req: Request, { params }: Params) {
@@ -116,9 +136,32 @@ export async function POST(req: Request, { params }: Params) {
   };
   await updateAgentJob(id, patch);
 
+  // A screenshot goes to the same PRIVATE bucket as an employee's own
+  // attachment, never inline into the job output or the device journal — a
+  // base64 image in a log line is both useless to read and impossible to delete
+  // later.
+  const extraLog: string[] = [];
+  if (body.screenshotBase64) {
+    const stored = await storeAgentScreenshot(job.ticketId, body.screenshotBase64).catch(() => null);
+    extraLog.push(
+      stored
+        ? `[Screenshot] Captured with the employee's consent and stored privately (${Math.round(stored.bytes / 1024)} KB)`
+        : `[Screenshot] Captured but could not be stored — not attaching`,
+    );
+  }
+  if (body.consent) {
+    extraLog.push(
+      `[Consent] The employee was asked on their own machine at ` +
+        `${new Date(body.consent.promptedAt).toISOString()} and answered "${body.consent.response}"`,
+    );
+  }
+
   if (job.stepId) {
     await updateStep(job.ticketId, job.stepId, {
-      log: formatProofLines({ ...job, ...patch }),
+      log: [...formatProofLines({ ...job, ...patch }), ...extraLog],
+      ...(body.failureKind && body.ok === false
+        ? { failure: { kind: body.failureKind, detail: redactSecrets(body.error ?? "") || "device reported a failure" } }
+        : {}),
     });
   }
 
