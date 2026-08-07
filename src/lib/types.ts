@@ -213,6 +213,17 @@ export interface AgentJob {
   stepId?: string;
   kind: "collect_logs" | "network_probe" | "app_diagnostic" | "system_info";
   targetUserEmail: string;
+  /**
+   * Which machine this job is FOR. Enforced at claim time.
+   *
+   * Before this existed, `targetUserEmail` was the only statement of intent and
+   * nothing checked it: the agent polled with no workspace filter and received
+   * every queued job in every workspace, so any holder of the shared token
+   * executed other employees' jobs on the wrong machine.
+   */
+  deviceId?: string;
+  /** Denormalized for the audit log, so a job record names the host by itself. */
+  deviceHostname?: string;
   instructions: string;
   allowlistedCommand: string;
   status: AgentJobStatus;
@@ -318,6 +329,15 @@ export interface Device {
   agentVersion?: string;
   claimedAt?: number;
   claimedBy?: string;
+  /**
+   * SHA-256 of this device's own agent token. The token itself is shown once at
+   * enrollment and never stored — a leak of this table must not be a leak of
+   * every agent's credential.
+   */
+  tokenHash?: string;
+  enrolledAt?: number;
+  /** Set to stop a machine being able to claim anything, without deleting it. */
+  revokedAt?: number;
 }
 
 export interface Session {

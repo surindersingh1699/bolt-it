@@ -185,9 +185,41 @@ class ITDB {
 
   updateDevice(id: string, patch: Partial<Device>) {
     const existing = this.devices.get(id);
-    if (!existing) return;
+    // Enrollment creates a device that does not exist yet, so this upserts when
+    // the patch is complete enough to stand on its own.
+    if (!existing) {
+      if (patch.id && patch.workspaceId && patch.hostname) {
+        this.devices.set(id, patch as Device);
+        this.emit();
+      }
+      return;
+    }
     this.devices.set(id, { ...existing, ...patch });
     this.emit();
+  }
+
+  getDeviceById(id: string): Device | undefined {
+    return this.devices.get(id) ?? Array.from(this.devices.values()).find((d) => d.id === id);
+  }
+
+  /**
+   * Compare-and-swap a job from queued to claimed.
+   *
+   * Replaces a read-then-write loop that had no atomicity at all: two agents
+   * polling at once both saw `queued` and both got the job. Returns null when
+   * the claim was lost, so the caller hands out nothing rather than a job
+   * somebody else is already running.
+   */
+  claimAgentJob(id: string, deviceId?: string): AgentJob | null {
+    const job = this.agentJobs.get(id);
+    if (!job || job.status !== "queued") return null;
+    // A job names the machine it is for. Handing it to any other machine is the
+    // bug this whole path exists to close.
+    if (job.deviceId && deviceId && job.deviceId !== deviceId) return null;
+    const claimed: AgentJob = { ...job, status: "claimed", claimedAt: Date.now(), updatedAt: Date.now() };
+    this.agentJobs.set(id, claimed);
+    this.emit();
+    return claimed;
   }
 
   clearTicketsForWorkspace(workspaceId: string): { tickets: number; agentJobs: number } {

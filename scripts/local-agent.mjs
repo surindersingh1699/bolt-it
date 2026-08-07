@@ -7,7 +7,11 @@ import { fileURLToPath } from "node:url";
 import { redactDeep, redactSecrets } from "./redact.mjs";
 
 const appUrl = process.env.IT_SUPPORT_APP_URL || "http://localhost:3000";
-const token = process.env.LOCAL_AGENT_TOKEN;
+// A per-device token, minted by POST /api/agent/enroll and stored in the
+// machine's own ACL-protected config. Falls back to the shared token, which the
+// server only accepts when ALLOW_SHARED_AGENT_TOKEN=1 and which cannot be
+// routed to a specific machine — enroll properly and drop it.
+const token = process.env.LOCAL_AGENT_DEVICE_TOKEN || process.env.LOCAL_AGENT_TOKEN;
 const intervalMs = Number(process.env.LOCAL_AGENT_POLL_MS || 3000);
 const speak = process.env.LOCAL_AGENT_SPEAK === "1";
 

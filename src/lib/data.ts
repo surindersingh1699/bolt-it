@@ -649,6 +649,10 @@ export async function updateDevice(id: string, patch: Partial<Device>): Promise<
   db.updateDevice(id, patch);
 }
 
+export async function getDeviceById(id: string): Promise<Device | undefined> {
+  return db.getDeviceById(id);
+}
+
 // Agent jobs
 
 export async function insertAgentJob(job: AgentJob): Promise<void> {
@@ -707,6 +711,17 @@ export async function listAgentJobs(
     }
   }
   return db.listAgentJobs(workspaceId, status);
+}
+
+/**
+ * Claim a queued job for one device, atomically.
+ *
+ * The route used to list queued jobs and then loop calling updateAgentJob on
+ * each — no compare-and-swap, so two agents polling at the same moment both saw
+ * `queued` and both received the work. Returns null when the claim was lost.
+ */
+export async function claimAgentJob(id: string, deviceId?: string): Promise<AgentJob | null> {
+  return db.claimAgentJob(id, deviceId);
 }
 
 export async function updateAgentJob(id: string, patch: Partial<AgentJob>): Promise<void> {

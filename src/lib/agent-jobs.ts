@@ -1,20 +1,25 @@
 import { randomBytes } from "crypto";
 import { insertAgentJob, updateStep } from "./data";
 import { buildCommand, capabilitySpec, humanLabelFor } from "./capabilities";
+import { deviceForOwner } from "./device-auth";
 import { AgentJob, PlanStep, Ticket } from "./types";
 
 export type EnqueueResult =
   | { ok: true; job: AgentJob }
   | { ok: false; reason: string };
 
-function buildJob(
+async function buildJob(
   ticket: Ticket,
   capability: string | undefined,
   command: string,
   instructions: string,
   stepId?: string,
-): AgentJob {
+): Promise<AgentJob> {
   const now = Date.now();
+  // Bind the job to the reporter's machine at creation time. Without this the
+  // job is unroutable and any enrolled agent that happened to poll would be
+  // offered work meant for somebody else's laptop.
+  const device = await deviceForOwner(ticket.workspaceId, ticket.reporterEmail).catch(() => null);
   return {
     id: `job-${randomBytes(6).toString("hex")}`,
     workspaceId: ticket.workspaceId,
@@ -22,6 +27,7 @@ function buildJob(
     ...(stepId ? { stepId } : {}),
     kind: jobKindForCapability(capability),
     targetUserEmail: ticket.reporterEmail,
+    ...(device ? { deviceId: device.id, deviceHostname: device.hostname } : {}),
     instructions,
     allowlistedCommand: command,
     status: "queued",
@@ -55,7 +61,7 @@ export async function enqueueProbeJob(
     return { ok: false, reason: `${capability} changes state and cannot run as an observation probe` };
   }
 
-  const job = buildJob(
+  const job = await buildJob(
     ticket,
     capability,
     built.command,
@@ -80,7 +86,7 @@ export async function enqueueAgentJob(ticket: Ticket, step: PlanStep): Promise<E
     return { ok: false, reason: built.reason };
   }
 
-  const job = buildJob(
+  const job = await buildJob(
     ticket,
     step.capability,
     built.command,
