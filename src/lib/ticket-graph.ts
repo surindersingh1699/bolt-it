@@ -64,6 +64,12 @@ export interface Approver {
  */
 export const MAX_REOPENS = Number(process.env.MAX_REOPENS || 1);
 
+// The whole plan-level review is a handful of reviewer calls in parallel, each
+// already bounded at ~15s. This is the outer guard: if the review as a whole
+// has not resolved well past that, something is wrong (a wedged gateway call, a
+// pathological step) and the ticket must escalate rather than hang forever.
+const REVIEW_STEPS_TIMEOUT_MS = Number(process.env.REVIEW_STEPS_TIMEOUT_MS || 60_000);
+
 function withTimeout<T>(p: Promise<T>, ms: number, label: string): Promise<T> {
   return Promise.race([
     p,
@@ -589,10 +595,41 @@ async function reviewSteps(state: TState) {
     ...s,
     params: substituteParams(s.params, ticket.reporterEmail),
   }));
+
   // The plan-level verdict rides in so the policy engine sees both halves at
   // once: what this step is, and whether the plan it belongs to follows from the
   // report. Neither question can be answered from the other.
-  const reviewed = await reviewPlan(withParams, ticket, state.intentVerdict);
+  //
+  // Bounded and guarded, because a node that hangs or throws here vanishes: the
+  // ticket sits at "new" with no trace and no artifact, which is exactly how a
+  // stalled review looked in the wild — no error, no escalation, just silence.
+  // A review that cannot complete must fail the plan loudly, not disappear.
+  let reviewed: PlanStep[];
+  try {
+    reviewed = await withTimeout(
+      reviewPlan(withParams, ticket, state.intentVerdict),
+      REVIEW_STEPS_TIMEOUT_MS,
+      "reviewPlan",
+    );
+  } catch (err) {
+    const detail = (err as Error).message || "the safety review did not complete";
+    appendTrace(state.ticketId, "reviewSteps", "failed", `review did not complete: ${detail}`, Date.now() - t0);
+    // Persist the steps as failed so the graph escalates through its normal
+    // failure path instead of stalling. A failed review is a dependency problem,
+    // not a policy decision — the reviewer or the gateway, not the step.
+    const failedSteps = withParams.map((s) => ({
+      ...s,
+      status: "failed" as const,
+      failure: { kind: "dependency_unavailable" as const, detail: `safety review failed: ${detail}` },
+      log: [...(s.log ?? []), `[reviewSteps] review did not complete: ${detail}`],
+    }));
+    const carriedFail = ticket.plan.filter((s) => !failedSteps.some((n) => n.id === s.id));
+    await updateTicket(state.ticketId, {
+      status: "executing",
+      plan: [...carriedFail, ...failedSteps],
+    }).catch(() => {});
+    return {};
+  }
 
   const carried = ticket.plan.filter((s) => !reviewed.some((n) => n.id === s.id));
   await updateTicket(state.ticketId, {
