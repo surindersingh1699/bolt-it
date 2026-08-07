@@ -16,10 +16,16 @@ async function buildJob(
   stepId?: string,
 ): Promise<AgentJob> {
   const now = Date.now();
-  // Bind the job to the reporter's machine at creation time. Without this the
-  // job is unroutable and any enrolled agent that happened to poll would be
-  // offered work meant for somebody else's laptop.
+  // Bind the job to the reporter's machine — but ONLY to a machine that can
+  // actually claim it. Routing follows enrolment (a token), observation follows
+  // registration (a device row). A device that exists for attribution but has no
+  // token — assigned by an admin, or seen only via the shared-token heartbeat —
+  // cannot claim a device-bound job, so binding one would leave it queued
+  // forever while the shared-token agent (which only drains UNBOUND jobs) skips
+  // it. Such jobs stay unbound and reach the machine through the shared-token
+  // pool; they start routing per-device the moment that device is enrolled.
   const device = await deviceForOwner(ticket.workspaceId, ticket.reporterEmail).catch(() => null);
+  const routable = device?.tokenHash ? device : null;
   return {
     id: `job-${randomBytes(6).toString("hex")}`,
     workspaceId: ticket.workspaceId,
@@ -27,7 +33,7 @@ async function buildJob(
     ...(stepId ? { stepId } : {}),
     kind: jobKindForCapability(capability),
     targetUserEmail: ticket.reporterEmail,
-    ...(device ? { deviceId: device.id, deviceHostname: device.hostname } : {}),
+    ...(routable ? { deviceId: routable.id, deviceHostname: routable.hostname } : {}),
     // Whatever a technician has approved for this ticket so far. Read at
     // dispatch rather than stored on the step, so a grant approved partway
     // through applies to every job that follows it.

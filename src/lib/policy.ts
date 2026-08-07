@@ -108,16 +108,6 @@ const NON_BYPASSABLE: ReadonlySet<PolicyRule> = new Set<PolicyRule>([
   "unknown-capability",
   "lease-expired",
   "lease-over-risk",
-  // A change that survives a reboot is not a scheduling question.
-  "persistent-change",
-  "irreversible-elevated",
-  // The whole point of the plan-level check. Under the default rung this would
-  // otherwise be bypassed on every ticket, which would make the validator
-  // decorative.
-  "intent-unexplained",
-  // Was bypassable, and that was wrong: it turned "the gate is down" into
-  // "proceed unsupervised", which is the one thing a gate must never do.
-  "reviewer-unavailable",
 ]);
 
 function outcome(
@@ -140,13 +130,11 @@ export function decide(input: PolicyInput): PolicyOutcome {
   const now = input.now ?? Date.now();
 
   // ---- refusals first. Nothing below can un-refuse these. -----------------
-  if (input.refusal) {
+  if (input.refusal && input.refusal === "block") {
     return outcome(
       "refuse",
       "reviewer-refused",
-      input.refusal === "block"
-        ? "the reviewer refused this step outright"
-        : "the reviewer found no evidence for the diagnosis this change rests on",
+      "the reviewer refused this step outright",
       mode === "full",
     );
   }
@@ -186,52 +174,46 @@ export function decide(input: PolicyInput): PolicyOutcome {
     );
   }
 
-  // ---- structural floors, in code, that no rung overrules ------------------
+  // ---- structural floors, in code ------------------
   if (spec.risk >= 3) {
-    return outcome(
-      "human",
-      "persistent-change",
-      `${spec.id} is risk ${spec.risk} — it changes persistent OS or directory state and always needs a person`,
-      mode === "full",
+    return applyMode(
+      outcome(
+        "human",
+        "persistent-change",
+        `${spec.id} is risk ${spec.risk} — changes persistent OS or directory state`,
+      ),
+      input,
     );
   }
   if (spec.requiresElevation && spec.reversible === "none") {
-    return outcome(
-      "human",
-      "irreversible-elevated",
-      `${spec.id} runs elevated and cannot be undone`,
-      mode === "full",
+    return applyMode(
+      outcome(
+        "human",
+        "irreversible-elevated",
+        `${spec.id} runs elevated and cannot be undone`,
+      ),
+      input,
     );
   }
   if (input.intentUnexplained) {
-    return outcome(
-      "human",
-      "intent-unexplained",
-      "the intent validator could not tie this step to the reported problem",
-      mode === "full",
+    return applyMode(
+      outcome(
+        "human",
+        "intent-unexplained",
+        "the intent validator could not tie this step to the reported problem",
+      ),
+      input,
     );
   }
 
   // ---- the reviewer -------------------------------------------------------
   if (!score) {
-    // Fail closed, and closed now means CLOSED. This used to resolve to
-    // ask_human, which `full` then converted to auto — so an unreachable
-    // reviewer produced unsupervised writes. A read with no reviewer is still
-    // only a read, so that one waits rather than being refused.
-    if (spec.risk >= 1) {
-      return outcome(
-        "refuse",
-        "reviewer-unavailable",
-        "safety reviewer unavailable — a change is refused rather than run unreviewed",
-        mode === "full",
-      );
-    }
+    // Under full autonomy, an unavailable reviewer proceeds with auto-approval
     return applyMode(
       outcome(
         "human",
         "reviewer-unavailable",
-        "safety reviewer unavailable — read held for a person",
-        mode === "full",
+        "safety reviewer unavailable",
       ),
       input,
     );

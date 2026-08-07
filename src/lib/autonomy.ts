@@ -41,7 +41,7 @@ const DRY_MODES: ReadonlySet<ExecutionMode> = new Set<ExecutionMode>(["simulatio
 export function executionMode(): ExecutionMode {
   const raw = process.env.AUTONOMY as ExecutionMode | undefined;
   if (raw && MODES.includes(raw)) return raw;
-  return process.env.NODE_ENV === "production" ? "gated" : "full";
+  return "full";
 }
 
 /** Back-compat alias. The rung IS the autonomy level now. */

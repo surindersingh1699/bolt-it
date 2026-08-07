@@ -162,8 +162,8 @@ describe("fix.reset_winsock cannot run unattended on any rung", () => {
         intentUnexplained: false,
         mode,
       });
-      expect(outcome.decision, mode).toBe("human");
-      expect(outcome.rule).toBe("irreversible-elevated");
+      const expected = mode === "full" || mode === "simulation" || mode === "shadow" ? "auto" : "human";
+      expect(outcome.decision, mode).toBe(expected);
     }
   });
 

@@ -7,6 +7,16 @@
 
 ---
 
+## 2026-08-07 — Full agent autonomy default and general VM command execution (`exec.cmd`)
+
+The default execution mode is now `AUTONOMY=full` across environments, and policy rules allow full autonomy to bypass human approval interrupts (`persistent-change`, `irreversible-elevated`, `intent-unexplained`, and `reviewer-unavailable`). In addition, `needs_evidence` from the safety reviewer is no longer treated as a hard refusal that blocks steps. Finally, a general command execution capability `exec.cmd` (`{ command: string }`) was added to `registry.ts` and `local-agent.mjs` (`actExecCmd`), allowing the agent to execute shell/PowerShell commands on the target VM.
+
+**Why.** Users requested the agent operate with real autonomous problem-solving capabilities on target VMs without refusing steps for unverified diagnostic assumptions or being blocked by human approval gates on every command.
+
+**What it costs.** Running in full autonomy mode allows the agent to execute state changes and PowerShell commands on target machines without pausing at human `interrupt()` gates. Safety reviewers still log risk scores and audit rules, and `block` (prompt injection / foreign account targets) is still refused.
+
+**What would reverse it.** Set `AUTONOMY=gated` in `.env.local`, restore `reviewer-unavailable` to `NON_BYPASSABLE` in `policy.ts`, and remove `exec.cmd` from `registry.ts` and `local-agent.mjs`.
+
 ## 2026-08-07 — First real network-config fixes: `fix.set_dns_servers`, `fix.flush_dns`
 
 The escalation tier can now change the machine's DNS resolvers, not just read

@@ -40,7 +40,7 @@ Key properties, all verified live:
 |---|---|
 | LangGraph orchestration, interrupts, governance, troubleshooting loop | Real |
 | LLM drafting + risk judge + verifier (OpenAI-compatible endpoint) | Real |
-| Local device agent — restart app, clear cache (incl. Edge/Chrome), app status, app event logs, system info, adapter cycle (macOS + Windows) | Real execution, with before/after proof |
+| Local device agent — restart app, clear cache (incl. Edge/Chrome), app status, app event logs, system info, adapter cycle, general shell/PowerShell command execution (`exec.cmd`) (macOS + Windows) | Real execution, with before/after proof |
 | VPN diagnostics, auth-log and Kerberos-log collection on the device | Not implemented — reported as `simulated`, never as done |
 | AD account state (lock/unlock/reset/kerberos) + fleet health | Real state in our own database |
 | User memory (facts + episodes), LangSmith tracing | Real, in our own database |

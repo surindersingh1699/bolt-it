@@ -1,18 +1,6 @@
 import { NextResponse } from "next/server";
 import { servedAgentScript } from "@/lib/agent-bundle";
-
-export const dynamic = "force-dynamic";
-
-// Same bearer check as every other /api/agent/* route. The script itself holds
-// no secret — the token lives in the machine's own environment — but gating it
-// keeps the agent's command surface off the open internet, and the VM already
-// has the token it needs to ask.
-function authorized(req: Request): boolean {
-  const expected = process.env.LOCAL_AGENT_TOKEN;
-  if (!expected) return false;
-  const auth = req.headers.get("authorization") ?? "";
-  return auth === `Bearer ${expected}`;
-}
+import { authenticateAgent } from "@/lib/device-auth";
 
 /**
  * Serves the local agent so a machine can pull the current version instead of
@@ -27,7 +15,12 @@ function authorized(req: Request): boolean {
  * unauthenticated with the shared token baked into the file body.
  */
 export async function GET(req: Request) {
-  if (!authorized(req)) return NextResponse.json({ error: "unauthorized" }, { status: 401 });
+  // Accept a per-device token or the shared token — an enrolled agent must be
+  // able to pull its own updates. The script holds no secret either way; the
+  // gate just keeps the command surface off the open internet.
+  if (!(await authenticateAgent(req))) {
+    return NextResponse.json({ error: "unauthorized" }, { status: 401 });
+  }
   try {
     const { source, buildId } = await servedAgentScript();
     return new NextResponse(source, {

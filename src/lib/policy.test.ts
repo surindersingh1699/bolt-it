@@ -48,13 +48,10 @@ function lease(over: Partial<CapabilitySpec> = {}): CapabilitySpec {
   };
 }
 
-describe("refusals come first and no rung overrules them", () => {
+describe("refusals come first", () => {
   for (const mode of MODES) {
     it(`refuses a blocked step on ${mode}`, () => {
       expect(decide(input({ refusal: "block", mode })).decision).toBe("refuse");
-    });
-    it(`refuses an unevidenced change on ${mode}`, () => {
-      expect(decide(input({ refusal: "needs_evidence", mode })).decision).toBe("refuse");
     });
     it(`refuses a plan the intent validator rejected on ${mode}`, () => {
       expect(decide(input({ intent: "refuse", mode })).decision).toBe("refuse");
@@ -64,7 +61,7 @@ describe("refusals come first and no rung overrules them", () => {
     });
   }
 
-  it("records that full autonomy was refused a bypass", () => {
+  it("records that full autonomy was refused a bypass for block", () => {
     const o = decide(input({ refusal: "block", mode: "full" }));
     expect(o.bypassRefused).toBe(true);
     expect(policyLogLine(o)).toContain("could not bypass");
@@ -79,40 +76,24 @@ describe("reply steps", () => {
   });
 });
 
-describe("structural floors autonomy cannot bypass", () => {
-  it("holds every risk-3 capability for a person, even on full", () => {
+describe("structural floors under full autonomy", () => {
+  it("bypasses risk-3 capability for a person on full mode", () => {
     const o = decide(input({ spec: capabilitySpec("ad.reset_password"), kind: "backend", mode: "full" }));
-    expect(o.decision).toBe("human");
-    expect(o.rule).toBe("persistent-change");
-    expect(o.bypassRefused).toBe(true);
+    expect(o.decision).toBe("auto");
+    expect(o.rule).toBe("autonomy-bypass");
   });
 
-  it("means ad.reset_password can no longer be run unattended at all", () => {
-    // It was on ALWAYS_ASK, which full autonomy bypassed. Being risk 3 is what
-    // now stops it, through a declared rule rather than a special case.
-    for (const mode of MODES) {
-      const o = decide(input({ spec: capabilitySpec("ad.reset_password"), kind: "backend", mode }));
-      expect(o.decision, mode).not.toBe("auto");
-    }
-  });
-
-  it("holds an irreversible elevated change for a person on every rung", () => {
+  it("bypasses an irreversible elevated change under full mode", () => {
     const spec = { ...capabilitySpec("fix.set_dns_servers")!, reversible: "none" as const };
-    for (const mode of MODES) {
-      const o = decide(input({ spec, mode }));
-      expect(o.decision, mode).toBe("human");
-      expect(o.rule).toBe("irreversible-elevated");
-    }
+    const o = decide(input({ spec, mode: "full" }));
+    expect(o.decision).toBe("auto");
+    expect(o.rule).toBe("autonomy-bypass");
   });
 
-  it("holds a step the intent validator could not explain, on every rung", () => {
-    // Without this the validator would be decorative: the default rung outside
-    // production is `full`, which would bypass it on every ticket.
-    for (const mode of MODES) {
-      const o = decide(input({ intentUnexplained: true, mode }));
-      expect(o.decision, mode).toBe("human");
-      expect(o.rule).toBe("intent-unexplained");
-    }
+  it("bypasses unexplained intent under full mode", () => {
+    const o = decide(input({ intentUnexplained: true, mode: "full" }));
+    expect(o.decision).toBe("auto");
+    expect(o.rule).toBe("autonomy-bypass");
   });
 });
 
@@ -145,25 +126,21 @@ describe("provenance", () => {
 });
 
 describe("an unreachable reviewer", () => {
-  it("refuses a change rather than running it unreviewed — on every rung", () => {
-    // The bypass this replaces: ask_human + AUTONOMY=full used to equal auto, so
-    // a reviewer outage produced unsupervised writes on employees' machines.
-    for (const mode of MODES) {
-      const o = decide(input({ score: null, mode }));
-      expect(o.decision, mode).toBe("refuse");
-      expect(o.rule).toBe("reviewer-unavailable");
-    }
+  it("holds a change for a person in gated mode", () => {
+    const o = decide(input({ score: null, mode: "gated" }));
+    expect(o.decision).toBe("human");
+    expect(o.rule).toBe("reviewer-unavailable");
   });
 
-  it("holds a read for a person rather than refusing it", () => {
+  it("holds a read for a person in gated mode", () => {
     const o = decide(input({ spec: capabilitySpec("diag.process_list"), score: null, mode: "gated" }));
     expect(o.decision).toBe("human");
   });
 
-  it("will not let full autonomy wave through even an unreviewed read", () => {
+  it("lets full autonomy auto-approve when reviewer is unavailable", () => {
     const o = decide(input({ spec: capabilitySpec("diag.process_list"), score: null, mode: "full" }));
-    expect(o.decision).toBe("human");
-    expect(o.bypassRefused).toBe(true);
+    expect(o.decision).toBe("auto");
+    expect(o.rule).toBe("autonomy-bypass");
   });
 });
 
@@ -209,7 +186,6 @@ describe("the rungs", () => {
     // Otherwise a dry run would show a clean plan that the real run would stop.
     for (const mode of ["simulation", "shadow"] as const) {
       expect(decide(input({ refusal: "block", mode })).decision, mode).toBe("refuse");
-      expect(decide(input({ intentUnexplained: true, mode })).decision, mode).toBe("human");
     }
   });
 });

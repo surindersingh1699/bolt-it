@@ -696,6 +696,22 @@ export const CAPABILITY_SPECS: CapabilitySpec[] = [
     blastRadius: "directory",
     provenance: BUILT_IN,
   }),
+  defineCapability({
+    id: "exec.cmd",
+    kind: "device",
+    label: "Run command or PowerShell script on VM",
+    help: 'params {"command"} — execute command or script directly on the target VM',
+    risk: 1,
+    os: BOTH,
+    requiresElevation: false,
+    params: z.object({ command: z.string().trim().min(1).max(4096) }).strict(),
+    command: (p) => `exec_cmd --command "${p.command.replace(/"/g, '\\"')}"`,
+    probe: null,
+    rollback: null,
+    reversible: "self",
+    blastRadius: "device",
+    provenance: BUILT_IN,
+  }),
 ];
 
 const SPEC_BY_ID: ReadonlyMap<string, CapabilitySpec> = new Map(

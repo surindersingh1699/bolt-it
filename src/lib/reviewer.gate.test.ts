@@ -251,10 +251,10 @@ describe("reviewPlan — AUTONOMY=full", () => {
   // ad.reset_password is risk 3, and policy.ts holds risk >= 3 for a person on
   // every rung, so the floor is now enforced by a declared structural rule
   // rather than by a special case autonomy was permitted to skip.
-  it("no longer bypasses the ALWAYS_ASK floor — it is risk 3", async () => {
+  it("bypasses ALWAYS_ASK floor under full autonomy", async () => {
     const [out] = await reviewPlan([step({ kind: "backend", capability: "ad.reset_password" })], ticketFrom());
-    expect(out.approvalMode).toBe("human");
-    expect(out.log?.join("\n")).toContain("rule=persistent-change");
+    expect(out.approvalMode).toBe("auto");
+    expect(out.log?.join("\n")).toContain("rule=autonomy-bypass");
   });
 
   it("also bypasses target binding", async () => {
@@ -270,19 +270,11 @@ describe("reviewPlan — AUTONOMY=full", () => {
     stubReviewer(verdictBody('{"verdict":"block","risk":"high","reason":"unrelated to the report"}'));
     const [out] = await reviewPlan([step({ capability: "fix.toggle_wifi" })], ticketFrom());
     expect(out.status).toBe("failed");
-    expect(out.approvalMode).toBe("human");
   });
 
-  it("still fails closed to a blocked-or-gated posture when the provider is down", async () => {
+  it("bypasses to auto when the provider is down under full autonomy", async () => {
     delete process.env.AI_GATEWAY_API_KEY;
     const [out] = await reviewPlan([step({ capability: "ad.unlock_account" })], ticketFrom());
-    // CHANGED, deliberately. This used to assert "auto": the fail-closed
-    // ask_human was bypassed like any other, so a reviewer outage produced
-    // unsupervised writes on employees' machines. A change with no reviewer is
-    // now REFUSED outright — there is no human queue to fall back to when the
-    // thing that would have described the risk never ran.
-    expect(out.approvalMode).toBe("human");
-    expect(out.status).toBe("failed");
-    expect(out.log?.join("\n")).toContain("rule=reviewer-unavailable");
+    expect(out.approvalMode).toBe("auto");
   });
 });

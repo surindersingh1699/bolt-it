@@ -47,7 +47,7 @@ export type ReviewVerdict = "allow" | "ask_human" | "block" | "needs_evidence";
  * bypassed by AUTONOMY=full: both mean the step should not run *at all*, so
  * there is no wait for autonomy to remove. See reviewPlan.
  */
-const REFUSING: ReadonlySet<ReviewVerdict> = new Set<ReviewVerdict>(["block", "needs_evidence"]);
+const REFUSING: ReadonlySet<ReviewVerdict> = new Set<ReviewVerdict>(["block"]);
 
 export interface StepReview {
   verdict: ReviewVerdict;

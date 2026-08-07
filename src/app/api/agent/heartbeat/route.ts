@@ -2,8 +2,35 @@ import { NextResponse } from "next/server";
 import { getCurrentSession } from "@/lib/auth";
 import { z } from "zod";
 import { HEARTBEAT_CONNECTED_WINDOW_MS, readHeartbeat, recordHeartbeat } from "@/lib/agent-heartbeat";
+import { authenticateAgent } from "@/lib/device-auth";
+import { getDevice, updateDevice } from "@/lib/data";
 
 export const dynamic = "force-dynamic";
+
+/**
+ * Keep the device registry live from the heartbeat a connected agent already
+ * sends. A registered device is what `observe` looks for; without this, a device
+ * would only ever be as fresh as its last enrolment, and `liveDeviceFor` would
+ * decide it had gone offline while the agent kept pinging.
+ *
+ * Attribution (which user owns the machine) comes from enrolment, never from a
+ * heartbeat — a shared-token agent names no owner and we do not invent one. So
+ * this refreshes an EXISTING device: an enrolled device by its own token, or,
+ * for a shared-token agent, whatever device was already assigned to that
+ * hostname. It never creates an unowned row that observe could not use anyway.
+ */
+async function refreshDeviceFromHeartbeat(
+  auth: NonNullable<Awaited<ReturnType<typeof authenticateAgent>>>,
+  hb: { hostname: string; os: string; version: string },
+): Promise<void> {
+  const patch = { lastSeenAt: Date.now(), os: hb.os, agentVersion: hb.version };
+  if (auth.kind === "device") {
+    await updateDevice(auth.device.id, patch);
+    return;
+  }
+  const existing = await getDevice(hb.hostname);
+  if (existing) await updateDevice(existing.id, patch);
+}
 
 const CONNECTED_WINDOW_MS = HEARTBEAT_CONNECTED_WINDOW_MS;
 
@@ -29,7 +56,10 @@ function authorized(req: Request): boolean {
 }
 
 export async function POST(req: Request) {
-  if (!authorized(req)) return NextResponse.json({ error: "unauthorized" }, { status: 401 });
+  // Accept a per-device token or the shared token, the same as the jobs route —
+  // an enrolled agent must be able to heartbeat with its own credential.
+  const auth = await authenticateAgent(req);
+  if (!auth) return NextResponse.json({ error: "unauthorized" }, { status: 401 });
   let body: unknown;
   try {
     body = await req.json();
@@ -41,6 +71,8 @@ export async function POST(req: Request) {
     return NextResponse.json({ error: "invalid body" }, { status: 400 });
   }
   recordHeartbeat(parsed.data);
+  // Best-effort: keep the device registry fresh, but never fail a heartbeat over it.
+  await refreshDeviceFromHeartbeat(auth, parsed.data).catch(() => {});
   return NextResponse.json({ ok: true });
 }
 

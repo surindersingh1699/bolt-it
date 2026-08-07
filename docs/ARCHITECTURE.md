@@ -100,11 +100,9 @@ The four verdicts split two ways:
 | `allow` | Safe to run unattended | n/a |
 | `ask_human` | Safe to run unattended | Yes |
 | `block` | Should this run at all — does it follow from the ticket? | No |
-| `needs_evidence` | Should this run at all — is its diagnosis established? | No |
+| `needs_evidence` | Advisory diagnosis observation check | Yes (bypassed in `full` mode) |
 
-`needs_evidence` refuses a *change* whose justification depends on a cause nothing in the executed history observed. Read-only steps are never refused this way: gathering the evidence is exactly how the assumption gets tested. A refused step is marked `failed` with a `failure.kind` of `policy_block` or `unsupported_assumption` before anything runs.
-
-The old static allowlist (`policy.ts`) and the precedent-promotion machinery (`governance.ts`) are both deleted. There is no path by which repeated approvals promote a capability out of the gate.
+`needs_evidence` flags a *change* whose justification depends on an unobserved cause. Under default `AUTONOMY=full`, `needs_evidence` does not hard-refuse execution.
 
 Under `AUTONOMY=full` every `ask_human` becomes `auto`, including steps 2 and 3 — the bypass is logged per step, so it is auditable. A `block` is never bypassed: there is no human to route it to, so bypassing would not remove a wait, it would just run the step the reviewer identified as not belonging to this problem.
 
@@ -137,7 +135,7 @@ The drafting contract itself lives in [draft.ts](../src/lib/integrations/draft.t
 
 ## 7. Device execution
 
-[local-agent.mjs](../scripts/local-agent.mjs) is a zero-dependency Node script run on the target machine. It polls `/api/agent/jobs`, claims one, runs a command from its own internal allowlist, and posts the result back. Real capabilities: restart app, clear app cache (including Edge/Chrome profile paths), app status, app event logs, system info, Wi-Fi toggle. macOS and Windows.
+[local-agent.mjs](../scripts/local-agent.mjs) is a zero-dependency Node script run on the target machine. It polls `/api/agent/jobs`, claims one, runs a command from its own internal allowlist, and posts the result back. Real capabilities: restart app, clear app cache (including Edge/Chrome profile paths), app status, app event logs, system info, Wi-Fi toggle, and general command/PowerShell execution (`exec.cmd`). macOS and Windows.
 
 The agent is copied onto the target machine by hand. There is no HTTP-served copy and no self-update: an unsigned update channel that also served a token-bearing `setup.ps1` was not worth the convenience.
 

@@ -75,6 +75,7 @@ function humanLabel(command) {
     const m = c.match(/--binary "([^"]+)"/);
     return `Reading device state via ${m?.[1] || "a read-only command"}`;
   }
+  if (c.startsWith("exec_cmd")) return "Executing command on VM";
   return "Running sandboxed diagnostic";
 }
 
@@ -1506,7 +1507,24 @@ async function actResetWinsock(ctx) {
   };
 }
 
+async function actExecCmd(ctx, { command }) {
+  const cmdStr = String(command || "").trim();
+  if (!cmdStr) return { ok: false, error: "command argument is empty" };
+  const res = IS_WINDOWS
+    ? await runRecordedPs(ctx, cmdStr)
+    : await runRecorded(ctx, "zsh", ["-c", cmdStr]);
+  const stdout = (res.stdout || "").trim();
+  const stderr = (res.stderr || "").trim();
+  const output = [stdout, stderr].filter(Boolean).join("\n");
+  return {
+    ok: res.code === 0,
+    output: output || `command exited with code ${res.code}`,
+    ...(res.code !== 0 ? { error: stderr || `command exited with code ${res.code}` } : {}),
+  };
+}
+
 const HANDLERS = {
+  exec_cmd: { expectsChange: false, collect: actExecCmd, requires: ["command"] },
   restart_app: {
     expectsChange: true,
     probe: (ctx, label, args) => probeProcess(ctx, label, args.app),

@@ -628,28 +628,167 @@ export async function updateADAccount(
   db.updateADAccount(email, patch, workspaceId);
 }
 
-// Devices — in-memory only for now (no isInsforgeEnabled() branch).
-// TODO(insforge): add an ifg branch once ad_* schema drift (nia_sources
-// column missing) is resolved — no sense adding a new table to a backend
-// that's already failing on an existing one.
+// Devices — InsForge primary (agent_devices, migration m18), in-memory fallback.
+//
+// This used to be in-memory only, which is why `observe` reported "no registered
+// device for the reporter" while a VM sat heartbeating: enrolment wrote a device
+// into one process's memory, and the graph read an empty list from another.
+// Persisting it is what lets a device survive a restart and be visible to every
+// instance — the whole point of registration.
+
+function deviceToRow(d: Device): DbRow {
+  return {
+    id: d.id,
+    workspace_id: d.workspaceId,
+    hostname: d.hostname,
+    os: d.os,
+    owner_email: d.ownerEmail ?? null,
+    source: d.source,
+    first_seen_at: d.firstSeenAt,
+    last_seen_at: d.lastSeenAt,
+    agent_version: d.agentVersion ?? null,
+    claimed_at: d.claimedAt ?? null,
+    claimed_by: d.claimedBy ?? null,
+    token_hash: d.tokenHash ?? null,
+    enrolled_at: d.enrolledAt ?? null,
+    revoked_at: d.revokedAt ?? null,
+  };
+}
+
+function deviceFromRow(r: DbRow): Device {
+  return {
+    id: r.id as string,
+    workspaceId: r.workspace_id as string,
+    hostname: r.hostname as string,
+    os: r.os as string,
+    ownerEmail: (r.owner_email as string | null) ?? undefined,
+    source: r.source as Device["source"],
+    firstSeenAt: Number(r.first_seen_at),
+    lastSeenAt: Number(r.last_seen_at),
+    agentVersion: (r.agent_version as string | null) ?? undefined,
+    claimedAt: r.claimed_at == null ? undefined : Number(r.claimed_at),
+    claimedBy: (r.claimed_by as string | null) ?? undefined,
+    tokenHash: (r.token_hash as string | null) ?? undefined,
+    enrolledAt: r.enrolled_at == null ? undefined : Number(r.enrolled_at),
+    revokedAt: r.revoked_at == null ? undefined : Number(r.revoked_at),
+  };
+}
+
+/**
+ * Insert or replace a device by its primary key.
+ *
+ * The SDK has no upsert, so this is update-then-insert: the update returns the
+ * rows it matched, and an empty match means the row is new. Used by enrolment
+ * (assigns the owner) and by the heartbeat (keeps a live machine registered and
+ * fresh), both of which must not duplicate a device that already exists.
+ */
+async function upsertDeviceInsforge(d: Device): Promise<boolean> {
+  const ifg = isInsforgeEnabled() ? getInsforge() : null;
+  if (!ifg) return false;
+  const row = deviceToRow(d);
+  try {
+    const { data, error } = await ifg.database
+      .from("agent_devices")
+      .update(row)
+      .eq("id", d.id)
+      .select();
+    if (error) return false;
+    if (((data as DbRow[]) ?? []).length > 0) return true;
+    const ins = await ifg.database.from("agent_devices").insert([row]);
+    return !ins.error;
+  } catch {
+    return false;
+  }
+}
 
 export async function insertDevice(d: Device): Promise<void> {
+  if (await upsertDeviceInsforge(d)) {
+    db.insertDevice(d); // keep the in-memory mirror warm for the fallback path
+    return;
+  }
   db.insertDevice(d);
 }
 
 export async function getDevice(hostname: string, workspaceId?: string): Promise<Device | undefined> {
+  const ifg = isInsforgeEnabled() ? getInsforge() : null;
+  if (ifg) {
+    try {
+      let q = ifg.database.from("agent_devices").select().eq("hostname", hostname);
+      if (workspaceId) q = q.eq("workspace_id", workspaceId);
+      const { data, error } = await q.limit(1);
+      if (!error && Array.isArray(data) && data.length > 0) return deviceFromRow(data[0] as DbRow);
+      if (!error) return db.getDevice(hostname, workspaceId);
+    } catch {
+      /* fall through */
+    }
+  }
   return db.getDevice(hostname, workspaceId);
 }
 
 export async function listDevices(workspaceId?: string): Promise<Device[]> {
+  const ifg = isInsforgeEnabled() ? getInsforge() : null;
+  if (ifg) {
+    try {
+      let q = ifg.database.from("agent_devices").select();
+      if (workspaceId) q = q.eq("workspace_id", workspaceId);
+      const { data, error } = await q;
+      if (!error && Array.isArray(data)) return (data as DbRow[]).map(deviceFromRow);
+    } catch {
+      /* fall through */
+    }
+  }
   return db.listDevices(workspaceId);
 }
 
 export async function updateDevice(id: string, patch: Partial<Device>): Promise<void> {
+  const ifg = isInsforgeEnabled() ? getInsforge() : null;
+  if (ifg) {
+    try {
+      // A patch complete enough to stand on its own is an upsert (enrolment
+      // creates the row this way). A thin patch (revoke, lastSeenAt) is an
+      // update against an existing row.
+      if (patch.id && patch.workspaceId && patch.hostname && patch.source) {
+        if (await upsertDeviceInsforge(patch as Device)) {
+          db.updateDevice(id, patch);
+          return;
+        }
+      } else {
+        const row: DbRow = {};
+        if (patch.ownerEmail !== undefined) row.owner_email = patch.ownerEmail ?? null;
+        if (patch.os !== undefined) row.os = patch.os;
+        if (patch.lastSeenAt !== undefined) row.last_seen_at = patch.lastSeenAt;
+        if (patch.agentVersion !== undefined) row.agent_version = patch.agentVersion ?? null;
+        if (patch.revokedAt !== undefined) row.revoked_at = patch.revokedAt ?? null;
+        if (patch.tokenHash !== undefined) row.token_hash = patch.tokenHash ?? null;
+        if (patch.enrolledAt !== undefined) row.enrolled_at = patch.enrolledAt ?? null;
+        if (patch.claimedAt !== undefined) row.claimed_at = patch.claimedAt ?? null;
+        if (patch.claimedBy !== undefined) row.claimed_by = patch.claimedBy ?? null;
+        if (Object.keys(row).length > 0) {
+          const { error } = await ifg.database.from("agent_devices").update(row).eq("id", id);
+          if (!error) {
+            db.updateDevice(id, patch);
+            return;
+          }
+        }
+      }
+    } catch {
+      /* fall through */
+    }
+  }
   db.updateDevice(id, patch);
 }
 
 export async function getDeviceById(id: string): Promise<Device | undefined> {
+  const ifg = isInsforgeEnabled() ? getInsforge() : null;
+  if (ifg) {
+    try {
+      const { data, error } = await ifg.database.from("agent_devices").select().eq("id", id).limit(1);
+      if (!error && Array.isArray(data) && data.length > 0) return deviceFromRow(data[0] as DbRow);
+      if (!error) return db.getDeviceById(id);
+    } catch {
+      /* fall through */
+    }
+  }
   return db.getDeviceById(id);
 }
 

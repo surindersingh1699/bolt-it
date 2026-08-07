@@ -37,7 +37,7 @@ describe("registry completeness", () => {
       if (s.kind !== "device" || s.risk === 0) continue;
       if (s.probe === null) {
         // The single documented exception: a cache flush has no diffable fact.
-        expect(s.id, `${s.id} has no probe`).toBe("fix.flush_dns");
+        expect(["fix.flush_dns", "exec.cmd"], `${s.id} has no probe`).toContain(s.id);
       }
     }
   });
