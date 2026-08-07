@@ -654,7 +654,13 @@ const READ_ONLY_BINARIES = IS_WINDOWS
       driverquery: {},
       sc: { subcommands: ["query", "qc", "queryex"] },
       reg: { subcommands: ["query"] },
+      // Session/user listing. qwinsta lists sessions; quser lists the logged-on
+      // users on them (name, state, idle time). Both are read-only — they print
+      // and change nothing — and "who else is sharing this machine's CPU" is a
+      // standard slowness check. quser was the omission; qwinsta alone left the
+      // agent looping when the operator reached for the more natural command.
       qwinsta: {},
+      quser: {},
       powercfg: { subcommands: ["/query", "/list", "/batteryreport"] },
       wevtutil: { subcommands: ["qe", "el", "gli"] },
       net: { subcommands: ["config", "user", "share", "statistics"] },
