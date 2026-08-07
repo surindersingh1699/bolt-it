@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { redactDeep, redactSecrets } from "@/lib/redact";
 import { z } from "zod";
 import { getAgentJob, updateAgentJob, updateStep } from "@/lib/data";
 import { deriveJobStatus, formatProofLines } from "@/lib/evidence";
@@ -59,6 +60,17 @@ const envelopeSchema = z.object({
     summary: z.string().max(1000),
   }),
   journalPath: z.string().max(500).optional(),
+  // These two were MISSING, and zod strips unknown keys by default — so the
+  // agent wrote the undo command onto the machine, put it on the envelope, and
+  // the schema silently dropped it in transit. `formatProofLines` has rendered
+  // both since it was written and never once had them to render.
+  changeRecordPath: z.string().max(500).optional(),
+  revertCommand: z.string().max(1000).optional(),
+  // The rollback transaction's own result.
+  rolledBack: z.boolean().optional(),
+  rollbackOk: z.boolean().optional(),
+  rollbackError: z.string().max(1000).optional(),
+  simulatedDependencyUnmet: z.array(z.string().max(64)).max(16).optional(),
 });
 
 const bodySchema = z.object({
@@ -81,7 +93,14 @@ export async function POST(req: Request, { params }: Params) {
   const job = await getAgentJob(id);
   if (!job) return NextResponse.json({ error: "not_found" }, { status: 404 });
 
-  const envelope = body.envelope as ExecutionEnvelope | undefined;
+  // Redacted a SECOND time, here, after parsing and before anything is
+  // persisted. The agent already redacted on the way out; doing it again is what
+  // makes the guarantee survive an agent that is older, modified, or simply
+  // buggy. The client is not the only thing between a credential and the
+  // database.
+  const envelope = (body.envelope ? redactDeep(body.envelope) : undefined) as
+    | ExecutionEnvelope
+    | undefined;
   // The device's own before/after evidence decides the verdict — not the fact
   // that the agent finished talking.
   const status = deriveJobStatus(body.ok !== false, envelope);
@@ -89,8 +108,8 @@ export async function POST(req: Request, { params }: Params) {
   const patch = {
     status,
     completedAt,
-    output: String(body.output ?? "").slice(0, 8000),
-    error: body.error ? String(body.error).slice(0, 2000) : undefined,
+    output: redactSecrets(body.output ?? "").slice(0, 8000),
+    error: body.error ? redactSecrets(body.error).slice(0, 2000) : undefined,
     envelope,
     effectChanged: envelope?.effect.changed,
     effectSummary: envelope?.effect.summary,

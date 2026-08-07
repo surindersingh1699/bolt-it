@@ -189,6 +189,21 @@ export interface ExecutionEnvelope {
   changeRecordPath?: string;
   /** The exact command a technician runs to reverse this change. */
   revertCommand?: string;
+  /**
+   * The change did not take and the agent put the machine back.
+   *
+   * Before this existed a write that failed verification reported `no_effect`
+   * and left the machine wherever it landed — possibly half-applied, with
+   * nobody told which half.
+   */
+  rolledBack?: boolean;
+  rollbackOk?: boolean;
+  /**
+   * Set when the rollback itself failed. This is the one case a person must
+   * see: the machine is now in a state neither the plan nor the undo accounted
+   * for.
+   */
+  rollbackError?: string;
 }
 
 export interface AgentJob {

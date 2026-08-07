@@ -4,6 +4,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
+import { redactDeep, redactSecrets } from "./redact.mjs";
 
 const appUrl = process.env.IT_SUPPORT_APP_URL || "http://localhost:3000";
 const token = process.env.LOCAL_AGENT_TOKEN;
@@ -637,7 +638,19 @@ const READ_ONLY_BINARIES = IS_WINDOWS
       route: { subcommands: ["print"] },
       arp: { subcommands: ["-a"] },
       fsutil: { subcommands: ["fsinfo", "volume"] },
-      wmic: {},
+      // Restricted. Unqualified `wmic` is not read-only: `wmic process call
+      // create` starts a process, and `wmic product call install` installs
+      // software. It was sitting in the READ-ONLY allowlist with no subcommand
+      // filter at all, which made it the one genuine write in a list whose
+      // entire premise is that nothing in it writes.
+      wmic: {
+        subcommands: [
+          "os", "cpu", "computersystem", "bios", "diskdrive", "logicaldisk",
+          "memorychip", "nic", "nicconfig", "process", "service", "startup",
+          "qfe", "product", "printer", "useraccount", "path",
+        ],
+        deniedArgs: [/^call$/i, /^create$/i, /^delete$/i, /^set$/i, /^assoc$/i],
+      },
     }
   : {
       sw_vers: {},
@@ -693,7 +706,13 @@ const READ_ONLY_BINARIES = IS_WINDOWS
       profiles: { subcommands: ["-P", "show", "list"] },
       tmutil: { subcommands: ["status", "destinationinfo", "latestbackup"] },
       nettop: { subcommands: ["-l", "-x"] },
-      dscl: { subcommands: [".", "-read", "-list"] },
+      // `.` is a valid first token, so the subcommand check alone lets
+      // `dscl . -create /Users/x` straight through — a write, in the read-only
+      // allowlist. deniedArgs is checked across EVERY token, not just argv[0].
+      dscl: {
+        subcommands: [".", "-read", "-list", "-readall", "-search"],
+        deniedArgs: [/^-create$/i, /^-delete$/i, /^-append$/i, /^-merge$/i, /^-change$/i, /^-passwd$/i],
+      },
       lsappinfo: {},
       pkgutil: { subcommands: ["--pkgs", "--pkg-info", "--files"] },
       xcrun: { subcommands: ["--find", "--show-sdk-version"] },
@@ -728,6 +747,13 @@ function validateReadOnlyCommand(binary, argv) {
   }
   if (spec.subcommands && !spec.subcommands.includes(argv[0])) {
     return `"${binary}" allows only: ${spec.subcommands.join(", ")}`;
+  }
+  // Checked across every token rather than just the first. Some binaries take a
+  // harmless-looking first argument and the mutating verb later — `dscl . -create`
+  // and `wmic process call create` both pass a first-token check and both write.
+  for (const denied of spec.deniedArgs ?? []) {
+    const hit = argv.find((a) => denied.test(a));
+    if (hit) return `"${binary} ${hit}" is a write, and this is the read-only surface`;
   }
   if (spec.getCmdletOnly && !/^Get-[A-Za-z]+$/.test(argv[0] ?? "")) {
     return `"${binary}" allows only Get-* cmdlets`;
@@ -771,21 +797,10 @@ const MAX_GREP_MATCHES = 200;
 const DENIED_PATH =
   /(\.ssh|\.aws|\.gnupg|\.netrc|id_rsa|id_ed25519|id_ecdsa|\.kdbx|Keychains|\.keychain|Cookies|Login Data|chat\.db|\.env($|\.)|credentials$|secring|shadow|\.kube|\.docker\/config)/i;
 
-const SECRET_PATTERNS = [
-  [/-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----/g, "private-key"],
-  [/AKIA[0-9A-Z]{16}/g, "aws-key"],
-  [/gh[pousr]_[A-Za-z0-9]{20,}/g, "github-token"],
-  [/sk-ant-[A-Za-z0-9_-]{20,}/g, "anthropic-key"],
-  [/xox[baprs]-[A-Za-z0-9-]{10,}/g, "slack-token"],
-  [/eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]+/g, "jwt"],
-  [/\b(password|passwd|secret|api[_-]?key|token|bearer)\b\s*[=:]\s*\S+/gi, "credential"],
-];
-
-function redactSecrets(text) {
-  let out = text;
-  for (const [re, label] of SECRET_PATTERNS) out = out.replace(re, `[REDACTED:${label}]`);
-  return out;
-}
+// SECRET_PATTERNS and redactSecrets now live in ./redact.mjs, imported above.
+// They used to be here and were applied to exactly two of the ten read paths;
+// `redactDeep` is now applied to the whole envelope on the way out, so a field
+// added later is covered by default rather than by somebody remembering.
 
 // realpath FIRST, then judge. Checking a raw string lets a symlink or a `..`
 // decide what you actually opened.
@@ -1124,10 +1139,51 @@ async function executeJob(job) {
   };
 
   let result;
+  // How many probes count toward "did this change anything". A rollback appends
+  // more, and those describe the undo, not the effect.
+  let effectProbeCount = Infinity;
+
   if (handler.act) {
-    await takeProbe("before");
+    const before = await takeProbe("before");
     result = await handler.act(ctx, args, { probeNow: takeProbe });
     await takeProbe("after");
+
+    // The transaction. Until now a write that failed verification reported
+    // no_effect and left the machine wherever it landed — half-applied, with
+    // nobody told which half. If the before/after probes agree, the change did
+    // not take, so put the machine back rather than leaving it mid-flight.
+    //
+    // Only for handlers that declare a rollback: a `reversible: "none"`
+    // capability has nothing to run here, and inventing one would be worse than
+    // the problem.
+    if (handler.expectsChange && handler.rollback) {
+      const landed = diffProbes(envelope.probes).length > 0;
+      if (!landed) {
+        envelope.rolledBack = true;
+        // Everything from here on is restoration, not effect. Without this the
+        // after-rollback probe joins the diff and a SUCCESSFUL restore reads as
+        // "the machine changed", i.e. as the fix having worked.
+        effectProbeCount = envelope.probes.length;
+        try {
+          const undo = await handler.rollback(ctx, args, before);
+          await takeProbe("after-rollback");
+          envelope.rollbackOk = undo?.ok !== false;
+          if (!envelope.rollbackOk) {
+            // Rollback failing is the one case a person must see: the machine is
+            // now in a state neither the plan nor the rollback accounted for.
+            envelope.rollbackError = undo?.error || "rollback reported not-ok";
+            result = {
+              ok: false,
+              error: `change did not take and the rollback also failed: ${envelope.rollbackError}`,
+            };
+          }
+        } catch (err) {
+          envelope.rollbackOk = false;
+          envelope.rollbackError = err.message;
+          result = { ok: false, error: `change did not take and the rollback threw: ${err.message}` };
+        }
+      }
+    }
   } else if (handler.probe) {
     const probe = await takeProbe("observed");
     result = {
@@ -1140,9 +1196,17 @@ async function executeJob(job) {
     result = await handler.collect(ctx, args);
   }
 
-  envelope.effect.diff = diffProbes(envelope.probes);
+  const effectProbes = envelope.probes.slice(0, effectProbeCount);
+  envelope.effect.diff = diffProbes(effectProbes);
   envelope.effect.changed = envelope.effect.diff.length > 0;
-  envelope.effect.summary = summarizeEffect(envelope.effect.diff, envelope.probes, envelope.expectsChange);
+  envelope.effect.summary = summarizeEffect(envelope.effect.diff, effectProbes, envelope.expectsChange);
+
+  if (envelope.rolledBack) {
+    envelope.effect.summary =
+      envelope.rollbackOk === false
+        ? `the change did not take AND the rollback failed (${envelope.rollbackError}) — the machine needs a person`
+        : `the change did not take; the machine was rolled back to its prior state`;
+  }
 
   const output = [result.output, result.note ? `note: ${result.note}` : null].filter(Boolean).join("\n");
   return finish({ ...result, output: output || undefined });
@@ -1270,16 +1334,21 @@ function writeSystemLog(job, envelope, result) {
 
 // ---- console + desktop feedback -------------------------------------------
 
-console.log(`${ANSI.cyan}${ANSI.bold}╔════════════════════════════════════════════════════════════╗${ANSI.reset}`);
-console.log(`${ANSI.cyan}${ANSI.bold}║          🛡   LOCAL SANDBOX AGENT — STARTED                ║${ANSI.reset}`);
-console.log(`${ANSI.cyan}${ANSI.bold}╚════════════════════════════════════════════════════════════╝${ANSI.reset}`);
-console.log(`${ANSI.bold}  host:${ANSI.reset}    ${AGENT_HOSTNAME}`);
-console.log(`${ANSI.bold}  os:${ANSI.reset}      ${AGENT_OS}`);
-console.log(`${ANSI.bold}  node:${ANSI.reset}    ${process.version}`);
-console.log(`${ANSI.bold}  app:${ANSI.reset}     ${appUrl}`);
-console.log(`${ANSI.bold}  poll:${ANSI.reset}    every ${intervalMs}ms`);
-console.log(`${ANSI.bold}  journal:${ANSI.reset} ${journalDir()}`);
-console.log(`${ANSI.green}  Ready — waiting for jobs from the cloud agent…${ANSI.reset}\n`);
+// Behind IS_ENTRYPOINT with the poll loop: a test harness imports this module
+// to drive the real executeJob, and a startup banner in the test output is
+// noise that makes a real failure harder to see.
+if (IS_ENTRYPOINT) {
+  console.log(`${ANSI.cyan}${ANSI.bold}╔════════════════════════════════════════════════════════════╗${ANSI.reset}`);
+  console.log(`${ANSI.cyan}${ANSI.bold}║          🛡   LOCAL SANDBOX AGENT — STARTED                ║${ANSI.reset}`);
+  console.log(`${ANSI.cyan}${ANSI.bold}╚════════════════════════════════════════════════════════════╝${ANSI.reset}`);
+  console.log(`${ANSI.bold}  host:${ANSI.reset}    ${AGENT_HOSTNAME}`);
+  console.log(`${ANSI.bold}  os:${ANSI.reset}      ${AGENT_OS}`);
+  console.log(`${ANSI.bold}  node:${ANSI.reset}    ${process.version}`);
+  console.log(`${ANSI.bold}  app:${ANSI.reset}     ${appUrl}`);
+  console.log(`${ANSI.bold}  poll:${ANSI.reset}    every ${intervalMs}ms`);
+  console.log(`${ANSI.bold}  journal:${ANSI.reset} ${journalDir()}`);
+  console.log(`${ANSI.green}  Ready — waiting for jobs from the cloud agent…${ANSI.reset}\n`);
+}
 
 function notify(title, subtitle, message) {
   if (!IS_MAC) return;
@@ -1378,7 +1447,35 @@ async function handleJob(job) {
   chime("Glass");
   say(`${label} on ${AGENT_HOSTNAME.split(".")[0]}`);
 
-  const result = await executeJob(job);
+  // executeJob is contracted not to throw. This is the backstop for the one
+  // that does anyway: previously an unexpected throw here rejected handleJob,
+  // propagated to poll()'s catch, and left the job `claimed` forever — the
+  // server then timed it out at 45s and reported it as an offline agent, which
+  // sends a technician to look at the network instead of at the bug.
+  let result;
+  try {
+    result = await executeJob(job);
+  } catch (err) {
+    console.error(`${ANSI.red}  agent error:${ANSI.reset} ${err.message}`);
+    result = {
+      ok: false,
+      error: `local agent threw while running the job: ${err.message}`,
+      envelope: {
+        jobId: job.id,
+        command: job.allowlistedCommand,
+        host: AGENT_HOSTNAME,
+        os: AGENT_OS,
+        agentVersion: AGENT_VERSION,
+        startedAt,
+        finishedAt: Date.now(),
+        durationMs: Date.now() - startedAt,
+        expectsChange: false,
+        probes: [],
+        commands: [],
+        effect: { changed: false, diff: [], summary: "the agent threw before it could report" },
+      },
+    };
+  }
   const envelope = result.envelope;
   printProof(envelope);
 
@@ -1407,14 +1504,21 @@ async function handleJob(job) {
         Authorization: `Bearer ${token}`,
         "Content-Type": "application/json",
       },
-      body: JSON.stringify({
-        ok: result.ok !== false,
-        output: result.output,
-        error: result.error,
-        agentHost: AGENT_HOSTNAME,
-        agentOs: AGENT_OS,
-        envelope,
-      }),
+      // Redacted as a whole, not field by field. Redaction used to be applied
+      // to fs_read and fs_grep output only, so a credential echoed by an
+      // allowlisted binary, or captured in the raw stdout kept on every command
+      // record, went out in the clear. redactDeep covers every string in the
+      // payload, including fields added later.
+      body: JSON.stringify(
+        redactDeep({
+          ok: result.ok !== false,
+          output: result.output,
+          error: result.error,
+          agentHost: AGENT_HOSTNAME,
+          agentOs: AGENT_OS,
+          envelope,
+        }),
+      ),
     });
   } catch (err) {
     console.warn(`[local-agent] upload failed (${err.message}) — result is still in ${envelope.journalPath}`);
@@ -1440,7 +1544,20 @@ async function handleJob(job) {
 }
 
 // Exported so a test harness can drive the real execution path without a server.
-export { executeJob, recordChange, writeSystemLog, appendJournal, HANDLERS, parseCommand };
+// Exported for the test harness. validateReadOnlyCommand and resolveTarget are
+// the device-side enforcement — the last line of defence, and until now the only
+// part of this system with no tests at all.
+export {
+  executeJob,
+  recordChange,
+  writeSystemLog,
+  appendJournal,
+  HANDLERS,
+  parseCommand,
+  validateReadOnlyCommand,
+  resolveTarget,
+  READ_ONLY_BINARIES,
+};
 
 if (IS_ENTRYPOINT) {
   await poll();

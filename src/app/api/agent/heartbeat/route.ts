@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { getCurrentSession } from "@/lib/auth";
 import { z } from "zod";
 import { HEARTBEAT_CONNECTED_WINDOW_MS, readHeartbeat, recordHeartbeat } from "@/lib/agent-heartbeat";
 
@@ -43,7 +44,23 @@ export async function POST(req: Request) {
   return NextResponse.json({ ok: true });
 }
 
-export async function GET() {
+/**
+ * Agent status for the UI.
+ *
+ * This was unauthenticated, and it returns an employee's hostname, operating
+ * system, and what is being run on their machine right now. That is a free
+ * reconnaissance endpoint for anyone who can reach the deployment: it names a
+ * live host and tells you when somebody is at the keyboard.
+ *
+ * Two callers, two credentials: a signed-in person in the UI, or the device
+ * agent itself. Neither is "whoever asks".
+ */
+export async function GET(req: Request) {
+  const session = await getCurrentSession().catch(() => null);
+  if (!session && !authorized(req)) {
+    return NextResponse.json({ error: "unauthorized" }, { status: 401 });
+  }
+
   const hb = readHeartbeat();
   if (!hb) return NextResponse.json({ connected: false });
   const ageMs = Date.now() - hb.lastPingAt;
