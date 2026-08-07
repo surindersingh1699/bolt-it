@@ -719,8 +719,39 @@ export async function listAgentJobs(
  * The route used to list queued jobs and then loop calling updateAgentJob on
  * each — no compare-and-swap, so two agents polling at the same moment both saw
  * `queued` and both received the work. Returns null when the claim was lost.
+ *
+ * Must go through InsForge when it is the store, exactly like updateAgentJob:
+ * the first cut only touched the in-memory db, so on the real deployment the
+ * queued rows lived in InsForge, the claim found nothing in memory, and every
+ * agent poll came back empty — the machine sat idle with a full queue.
  */
 export async function claimAgentJob(id: string, deviceId?: string): Promise<AgentJob | null> {
+  const ifg = isInsforgeEnabled() ? getInsforge() : null;
+  if (ifg) {
+    try {
+      const now = Date.now();
+      // The compare-and-swap: the `.eq("status","queued")` is the guard. Two
+      // agents racing on one job both issue this; PostgREST returns the rows the
+      // UPDATE actually matched, so the first flips queued→claimed and gets the
+      // row back, and the second matches nothing and gets an empty set — which
+      // is the lost claim. Device binding is enforced by the caller before it
+      // gets here (the route filters by deviceId), so this stays a pure status
+      // transition.
+      const { data, error } = await ifg.database
+        .from("agent_jobs")
+        .update({ status: "claimed", claimed_at: now, updated_at: now })
+        .eq("id", id)
+        .eq("status", "queued")
+        .select();
+      if (!error) {
+        const rows = (data as DbRow[]) ?? [];
+        return rows.length > 0 ? agentJobFromRow(rows[0]) : null;
+      }
+      // fall through to in-memory only on an InsForge error
+    } catch {
+      /* fall through */
+    }
+  }
   return db.claimAgentJob(id, deviceId);
 }
 
