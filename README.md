@@ -53,7 +53,7 @@ pnpm install
 pnpm dev                     # http://localhost:3000
 ```
 
-Env (`.env.local`): `AI_GATEWAY_API_KEY` + `AI_GATEWAY_URL` + `AI_GATEWAY_MODEL` (any OpenAI-compatible endpoint), `LANGSMITH_TRACING/API_KEY/PROJECT`, `LOCAL_AGENT_TOKEN`, InsForge keys.
+Env (`.env.local`): `AI_GATEWAY_API_KEY` + `AI_GATEWAY_URL` (any OpenAI-compatible endpoint), `STRATEGIST_MODEL` / `OPERATOR_MODEL` / `COMMUNICATOR_MODEL` / `CHAT_MODEL`, `LANGSMITH_TRACING/API_KEY/PROJECT`, `LOCAL_AGENT_TOKEN`, InsForge keys.
 
 Sign in at `/login`. The directory holds one real IT-staff account — there are no fictional colleagues. A fresh database seeds one admin from `SEED_ADMIN_EMAIL` / `SEED_ADMIN_PASSWORD` (see [src/lib/seed.ts](src/lib/seed.ts)); `node scripts/reset-workspace.mjs --yes` puts an existing database back to that state, wiping every ticket, job and workspace.
 

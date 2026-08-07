@@ -6,6 +6,7 @@ import {
   clearTicketsAndJobsForWorkspace,
   getTicket,
   insertTicket,
+  listAgentJobs,
   updateTicket,
 } from "@/lib/data";
 import { Attachment, Ticket } from "@/lib/types";
@@ -13,8 +14,8 @@ import { uploadAttachment } from "@/lib/attachments";
 import { ensureSeeded } from "@/lib/seed";
 import { getCurrentUser } from "@/lib/auth";
 import { ACME_WORKSPACE_ID, getCurrentWorkspaceId } from "@/lib/workspace";
-import { firstNameOf, postUpdate } from "@/lib/ticket-helpers";
-import { runTicketGraphFromStart, resumeTicketGraph } from "@/lib/ticket-graph";
+import { buildReplyEvidence, firstNameOf, postUpdate } from "@/lib/ticket-helpers";
+import { reopenTicketGraph, runTicketGraphFromStart, resumeTicketGraph } from "@/lib/ticket-graph";
 
 export interface CreateTicketInput {
   reporter: string;
@@ -145,18 +146,50 @@ export async function confirmTicketResolved(
   safeRevalidate("/");
 }
 
-export async function escalateAfterUserDenied(ticketId: string): Promise<void> {
+/**
+ * The employee says it did not work.
+ *
+ * This used to escalate on the spot. It now takes one more look first: their
+ * account of what is still happening is new evidence, the machine is re-read on
+ * the way in, and the reopen budget in the graph is what decides when a person
+ * takes over. Escalating on the first "no" threw away a whole round that was
+ * still available and left them with nothing to do but wait.
+ */
+export async function escalateAfterUserDenied(ticketId: string, detail?: string): Promise<void> {
   const ticket = await getTicket(ticketId);
   if (!ticket || ticket.status !== "awaiting_confirmation") return;
-  await updateTicket(ticketId, { status: "escalated" });
-  if (ticket.channel === "slack") {
-    const firstName = firstNameOf(ticket.reporter);
-    await postUpdate(
-      ticket,
-      `🙏 Sorry that didn't fix it, ${firstName}. I've escalated ticket ${ticketId} to a human technician — they'll reach out shortly.`,
-    );
-  }
+  await takeAnotherLook(ticketId, detail ?? "the employee said the problem is still happening");
   safeRevalidate("/");
+}
+
+/**
+ * Send the ticket back through the graph with what the employee just told us.
+ *
+ * No budget check here on purpose. `reopenTicketGraph` counts the reopens and
+ * the strategist hands off once it passes MAX_REOPENS, so the bound lives in
+ * one place — a second copy of it here could disagree with the graph's.
+ */
+async function takeAnotherLook(ticketId: string, detail: string): Promise<void> {
+  const ticket = await getTicket(ticketId);
+  if (!ticket) return;
+  await updateTicket(ticketId, { status: "executing" });
+  after(async () => {
+    try {
+      await reopenTicketGraph(ticketId, detail);
+    } catch (err) {
+      console.error(`[takeAnotherLook] reopenTicketGraph failed for ${ticketId}:`, err);
+    }
+  });
+}
+
+/** They asked for a person. Trying more things is the wrong answer. */
+async function handOffToHuman(ticketId: string, detail: string): Promise<void> {
+  const ticket = await getTicket(ticketId);
+  if (!ticket) return;
+  await updateTicket(ticketId, {
+    status: "escalated",
+    troubleshootingSummary: `${ticket.troubleshootingSummary ?? ""}\n\nThe employee asked for a person: "${detail}"`.trim(),
+  });
 }
 
 export async function clearTicketQueue(): Promise<{ tickets: number; agentJobs: number }> {
@@ -177,22 +210,74 @@ export async function escalateTicket(ticketId: string): Promise<void> {
   safeRevalidate("/");
 }
 
+/**
+ * The employee said something in the thread.
+ *
+ * The desk answers from the same evidence the engineer had — what actually ran,
+ * what the device's own probes said about it, and everything already said in
+ * this conversation. It used to answer from a truncated plan summary with no
+ * history at all, which is why it half-answered and then re-asked.
+ *
+ * The reply's `intent` decides where this goes. That is a label the model
+ * returns and this function switches on, exactly like the `new_issue` flag it
+ * replaces — no model picks a graph node.
+ */
 export async function chatWithAgent(ticketId: string, message: string): Promise<"chat" | "new_ticket"> {
   const ticket = await getTicket(ticketId);
   if (!ticket) return "new_ticket";
+
   const firstName = firstNameOf(ticket.reporter);
-  const planLines = ticket.plan
-    .map((s) => `- [${s.status}] ${s.description}${s.log?.length ? ` | ${s.log.slice(-2).join(" | ").slice(0, 200)}` : ""}`)
-    .join("\n");
-  const summary = `Subject: ${ticket.subject}\nStatus: ${ticket.status}\nAttempts: ${ticket.attempts ?? 1}\nSteps:\n${planLines}\nTroubleshooting findings:\n${ticket.troubleshootingSummary ?? "(none)"}`;
+  const { appendUserChat, getChat } = await import("@/lib/chat");
+  const history = getChat(ticketId).slice(-12);
+
+  const jobs = (await listAgentJobs(ticket.workspaceId)).filter((j) => j.ticketId === ticketId);
+  const evidence = buildReplyEvidence(ticket.plan, jobs);
+
   const { conversationalReply } = await import("@/lib/integrations/ai-gateway");
-  const result = await conversationalReply({ userMessage: message, firstName, ticketSummary: summary });
-  if (!result || result.newIssue || !result.reply) return "new_ticket";
-  // Record the user's message only once we know it belongs to this thread —
-  // on the new_ticket path it becomes the new ticket's body instead.
-  const { appendUserChat } = await import("@/lib/chat");
+  const result = await conversationalReply({
+    ticketId,
+    firstName,
+    subject: ticket.subject,
+    body: ticket.body,
+    userMessage: message,
+    history,
+    evidence,
+    diagnosis: ticket.troubleshootingSummary,
+    status: ticket.status,
+  }).catch(() => null);
+
+  // No usable answer is not a new problem. Opening a ticket here — which is what
+  // this used to do — turned every gateway timeout into a duplicate ticket the
+  // employee never asked for. Say so instead, and keep their message on the
+  // thread it belongs to.
+  if (!result) {
+    appendUserChat(ticketId, message);
+    await postUpdate(
+      ticket,
+      `Hi ${firstName} — I can't reach my tools at the moment, so I don't want to guess at an answer. ` +
+        `I've kept what you said on ticket ${ticketId} and I'll pick it up as soon as I'm back.`,
+    );
+    safeRevalidate("/");
+    return "chat";
+  }
+
+  // A different problem. Say so on this thread first — the message becomes the
+  // new ticket's body, so without this line it would vanish from here entirely.
+  if (result.intent === "new_issue") {
+    await postUpdate(ticket, result.reply);
+    safeRevalidate("/");
+    return "new_ticket";
+  }
+
   appendUserChat(ticketId, message);
   await postUpdate(ticket, result.reply);
+
+  if (result.intent === "wants_human") {
+    await handOffToHuman(ticketId, message);
+  } else if (result.intent === "still_broken") {
+    await takeAnotherLook(ticketId, message);
+  }
+
   safeRevalidate("/");
   return "chat";
 }

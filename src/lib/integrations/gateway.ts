@@ -48,6 +48,29 @@ export interface GatewayRequest {
 
 const DEFAULT_TIMEOUT_MS = 25_000;
 
+/**
+ * Models that reject `temperature` outright.
+ *
+ * The Claude 5 family answers a request carrying it with a 400 and
+ * "`temperature` is deprecated for this model" — not a warning, not a silently
+ * ignored field. Every call here passes a temperature, so without this the
+ * repo's own defaults (`claude-opus-5` for the strategist, `claude-sonnet-5`
+ * for the operator, reviewer and chat) fail on every single call.
+ *
+ * That failure is invisible from the outside: `gatewayChat` returns null,
+ * callers fail closed, and the employee reads the deterministic fallback text.
+ * The system looks like a bad writer rather than a disconnected one — which is
+ * exactly how this went unnoticed until someone read the replies closely.
+ *
+ * Matched on the model id rather than kept as a list of exact slugs, so a new
+ * member of the family (`claude-fable-5`, dated variants) is covered on arrival.
+ */
+const TEMPERATURE_UNSUPPORTED = /(^|\/)claude-[a-z]+-5(-|$)/;
+
+export function supportsTemperature(model: string): boolean {
+  return !TEMPERATURE_UNSUPPORTED.test(model);
+}
+
 export async function gatewayChat(req: GatewayRequest): Promise<string | null> {
   if (!process.env.AI_GATEWAY_API_KEY) return null;
 
@@ -80,7 +103,9 @@ export async function gatewayChat(req: GatewayRequest): Promise<string | null> {
       },
       body: JSON.stringify({
         model: req.model,
-        temperature: req.temperature ?? 0.2,
+        // Omitted, not defaulted, for models that refuse it — see
+        // TEMPERATURE_UNSUPPORTED. Sending it is a 400, not a warning.
+        ...(supportsTemperature(req.model) ? { temperature: req.temperature ?? 0.2 } : {}),
         messages: [
           { role: "system", content: req.system },
           { role: "user", content: req.user },
@@ -90,7 +115,14 @@ export async function gatewayChat(req: GatewayRequest): Promise<string | null> {
     });
 
     if (!res.ok) {
-      console.warn(`[Gateway] ${req.call} returned ${res.status}`);
+      // The provider's own reason, not just the status. A bare "returned 400"
+      // is indistinguishable between a wrong model id, a rejected parameter and
+      // an expired key — three problems with three different fixes, and the
+      // employee sees the same fallback text for all of them.
+      const why = await res.text().catch(() => "");
+      console.warn(
+        `[Gateway] ${req.call} (${req.model}) returned ${res.status}${why ? `: ${why.slice(0, 300)}` : ""}`,
+      );
       bill(false, null);
       return null;
     }

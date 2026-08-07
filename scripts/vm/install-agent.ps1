@@ -49,6 +49,11 @@ Set-Acl -Path $root -AclObject $acl
   ConvertTo-Json | Set-Content -Path "$root\config.json" -Encoding UTF8
 
 # ---- the runner: pull the current agent, run it, restart it if it dies -------
+# The agent self-exits when the server serves a newer build (see the poll loop
+# in local-agent.mjs), so this loop's re-pull-on-exit IS the update mechanism.
+# Two guards make auto-update safe on a machine that runs the pulled code as
+# admin: a syntax check before a new build is adopted, and crashloop backoff so
+# a bad deploy is ignored rather than hammered.
 $runner = @'
 $ErrorActionPreference = "Stop"
 $root = "C:\ProgramData\BoltIt"
@@ -58,15 +63,29 @@ $agent = "$root\local-agent.mjs"
 $env:LOCAL_AGENT_TOKEN = $cfg.Token
 $env:IT_SUPPORT_APP_URL = $cfg.AppUrl
 
+$fastExits = 0
+
 while ($true) {
   # Pull the current agent. If the app is unreachable, fall back to the copy
   # from last time rather than sitting idle -- a stale agent still beats none.
   try {
-    Invoke-WebRequest -Uri "$($cfg.AppUrl)/api/agent/script" `
+    $resp = Invoke-WebRequest -Uri "$($cfg.AppUrl)/api/agent/script" `
       -Headers @{ Authorization = "Bearer $($cfg.Token)" } `
-      -OutFile "$agent.new" -UseBasicParsing -TimeoutSec 20
-    Move-Item -Force "$agent.new" $agent
-    Write-Host "[bolt-it] pulled current agent from $($cfg.AppUrl)"
+      -OutFile "$agent.new" -UseBasicParsing -TimeoutSec 20 -PassThru
+    $build = $resp.Headers["X-Agent-Build"]
+
+    # Do NOT adopt a bundle node cannot even parse. Without this, one broken
+    # deploy would crashloop every machine in the fleet -- the fallback below
+    # only covers a failed *pull*, not a pulled file that crashes on start.
+    & node --check "$agent.new" 2>$null
+    if ($LASTEXITCODE -eq 0) {
+      Move-Item -Force "$agent.new" $agent
+      Write-Host "[bolt-it] pulled agent build $build"
+    } else {
+      Remove-Item -Force "$agent.new" -ErrorAction SilentlyContinue
+      Write-Host "[bolt-it] pulled build $build FAILED node --check -- keeping the last good copy"
+      if (-not (Test-Path $agent)) { Start-Sleep -Seconds 15; continue }
+    }
   } catch {
     Write-Host "[bolt-it] could not pull agent ($($_.Exception.Message))"
     if (-not (Test-Path $agent)) {
@@ -77,9 +96,21 @@ while ($true) {
     Write-Host "[bolt-it] running the copy from last time"
   }
 
+  $started = Get-Date
   node $agent
-  Write-Host "[bolt-it] agent exited ($LASTEXITCODE) -- restarting in 5s"
-  Start-Sleep -Seconds 5
+  $ran = (Get-Date) - $started
+  Write-Host "[bolt-it] agent exited ($LASTEXITCODE) after $([int]$ran.TotalSeconds)s"
+
+  # A clean self-exit for an update runs for a while and comes back on the new
+  # build. A build that dies in seconds, repeatedly, is a bad deploy: back off
+  # so we are not pulling and crashing several times a second.
+  if ($ran.TotalSeconds -lt 10) { $fastExits++ } else { $fastExits = 0 }
+  if ($fastExits -ge 3) {
+    Write-Host "[bolt-it] agent has crashed on startup $fastExits times -- backing off 60s"
+    Start-Sleep -Seconds 60
+  } else {
+    Start-Sleep -Seconds 5
+  }
 }
 '@
 Set-Content -Path "$root\run-agent.ps1" -Value $runner -Encoding UTF8

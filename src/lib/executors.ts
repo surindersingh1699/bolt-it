@@ -21,7 +21,7 @@
 
 import { ActionKind, PlanStep, StepFailure, Ticket } from "./types";
 import { directoryInvoke } from "./integrations/directory";
-import { synthesizeReply } from "./integrations/ai-gateway";
+import { communicate } from "./integrations/ai-gateway";
 import { enqueueAgentJob } from "./agent-jobs";
 import { buildCommand, capabilitySpec } from "./capabilities";
 import { autonomyNote, isDryRun } from "./autonomy";
@@ -139,6 +139,21 @@ const executeDevice: StepExecutor = async (ticket, step) => {
   }
 
   if (!ok) {
+    // A binary the agent would run if a person said so is a different problem
+    // from one that errored: the first is answered by a decision, the second by
+    // a different approach. Classifying both as `execution` is what let the
+    // strategist re-authorise the same refused check three rounds running.
+    const grantable = grantableBinaryFrom(finished.error);
+    if (grantable) {
+      return {
+        ok: false,
+        log: [...proof, `[Local Agent] ${grantable} needs a technician's approval before it can run`],
+        failure: {
+          kind: "capability_missing",
+          detail: `the read-only diagnostic ${grantable} is not enabled by default and needs a technician to approve it for this ticket`,
+        },
+      };
+    }
     return {
       ok: false,
       log: proof,
@@ -151,6 +166,15 @@ const executeDevice: StepExecutor = async (ticket, step) => {
 
   return { ok: true, log: proof };
 };
+
+/**
+ * The agent marks a refusal it would accept a grant for as
+ * `GRANTABLE:<binary>:<message>`. Anything else is a refusal no approval fixes.
+ */
+export function grantableBinaryFrom(error: string | undefined): string | null {
+  const m = /^GRANTABLE:([A-Za-z0-9_.-]{1,32}):/.exec(error ?? "");
+  return m ? m[1] : null;
+}
 
 /**
  * The message the employee sees. Waits for outstanding device jobs first so the
@@ -166,14 +190,16 @@ const executeReply: StepExecutor = async (ticket, step) => {
   const jobsForTicket = allJobs.filter((j) => j.ticketId === ticket.id);
 
   const evidence = buildReplyEvidence(stepsBeforeReply, jobsForTicket);
-  log.push(`[Reply] Synthesizing reply from ${evidence.length} executed step(s)`);
+  log.push(`[Reply] Composing the desk's resolution message from ${evidence.length} executed step(s)`);
 
   const firstName = firstNameOf(ticket.reporter);
-  const synthesized = await synthesizeReply({
+  const synthesized = await communicate({
     ticketId: ticket.id,
+    moment: "resolution",
     reporterFirstName: firstName,
     subject: ticket.subject,
     body: ticket.body,
+    agentSummary: ticket.draftResponse,
     evidence,
   }).catch(() => null);
 
@@ -182,7 +208,7 @@ const executeReply: StepExecutor = async (ticket, step) => {
   log.push(
     synthesized
       ? `[Reply] Composed from real step results`
-      : `[Reply] Synthesizer unavailable — falling back to initial draft`,
+      : `[Reply] Desk unavailable — falling back to the engineer's own summary`,
   );
   await postUpdate(ticket, replyText);
 

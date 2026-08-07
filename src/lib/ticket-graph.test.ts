@@ -140,3 +140,49 @@ describe("ticket graph wiring", () => {
     expect(nodes).toContain("finalize");
   });
 });
+
+describe("reopening a ticket the employee sent back", () => {
+  it("gives them one more look and no more", async () => {
+    const { MAX_REOPENS } = await import("./ticket-graph");
+
+    // One. A fix that did not work earns a second look with the employee's own
+    // account of what is still happening — that is new evidence. A second
+    // failure is not a third round; it means this system has the wrong model of
+    // the problem, and more rounds of the same conversation only cost opus
+    // calls and the employee's afternoon.
+    expect(MAX_REOPENS).toBe(1);
+  });
+
+  it("hands a ticket past that bound to a person", async () => {
+    const { ticketGraph } = await import("./ticket-graph");
+    const graph = await ticketGraph.getGraphAsync();
+
+    // The overflow check sits at the top of the strategist, before the
+    // expensive call. Without this edge the bound would have nowhere to send a
+    // ticket and the reopen path would be an unbounded loop.
+    const outOfStrategist = graph.edges.filter((e) => e.source === "strategist").map((e) => e.target);
+    expect(outOfStrategist).toContain("humanHandoff");
+  });
+});
+
+describe("what the employee is left with at the end", () => {
+  it("no longer posts a bare yes/no question under the resolution message", async () => {
+    const { readFile } = await import("node:fs/promises");
+    const source = await readFile(new URL("./ticket-graph.ts", import.meta.url), "utf8");
+    // Comments stripped: the comment where finalize explains why this line was
+    // deleted quotes the line, and a guard that fires on its own explanation is
+    // a guard nobody keeps.
+    const code = source
+      .split("\n")
+      .filter((l) => !l.trim().startsWith("//") && !l.trim().startsWith("*"))
+      .join("\n");
+
+    // This line used to go out as its own message directly beneath the
+    // resolution text, which is what made every ticket end on a half-answer
+    // followed by a form question. EmployeePortal already renders Yes/No
+    // buttons for the same decision; the desk's `resolution` moment asks for
+    // the one specific observation that would settle it.
+    expect(code).not.toMatch(/Is the issue resolved\?/);
+    expect(code).not.toMatch(/Reply \*yes\* or \*no\*/);
+  });
+});

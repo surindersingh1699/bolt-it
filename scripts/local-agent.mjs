@@ -28,6 +28,10 @@ if (IS_ENTRYPOINT && !token) {
 const AGENT_HOSTNAME = os.hostname();
 const AGENT_OS = `${os.platform()} ${os.release()} (${os.arch()})`;
 const AGENT_VERSION = "local-agent/0.6.0";
+// Replaced with a content hash of the bundle when served by /api/agent/script.
+// Stays "dev" when the file is run straight from disk (`pnpm agent`), where
+// there is no build to update against and the self-exit below must never fire.
+const AGENT_BUILD = "dev";
 const IS_MAC = os.platform() === "darwin";
 const IS_WINDOWS = os.platform() === "win32";
 
@@ -628,6 +632,16 @@ const READ_ONLY_BINARIES = IS_WINDOWS
       ipconfig: {},
       netstat: {},
       nslookup: {},
+      // Reachability diagnostics. Read-only — they send probe packets and print,
+      // they change nothing. The macOS branch has had ping/traceroute/dig since
+      // the start; leaving them off the Windows branch was a plain omission, and
+      // it is why a "can't reach the VPN / a host" ticket had nothing to run.
+      // Windows `ping` sends 4 and exits; `tracert` is hop-bounded. `-t` is an
+      // infinite ping and the agent has no per-command timeout, so it is denied
+      // — the one way this read could hang the poll loop.
+      ping: { deniedArgs: [/^-t$/i, /^\/t$/i] },
+      tracert: {},
+      pathping: {},
       tasklist: {},
       whoami: {},
       hostname: {},
@@ -742,10 +756,61 @@ const SAFE_ARG = /^[A-Za-z0-9._\-/:@=+,%[\]]+$/;
 // is never diagnostics.
 const DENIED_ARG = /(\.ssh|\.aws|\.gnupg|keychain|cookies|login ?data|\.env|id_rsa|id_ed25519|id_ecdsa|credentials|secring|\.netrc|shadow)/i;
 
-function validateReadOnlyCommand(binary, argv) {
-  const spec = READ_ONLY_BINARIES[binary];
+// ---- grantable read surface -------------------------------------------------
+// Read-only binaries that are NOT on by default, and that a named human can
+// switch on for ONE ticket through the approval gate.
+//
+// This is not a way in for arbitrary commands, and it must never become one. It
+// is a second closed list with the same read-only premise as the first — the
+// only difference is that reaching for one of these costs a person's decision
+// instead of being free. The failure it exists to prevent is the one seen on
+// T-8805: the strategist asks a reasonable diagnostic question, the binary is
+// not on the list, the step dies, and three rounds later the ticket reaches a
+// human having tested nothing at all.
+//
+// A binary belongs here only if it cannot change the machine. Every entry keeps
+// its subcommand filter, and every argument still goes through SAFE_ARG and
+// DENIED_ARG, so a grant widens WHICH binary may run and nothing else.
+const GRANTABLE_BINARIES = IS_WINDOWS
+  ? {
+      // `netsh show`/`dump` print configuration; every mutating verb it has
+      // (set/add/delete/reset/import) is absent from this list and therefore
+      // refused by the same subcommand check as everything else.
+      netsh: { subcommands: ["show", "dump"] },
+      nltest: { subcommands: ["/dsgetdc:", "/sc_query:", "/dclist:"] },
+      w32tm: { subcommands: ["/query"] },
+      openfiles: { subcommands: ["/query"] },
+    }
+  : {
+      // `nettop` and `vm_stat` are on the default list already, so they are not
+      // repeated here — a binary in both lists would be reachable without the
+      // grant, and a grantable list nobody can trust to be exhaustive is worse
+      // than none.
+      dscacheutil: { subcommands: ["-statistics", "-configuration"] },
+      networkQuality: {},
+    };
+
+/**
+ * @param binary   the binary being asked for
+ * @param argv     its arguments
+ * @param granted  binaries a human approved for THIS ticket, from job.grantedBinaries
+ */
+function validateReadOnlyCommand(binary, argv, granted = []) {
+  const spec =
+    READ_ONLY_BINARIES[binary] ??
+    // Only when a person approved this exact binary for this ticket AND it is
+    // on the curated grantable list. A grant naming something outside that list
+    // buys nothing — that is what stops an approval prompt becoming a way to
+    // run anything by talking a technician into one click.
+    (granted.includes(binary) ? GRANTABLE_BINARIES[binary] : undefined);
   if (!spec) {
-    return `"${binary}" is not on the read-only binary allowlist`;
+    // The marker is load-bearing: the server reads it to tell "this binary could
+    // be approved" apart from "this binary is not a read". Without it a
+    // grantable refusal is indistinguishable from a typo and the step just dies.
+    const grantable = Boolean(GRANTABLE_BINARIES[binary]);
+    return grantable
+      ? `GRANTABLE:${binary}:"${binary}" is not enabled by default and needs a technician's approval for this ticket`
+      : `"${binary}" is not on the read-only binary allowlist`;
   }
   if (argv.length > 12) return "too many arguments";
   for (const a of argv) {
@@ -769,8 +834,13 @@ function validateReadOnlyCommand(binary, argv) {
   return null;
 }
 
-async function collectCommandOutput(ctx, { binary, argv }) {
-  const rejection = validateReadOnlyCommand(binary, argv);
+async function collectCommandOutput(ctx, { binary, argv }, job) {
+  // Grants are carried on the job, not parsed out of the command string: the
+  // command is what the model composed, and a grant is what a person decided.
+  // Keeping them on separate rails means no phrasing of the former can forge
+  // the latter.
+  const granted = Array.isArray(job?.grantedBinaries) ? job.grantedBinaries : [];
+  const rejection = validateReadOnlyCommand(binary, argv, granted);
   if (rejection) return { ok: false, error: rejection };
 
   const res = await runRecorded(ctx, binary, argv);
@@ -836,7 +906,9 @@ function recordFsAccess(ctx, verb, target, note) {
   ctx.commands.push({
     argv: [verb, target],
     exitCode: 0,
-    stdout: note.slice(0, 4000),
+    // Coerce: a caller that passes a number here (fs_find did) must not crash
+    // the whole job on `.slice`. The audit record is best-effort text.
+    stdout: String(note ?? "").slice(0, 4000),
     stderr: "",
     durationMs: 0,
   });
@@ -1217,7 +1289,7 @@ async function collectFsFind(ctx, args) {
   };
 
   walk(target.path, 0);
-  recordFsAccess(ctx, "fs_find", target.path, results.length);
+  recordFsAccess(ctx, "fs_find", target.path, `${results.length} matches, ${scanned} scanned`);
 
   const lines = results.map((r) => r.replace(os.homedir(), "~"));
   return {
@@ -1884,6 +1956,20 @@ async function poll() {
     const data = await res.json();
     for (const job of data.jobs ?? []) {
       await handleJob(job);
+    }
+
+    // Auto-update. This cycle's jobs were drained first, so nothing already
+    // claimed is abandoned. If the server is now serving a different build than
+    // the one I am, and I am not a hand-run dev copy, and nothing is in flight,
+    // exit cleanly — the supervisor loop (run-agent.ps1) re-pulls the current
+    // agent on exit. Bounded staleness after a deploy is one poll interval.
+    const serverBuild = typeof data.agentBuild === "string" ? data.agentBuild : null;
+    if (AGENT_BUILD !== "dev" && serverBuild && serverBuild !== AGENT_BUILD && !currentJob) {
+      console.log(
+        `[local-agent] server is serving build ${serverBuild}, I am ${AGENT_BUILD} — ` +
+          `exiting so the supervisor pulls the current agent`,
+      );
+      process.exit(0);
     }
   } catch (err) {
     console.error(`[local-agent] ${err.message}`);

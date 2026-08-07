@@ -338,11 +338,15 @@ function TicketThread({
   }, [rows.length, ticket.status, ticket.plan.length]);
 
   const send = (text: string, files: File[]) => {
-    // On a ticket waiting for confirmation, a plain yes/no answers it.
-    if (awaiting) {
-      const verdict = classifyConfirmation(text);
-      if (verdict === "yes") return startTransition(() => confirmTicketResolved(ticket.id));
-      if (verdict === "no") return startTransition(() => escalateAfterUserDenied(ticket.id));
+    // On a ticket waiting for confirmation, a plain "yes" closes it — there is
+    // nothing left to say and a model call to confirm that would be waste.
+    //
+    // "No" deliberately does NOT short-circuit any more. It used to escalate on
+    // the spot, which meant the one message that carries the most information —
+    // what is still happening — was never read by anything. It goes through the
+    // desk instead, which answers it and classifies it as `still_broken`.
+    if (awaiting && classifyConfirmation(text) === "yes") {
+      return startTransition(() => confirmTicketResolved(ticket.id));
     }
     startTransition(async () => {
       if (files.length > 0) {
@@ -545,7 +549,12 @@ function ConfirmBlock({ ticket }: { ticket: Ticket }) {
     <div className="mt-3 flex gap-2.5 px-2">
       <div className="w-9 flex-none" />
       <div className="rounded-xl border border-neutral-200 bg-white p-3">
-        <div className="text-[13.5px] text-neutral-700">Only you can close this — is it actually fixed?</div>
+        <div className="text-[13.5px] text-neutral-700">
+          Only you can close this — is it actually fixed?
+        </div>
+        <div className="mt-1 text-[12.5px] text-neutral-500">
+          If it isn&apos;t, tell me what you&apos;re still seeing and I&apos;ll take another look.
+        </div>
         <div className="mt-2.5 flex gap-2">
           <button
             onClick={() => startTransition(() => confirmTicketResolved(ticket.id))}

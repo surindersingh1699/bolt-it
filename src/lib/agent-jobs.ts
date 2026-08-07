@@ -28,6 +28,10 @@ async function buildJob(
     kind: jobKindForCapability(capability),
     targetUserEmail: ticket.reporterEmail,
     ...(device ? { deviceId: device.id, deviceHostname: device.hostname } : {}),
+    // Whatever a technician has approved for this ticket so far. Read at
+    // dispatch rather than stored on the step, so a grant approved partway
+    // through applies to every job that follows it.
+    ...(ticket.grantedBinaries?.length ? { grantedBinaries: ticket.grantedBinaries } : {}),
     instructions,
     allowlistedCommand: command,
     status: "queued",

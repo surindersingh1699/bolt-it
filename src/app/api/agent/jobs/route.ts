@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { claimAgentJob, listAgentJobs } from "@/lib/data";
 import { authenticateAgent } from "@/lib/device-auth";
+import { agentBuildId } from "@/lib/agent-bundle";
 
 export const dynamic = "force-dynamic";
 
@@ -22,6 +23,12 @@ export async function GET(req: Request) {
   const auth = await authenticateAgent(req);
   if (!auth) return NextResponse.json({ error: "unauthorized" }, { status: 401 });
 
+  // The current build, on the response the agent already polls for. An agent
+  // whose own build differs from this steps aside so the supervisor pulls the
+  // new one — this is the whole auto-update signal, and it costs no extra
+  // request. See scripts/local-agent.mjs (poll) and agent-bundle.ts.
+  const agentBuild = await agentBuildId();
+
   if (auth.kind === "shared") {
     // The legacy shared token identifies no machine, so it cannot be routed to.
     // It is allowed to drain jobs that were never bound to a device — which is
@@ -32,7 +39,11 @@ export async function GET(req: Request) {
       const won = await claimAgentJob(job.id);
       if (won) claimed.push(won);
     }
-    return NextResponse.json({ jobs: claimed, warning: "shared-token mode: jobs are not device-routed" });
+    return NextResponse.json({
+      jobs: claimed,
+      agentBuild,
+      warning: "shared-token mode: jobs are not device-routed",
+    });
   }
 
   const device = auth.device;
@@ -47,5 +58,5 @@ export async function GET(req: Request) {
     if (won) claimed.push(won);
   }
 
-  return NextResponse.json({ jobs: claimed, deviceId: device.id, hostname: device.hostname });
+  return NextResponse.json({ jobs: claimed, agentBuild, deviceId: device.id, hostname: device.hostname });
 }

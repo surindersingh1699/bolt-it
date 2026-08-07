@@ -70,10 +70,14 @@ Ten nodes. Four details that are easy to get wrong when editing:
 
 ```
 new ─► executing ─► awaiting_approval ─► executing ─► awaiting_confirmation ─► resolved
-                                             └─► escalated                └─► escalated
+                                             └─► escalated     │            └─► escalated
+                                                               └─► "still broken" ─► executing
+                                                                   (one reopen, then escalated)
 ```
 
 There is no `drafting` → `awaiting_approval` whole-plan gate. The plan is persisted and the graph walks straight into execution; only individual high-risk steps pause.
+
+`awaiting_confirmation` is not terminal. An employee who says it did not work sends the ticket back through `reopenTicketGraph` on the same `thread_id`: the diagnosis trail and executed history carry over, `observe` re-reads the machine, and the round budget resets because their account of what is still happening is a new problem statement. `MAX_REOPENS` is 1 — the strategist hands off past it. Escalating on the first "no", which is what this used to do, threw away a round that was still available and read their most informative message as a button press.
 
 Server Actions in [tickets.ts](../src/app/actions/tickets.ts) are thin wrappers around `graph.invoke(...)`. No business logic lives there. Both entry points run inside `after()` so they survive serverless function termination.
 
@@ -112,7 +116,7 @@ All in [src/lib/integrations/](../src/lib/integrations/). Every execution adapte
 
 | Adapter | Real backend | Notes |
 |---|---|---|
-| [ai-gateway.ts](../src/lib/integrations/ai-gateway.ts) | Yes | `runStrategist` (opus), `runOperator` (sonnet), service-desk voice, reply synthesis |
+| [ai-gateway.ts](../src/lib/integrations/ai-gateway.ts) | Yes | `runStrategist` (opus), `runOperator` (sonnet), and `communicate` — the one service-desk voice for every message the employee reads, chat included |
 | [memory.ts](../src/lib/memory.ts) | Yes, but **unwired** | Per-user facts + episodes. Nothing calls it today; coming back |
 | [attachments.ts](../src/lib/attachments.ts) | Yes | Screenshots → private `ticket-attachments` bucket → data URI for the strategist |
 | [directory.ts](../src/lib/integrations/directory.ts) | Yes | AD reads/writes against seeded state. Every branch touches real rows |
@@ -153,11 +157,12 @@ Auth is one token per device, traded for a single-use enrollment code and stored
 8. Components never write to the store. Component → Server Action → `data.ts`.
 9. Anything simulated says so, in the log line the user sees.
 10. No branching on ticket text or reporter email to force a demo outcome.
+11. **One voice to the employee.** Every message they read — intake, working, heartbeat, resolution, handoff, chat — is `COMMUNICATOR_PROMPT` plus a moment instruction. A second prompt for "the final reply" is how the honesty rules stopped applying to two thirds of the messages last time.
 
 ---
 
 ## 9. Known gaps
 
 - `MemorySaver` is in-memory — a restart drops in-flight interrupts. `python-rebuild` uses a Postgres checkpointer.
-- 357 tests. The safety rules in §5 are enforced by policy.test.ts, reviewer.gate.test.ts, intent.test.ts and registry.test.ts.
+- 368 tests. The safety rules in §5 are enforced by policy.test.ts, reviewer.gate.test.ts, intent.test.ts and registry.test.ts.
 - [data.ts](../src/lib/data.ts) carries ~340 lines of mechanical row↔object mapping and repeats the `isInsforgeEnabled()` branch in ~30 functions.

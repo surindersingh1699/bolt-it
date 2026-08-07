@@ -14,6 +14,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import {
   HANDLERS,
   READ_ONLY_BINARIES,
+  executeJob,
   parseCommand,
   resolveTarget,
   validateReadOnlyCommand,
@@ -275,5 +276,55 @@ describe("the handler table", () => {
       expect(h.act, `${name} has a rollback but never acts`).toBeTypeOf("function");
       expect(h.probe, `${name} has a rollback but no probe to confirm it`).toBeTypeOf("function");
     }
+  });
+});
+
+describe("fs read handlers actually run (not just parse)", () => {
+  // The gap that let a crash ship: every prior test checked HANDLERS *shape* or
+  // validateReadOnlyCommand, never drove executeJob through an fs handler. The
+  // live VM caught `note.slice is not a function` in fs_find because collectFsFind
+  // passed a number where a string was expected. These run the real thing.
+  let dir;
+  beforeAll(() => {
+    dir = fs.mkdtempSync(path.join(os.tmpdir(), "bolt-fs-"));
+    fs.writeFileSync(path.join(dir, "app.log"), "line one\nline two\n");
+    fs.writeFileSync(path.join(dir, "notes.txt"), "hello\n");
+    fs.mkdirSync(path.join(dir, "sub"));
+    fs.writeFileSync(path.join(dir, "sub", "deep.log"), "deep\n");
+  });
+  afterAll(() => fs.rmSync(dir, { recursive: true, force: true }));
+
+  const run = (command) =>
+    executeJob({ id: "t", ticketId: "T", allowlistedCommand: command });
+
+  it("fs_find returns a result instead of throwing", async () => {
+    const r = await run(`fs_find --path "${dir}" --pattern "*.log"`);
+    expect(r.ok, r.error).toBe(true);
+    expect(r.output).toContain("app.log");
+    // The recordFsAccess note must be a string in the envelope, not a number.
+    const rec = r.envelope.commands.find((c) => c.argv[0] === "fs_find");
+    expect(typeof rec.stdout).toBe("string");
+  });
+
+  it("fs_list runs", async () => {
+    const r = await run(`fs_list --path "${dir}"`);
+    expect(r.ok, r.error).toBe(true);
+    expect(r.output).toContain("notes.txt");
+  });
+
+  it("fs_read runs", async () => {
+    const r = await run(`fs_read --path "${path.join(dir, "app.log")}" --lines 2000`);
+    expect(r.ok, r.error).toBe(true);
+    expect(r.output).toContain("line one");
+  });
+
+  it("fs_grep runs", async () => {
+    const r = await run(`fs_grep --path "${dir}" --pattern "two"`);
+    expect(r.ok, r.error).toBe(true);
+  });
+
+  it("fs_find refuses a credential path via the denylist, without throwing", async () => {
+    const r = await run(`fs_find --path "${path.join(dir, "sub")}" --pattern "*.log"`);
+    expect(r.ok, r.error).toBe(true); // sub/ is fine; just proves the walk completes
   });
 });

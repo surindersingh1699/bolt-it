@@ -22,6 +22,10 @@ Pipeline is now: **Planner → Intent Validator → Reviewer → Policy → Capa
 - **Two writes removed from the read-only allowlist** — `wmic process call create` and `dscl . -create` both passed the old checks.
 - **Layer 2 capabilities** — `diag.screenshot` (device-side consent, Session 0 helper), `fs.find`, and six settings fixes with probes and rollbacks.
 
+- **One service-desk voice, and chat that reasons from evidence.** `synthesizeReply` and the old one-line chat prompt are deleted; every message the employee reads is `COMMUNICATOR_PROMPT` + a moment, chat included. Chat is now fed the real device verdicts (`buildReplyEvidence`) and the conversation so far, and runs on `CHAT_MODEL` (sonnet) rather than haiku. New `PROGRESSIVE DISCLOSURE` rule: plain English by default, exact IPs and commands only when asked for. Decisions → [DECISIONS.md](DECISIONS.md) (2026-08-07).
+- **`awaiting_confirmation` is no longer terminal.** "Still broken" reopens the ticket once through `reopenTicketGraph` — same thread, history carried, machine re-observed, round budget reset — instead of escalating on the spot. `MAX_REOPENS = 1`, enforced at the top of the strategist.
+- **The bare "Is the issue resolved? Reply yes or no" message is gone.** It went out under every resolution while the portal was already rendering Yes/No buttons for the same decision; the desk's `resolution` moment asks for the one specific observation instead.
+
 ## Two intentional behaviour changes
 
 - An **unreachable reviewer now refuses a change** instead of running it. Under `AUTONOMY=full` the fail-closed `ask_human` used to become `auto`, so the gate being down meant proceed.
@@ -64,7 +68,7 @@ Pipeline is now: **Planner → Intent Validator → Reviewer → Policy → Capa
 - ~~**Safety tests were deleted.**~~ **Answered:** `policy.ts` and `governance.ts` are gone entirely; `reviewer.gate.test.ts` covers the replacement's floors and failure modes.
 - **Does the observer's app list stay small?** It is closed on purpose — the name is interpolated into an allowlisted device command. Every app added is a name a ticket body can now steer the probe toward, so growth needs a better mechanism than a longer list.
 - **Is sonnet the right operator?** Its mistakes are mechanical — a wrong path or app name on a `fix.*` — and the reviewer will not catch those, because the step looks legitimate. `OPERATOR_MODEL` switches it; nobody has measured haiku here.
-- **Model slug format.** The gateway docs say versioned slugs use dots (`claude-haiku-4.5`); the desk default is `anthropic/claude-haiku-4-5`. If that is wrong, `gatewayChat` returns null and `say()` posts the canned fallback — which would never look broken. Worth one check against the gateway's model list.
+- **Model slug format.** The gateway docs say versioned slugs use dots (`claude-haiku-4.5`); the desk defaults are `anthropic/claude-haiku-4-5` and `anthropic/claude-sonnet-5`. If either is wrong, `gatewayChat` returns null and `say()` posts the canned fallback — which would never look broken. Chat fails visibly at least ("I can't reach my tools"), but the background moments do not. Worth one check against the gateway's model list.
 
 ## Known limitations (deliberate)
 

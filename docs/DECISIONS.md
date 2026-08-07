@@ -748,3 +748,91 @@ The same class of silent failure appears in the capture itself: without Screen
 Recording permission, macOS `screencapture` writes a **black image and exits 0**.
 A size floor catches it, because uploading "successfully" would put a black
 rectangle in front of the planner and call it evidence.
+
+---
+
+## 2026-08-07 — One desk voice, and "still broken" buys another look
+
+**Decision.** Every message the employee reads comes from `COMMUNICATOR_PROMPT`
+plus a moment instruction. `synthesizeReply` and the old one-line chat prompt are
+deleted. `awaiting_confirmation` stops being terminal: an employee who says it
+did not work reopens the ticket once.
+
+**Why one voice.** There were three writers. The desk prompt had the honesty
+rules — never say "fixed" without a VERIFIED CHANGE, never explain a mechanism
+that is not in the findings. The other two did not, and the thinnest of them
+owned chat, which is the only conversation the employee can actually have. So
+the rules that matter most applied everywhere except the place a person was
+talking. A second prompt for a new kind of message is how that happens; a new
+moment is how it does not.
+
+**Why progressive disclosure.** The old chat prompt was 1-4 sentences with no
+instruction to explain a cause or offer a next step, and it was fed a truncated
+plan summary with no conversation history. It half-answered and then asked
+whether the ticket could be closed — twice, because `finalize` also posted
+"Is the issue resolved? Reply yes or no" as its own message under the resolution
+text, while the portal was already rendering Yes/No buttons for the same
+decision. Plain English is now the default and the mechanics come out when they
+are asked for. The direct-question rule stays exactly as it was: a question IS
+the ask. Those two are a pair and `desk.test.ts` asserts both, because either one
+alone is wrong in a different direction.
+
+**Why a reopen rather than an escalation.** "Still broken" went straight to a
+human. That read the employee's most informative message as a button press and
+threw away strategist rounds that were still available. It reopens on the same
+`thread_id`, so the diagnosis trail and executed history carry over and `observe`
+re-reads a machine that is no longer what it was when the first look planned
+against it. What resets is the round budget, because their account of what is
+still happening is a new problem statement, not a continuation.
+
+**Why the bound is one.** A fix that did not work earns a second look with new
+evidence. A second failure is not a third round — it means this system has the
+wrong model of the problem, and more rounds only cost opus calls and the
+employee's afternoon. `MAX_REOPENS` is checked at the top of the strategist,
+before the expensive call, and it lives in exactly one place: a copy in the
+Server Action could disagree with the graph's and the graph would win silently.
+
+**What did not change.** `intent` is a label the model returns and a Server
+Action switches on, exactly like the `new_issue` flag it replaces. No model
+returns a node name. A gateway failure during chat now says so on the thread
+instead of opening a duplicate ticket, which is what the old `null` path did.
+
+---
+
+## 2026-08-07 — A refused read-only command becomes an approval
+
+**Decision.** A diagnostic the agent will not run by default no longer fails the
+step. It raises the existing human `interrupt()`, and a named technician can
+enable that binary for that one ticket. A second closed list,
+`GRANTABLE_BINARIES`, says which binaries are eligible.
+
+**Why.** T-8805: the strategist asked to ping the configured DNS server and to
+resolve a public name. `ping` was missing from the Windows allowlist entirely.
+The step failed with a bare `execution` error, the strategist could not tell a
+refusal from a command that errored, so it re-authorised the same two checks for
+three rounds and the ticket reached a human having tested nothing. Two fixes
+were needed and only one of them is a list: the other is that a refusal has to
+be a distinguishable outcome with somewhere to go.
+
+**Why not simply let it run what it asks for.** Because the ticket body is
+attacker-controlled text and "please run this, it will help" is the whole
+attack. The grant widens WHICH binary may run and nothing else: it must be on
+the curated grantable list, its subcommand filter still applies, and SAFE_ARG
+and DENIED_ARG still apply. `dscacheutil -flushcache` is a write and is refused
+with the grant held. A grant naming `curl` or `rm` buys nothing, which is what
+stops an approval prompt from becoming a way to run anything by talking a
+technician into one click.
+
+**Why the grant rides on the job and not in the command string.** The command is
+what a model composed; the grant is what a person decided. On separate rails, no
+phrasing of the first can forge the second.
+
+**Why per-ticket.** A grant is a judgement about one problem on one machine at
+one moment. One that outlived its ticket would quietly become a permanent
+widening of the read surface that nobody ever decided to make.
+
+**Also landed.** The desk now receives the conversation so far on *every*
+moment, not just chat — four near-identical "here's what I'm checking / nothing
+you need to do" updates went out on T-8805 because `working` could not see what
+it had already said. And the strategist is told that a step refused for what it
+is is spent, exactly like a NO EFFECT one.

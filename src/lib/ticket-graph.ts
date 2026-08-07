@@ -6,10 +6,10 @@ import {
   runStrategist,
   runOperator,
   communicate,
-  synthesizeReply,
   type ReplyEvidence,
 } from "@/lib/integrations/ai-gateway";
 import { appendTrace } from "@/lib/trace";
+import { getChat } from "@/lib/chat";
 import { readHeartbeat, HEARTBEAT_CONNECTED_WINDOW_MS } from "@/lib/agent-heartbeat";
 import { CommunicationMoment } from "@/lib/desk";
 import { EXECUTORS } from "@/lib/executors";
@@ -54,6 +54,16 @@ export interface Approver {
   email: string;
 }
 
+/**
+ * How many times the employee can send a ticket back before it goes to a person.
+ *
+ * One. A fix that did not work is worth a second look with the employee's own
+ * account of what is still happening — that is new evidence, and often the only
+ * evidence that contradicts a VERIFIED CHANGE. A second failure is not a third
+ * round; it means this system has the wrong model of the problem.
+ */
+export const MAX_REOPENS = Number(process.env.MAX_REOPENS || 1);
+
 function withTimeout<T>(p: Promise<T>, ms: number, label: string): Promise<T> {
   return Promise.race([
     p,
@@ -80,6 +90,17 @@ const TicketGraphState = Annotation.Root({
   operatorRound: Annotation<number>({ reducer: overwrite, default: () => 1 }),
   /** One line per strategist call — the trail a technician reads at handoff. */
   diagnoses: Annotation<string[]>({ reducer: append, default: () => [] }),
+  /**
+   * What the employee said after an attempt landed. The freshest evidence on
+   * the ticket, and the only kind that can contradict a VERIFIED CHANGE: the
+   * machine can change and the problem can still be there.
+   */
+  followUps: Annotation<string[]>({ reducer: append, default: () => [] }),
+  /**
+   * How many times the employee has sent it back. Bounded by MAX_REOPENS — the
+   * second "still broken" is a person's problem, not another round.
+   */
+  reopens: Annotation<number>({ reducer: overwrite, default: () => 0 }),
   /** What the operator reported back, in its own words. */
   operatorNotes: Annotation<string[]>({ reducer: append, default: () => [] }),
   /**
@@ -123,6 +144,13 @@ async function say(
     reporterFirstName: firstNameOf(ticket.reporter),
     subject: ticket.subject,
     body: ticket.body,
+    // Every moment gets the conversation so far, not just the chat turn. Without
+    // it, `working` and `heartbeat` could not see what they had already said, so
+    // four rounds of "here's what I'm going to check / nothing you need to do"
+    // went out reading like the first one each time. communicate() already
+    // carries a "do not repeat yourself" rule — it just had nothing to compare
+    // against on these moments.
+    history: getChat(ticket.id),
     ...extras,
   }).catch(() => null);
   await postUpdate(ticket, text ?? fallback);
@@ -264,6 +292,27 @@ async function strategist(state: TState) {
   const ticket = await getTicket(state.ticketId);
   if (!ticket) return new Command({ goto: END });
 
+  // The reopen bound, checked before the expensive call rather than after it.
+  // One second look is worth paying for; a third round of the same conversation
+  // is a person's job, and without this the employee could reopen forever.
+  if (state.reopens > MAX_REOPENS) {
+    appendTrace(
+      state.ticketId,
+      "strategist",
+      "completed",
+      `employee reported it still broken after ${state.reopens} attempt(s) — handing to a person`,
+    );
+    return new Command({
+      goto: "humanHandoff",
+      update: {
+        findings: [
+          `the employee reported the problem still happening after ${state.reopens} attempt(s): ` +
+            `${state.followUps[state.followUps.length - 1] ?? "(no detail given)"}`,
+        ],
+      },
+    });
+  }
+
   const evidence = await evidenceFor(state.ticketId, ticket.workspaceId);
   appendTrace(
     state.ticketId,
@@ -285,6 +334,7 @@ async function strategist(state: TState) {
     evidence,
     priorDiagnoses: state.diagnoses,
     operatorNotes: state.operatorNotes,
+    followUps: state.followUps,
     images: await imagesFor(ticket, state.strategyRound),
   }).catch(() => null);
 
@@ -691,6 +741,21 @@ async function runNextStep(state: TState) {
       });
     }
 
+    // A read the agent would perform if a person approved it. Neither the
+    // operator nor the strategist can answer this — no rephrasing makes a
+    // binary allowlisted — so it goes to the same structural gate a high-risk
+    // step goes to, and the technician decides. Refusing it silently is what
+    // sent T-8805 to a human having tested nothing.
+    if (kind === "capability_missing") {
+      return new Command({
+        goto: "markAwaitingApproval",
+        update: {
+          pendingStepId: step.id,
+          findings: [`${humanStepLabel(step)} needs a technician to approve a diagnostic — ${detail}`],
+        },
+      });
+    }
+
     // Mechanical. Let the operator read it and decide whether a corrected retry
     // is worth a round — bounded by MAX_OPERATOR_ROUNDS.
     return new Command({
@@ -723,16 +788,28 @@ async function markAwaitingApproval(state: TState) {
       : "graph paused — waiting for human decision",
   );
   if (step) {
-    await postUpdate(ticket, `⏸ Waiting on IT approval for: ${humanStepLabel(step)}`);
+    // The employee is told what is being waited on, not which internal gate is
+    // holding it: "a check I need signed off" is the true and useful version of
+    // "capability_missing".
+    await postUpdate(
+      ticket,
+      step.failure?.kind === "capability_missing"
+        ? `⏸ One of the checks I want to run needs a technician to sign it off first — waiting on that now.`
+        : `⏸ Waiting on IT approval for: ${humanStepLabel(step)}`,
+    );
   }
   return {};
 }
 
 async function awaitApproval(state: TState) {
+  const pending = (await getTicket(state.ticketId))?.plan.find((s) => s.id === state.pendingStepId);
+  const wantsGrant = pending?.failure?.kind === "capability_missing";
   const decision = interrupt({
     ticketId: state.ticketId,
     stepId: state.pendingStepId,
-    question: "Approve this high-risk step?",
+    question: wantsGrant
+      ? `Allow the read-only diagnostic "${String(pending?.params?.binary ?? "")}" to run on this ticket?`
+      : "Approve this high-risk step?",
   }) as { approved: true; approver: Approver };
 
   const ticket = await getTicket(state.ticketId);
@@ -744,13 +821,38 @@ async function awaitApproval(state: TState) {
     `approved by ${decision.approver.name} — resuming from paused step, not restarting`,
   );
   if (ticket && step) {
-    await updateStep(state.ticketId, step.id, {
-      approvalMode: "auto",
-      log: [
-        ...(step.log ?? []),
-        `[Policy] High-risk step approved by ${decision.approver.name} (${decision.approver.email}) — proceeding`,
-      ],
-    });
+    // Two different things reach this gate. A high-risk step was never run and
+    // just needs releasing. A step refused for a diagnostic the agent will not
+    // run by default has already failed once, so the approval has to record the
+    // grant and put the step back to pending — otherwise the technician clicks
+    // approve and nothing happens, which is the worst outcome of the three.
+    const binary =
+      step.failure?.kind === "capability_missing" && typeof step.params?.binary === "string"
+        ? step.params.binary
+        : null;
+    if (binary) {
+      const already = ticket.grantedBinaries ?? [];
+      await updateTicket(state.ticketId, {
+        grantedBinaries: already.includes(binary) ? already : [...already, binary],
+      });
+      await updateStep(state.ticketId, step.id, {
+        status: "pending",
+        approvalMode: "human",
+        failure: undefined,
+        log: [
+          ...(step.log ?? []),
+          `[Policy] ${binary} approved for this ticket by ${decision.approver.name} (${decision.approver.email}) — retrying the step`,
+        ],
+      });
+    } else {
+      await updateStep(state.ticketId, step.id, {
+        approvalMode: "auto",
+        log: [
+          ...(step.log ?? []),
+          `[Policy] High-risk step approved by ${decision.approver.name} (${decision.approver.email}) — proceeding`,
+        ],
+      });
+    }
   }
 
   return new Command({
@@ -788,32 +890,23 @@ async function finalize(state: TState) {
   const hadReplyStep = ticket.plan.some((s) => s.kind === "reply");
   if (!hadReplyStep) {
     const firstName = firstNameOf(ticket.reporter);
-    const text =
-      (await communicate({
-        ticketId: state.ticketId,
-        moment: "resolution",
-        reporterFirstName: firstName,
-        subject: ticket.subject,
-        body: ticket.body,
+    await say(
+      ticket,
+      "resolution",
+      `Hi ${firstName} — I've finished working on this one. Give it another try and let me know how it goes.`,
+      {
         agentSummary: state.strategy?.customerSummary || undefined,
         evidence,
         findings: state.findings,
-      }).catch(() => null)) ??
-      // Falls back to the evidence-only writer rather than going silent.
-      (await synthesizeReply({
-        ticketId: state.ticketId,
-        reporterFirstName: firstName,
-        subject: ticket.subject,
-        body: ticket.body,
-        evidence,
-      }).catch(() => null));
-    if (text) await postUpdate(ticket, text);
+      },
+    );
   }
 
-  await postUpdate(
-    ticket,
-    `Is the issue resolved? Reply *yes* or *no* in this thread (ticket ${state.ticketId}).`,
-  );
+  // No "Is the issue resolved? Reply yes or no" line here any more. It used to
+  // go out as its own message directly under the resolution text, which is what
+  // made every ticket end on a half-answer followed by a form question — and
+  // EmployeePortal already renders Yes/No buttons for exactly this decision. The
+  // desk's `resolution` moment asks for the one specific observation instead.
   return {};
 }
 
@@ -1020,4 +1113,39 @@ export async function resumeTicketGraph(
   decision: { approved: true; approver: Approver },
 ): Promise<void> {
   await ticketGraph.invoke(new Command({ resume: decision }), tracingConfig(ticketId));
+}
+
+/**
+ * The employee says it is still broken. Take one more look.
+ *
+ * Same `thread_id`, so `diagnoses`, `findings`, `research` and the executed
+ * history all carry over — the strategist gets a second look at a ticket it
+ * already knows, not a blank one. What resets is the round budget, because this
+ * is a new problem statement rather than a continuation of the old one.
+ *
+ * The START edge runs `observe` again, which is the point: the machine is not
+ * what it was when the first look planned against it, and the readings taken
+ * after a fix landed are the ones that say whether it did.
+ *
+ * `reopens` is what stops this being a loop — the strategist hands off once it
+ * passes MAX_REOPENS. Escalation is the caller's job when the budget is gone;
+ * this function is only the second-look path.
+ */
+export async function reopenTicketGraph(ticketId: string, detail: string): Promise<void> {
+  const current = await ticketGraph.getState(tracingConfig(ticketId)).catch(() => null);
+  const reopens = ((current?.values as TState | undefined)?.reopens ?? 0) + 1;
+  await ticketGraph.invoke(
+    {
+      ticketId,
+      followUps: [detail],
+      reopens,
+      // A fresh budget for a fresh account of the problem. The reopen count is
+      // the bound that matters; carrying an exhausted strategyRound over would
+      // send the second look straight to handoff without ever running.
+      strategyRound: 1,
+      operatorRound: 1,
+      strategy: null,
+    },
+    tracingConfig(ticketId),
+  );
 }

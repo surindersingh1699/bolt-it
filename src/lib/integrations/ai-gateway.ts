@@ -14,6 +14,11 @@
  * Diagnosis is worth an opus call. Discovering that the app is registered as
  * "Microsoft Outlook" and not "Outlook" is not, and most of a ticket's rounds
  * are the second kind.
+ *
+ * Everything the employee reads goes through `communicate` — one prompt, one
+ * voice, every moment including chat. There is no separate "final reply" writer
+ * any more: there were three, they drifted, and the thinnest of them owned the
+ * only conversation the employee could actually have.
  */
 
 import { PlanStep } from "../types";
@@ -38,15 +43,17 @@ import {
   operatorSystemPrompt,
 } from "../operator";
 import {
+  CHAT_INTENTS,
+  CHAT_MODEL,
   COMMUNICATOR_MODEL,
   COMMUNICATOR_PROMPT,
+  ChatIntent,
   CommunicationMoment,
   momentInstruction,
 } from "../desk";
+import { ChatMsg } from "../chat";
 import { extractJsonObject } from "./json";
 import { GatewayContent, gatewayChat } from "./gateway";
-
-const REPLY_MODEL = process.env.AI_GATEWAY_MODEL || "anthropic/claude-haiku-4-5";
 
 const str = (v: unknown, n: number): string => (typeof v === "string" ? v.trim().slice(0, n) : "");
 
@@ -84,6 +91,11 @@ export interface StrategistInput {
   /** What the operator reported back, if it has run. */
   operatorNotes: string[];
   /**
+   * What the employee said after an attempt landed. Freshest evidence on the
+   * ticket, and the only kind that can outrank a VERIFIED CHANGE.
+   */
+  followUps?: string[];
+  /**
    * Data URIs for screenshots the reporter attached. Sent on the FIRST call
    * only: the strategist writes down what it saw in its diagnosis, so paying
    * the image tokens again on every later call buys nothing.
@@ -107,7 +119,16 @@ Body: ${input.body}
 Reporter: ${input.reporter} <${input.reporterEmail}>${
     input.images?.length ? `\nThey attached ${input.images.length} screenshot(s), shown below.` : ""
   }
-${deviceFactsAsContext(input.deviceFacts ?? null)}${researchAsContext(input.research ?? [])}
+${
+  // Placed here, directly under the original report, rather than after the
+  // execution log: it is the newest thing anyone knows about this ticket and
+  // the one piece of evidence that can contradict the machine's own verdict.
+  input.followUps?.length
+    ? `\n## What the employee said after the last attempt\n${input.followUps
+        .map((f) => `- "${f}"`)
+        .join("\n")}\nThey are telling you the problem is still there. Whatever ran before did not fix it, however the device probes read.\n`
+    : ""
+}${deviceFactsAsContext(input.deviceFacts ?? null)}${researchAsContext(input.research ?? [])}
 
 ## What you concluded earlier
 ${
@@ -344,7 +365,7 @@ export function parseCapabilityRequest(raw: unknown): CapabilityRequest | null {
  * technical claim is authored by the model that held the evidence and arrives
  * here as `agentSummary`, which the prompt forbids strengthening.
  */
-export async function communicate(args: {
+export interface CommunicateArgs {
   moment: CommunicationMoment;
   reporterFirstName: string;
   subject: string;
@@ -357,18 +378,32 @@ export async function communicate(args: {
   evidence?: ReplyEvidence[];
   /** Accumulated findings across the ticket. */
   findings?: string[];
+  /** The `chat` moment: what they just said, and everything said before it. */
+  userMessage?: string;
+  history?: ChatMsg[];
+  /** How the diagnosis developed — `ticket.troubleshootingSummary`. */
+  diagnosis?: string;
+  /** Where the ticket stands, so the desk does not promise work that has stopped. */
+  status?: string;
   /** Which ticket to bill this call to. */
   ticketId?: string;
-}): Promise<string | null> {
+}
+
+export async function communicate(args: CommunicateArgs): Promise<string | null> {
+  const chat = args.moment === "chat";
   const sections = [
     `Employee first name: ${args.reporterFirstName}`,
     `Their original message subject: ${args.subject}`,
     `Their original message body: ${args.body}`,
   ];
+  if (args.status) sections.push(`Ticket status right now: ${args.status}`);
   if (args.agentSummary) {
     sections.push(
       `\nWhat the engineer working it reported (carry this meaning across faithfully; you may make it clearer, not stronger):\n${args.agentSummary}`,
     );
+  }
+  if (args.diagnosis) {
+    sections.push(`\nHow the diagnosis developed:\n${args.diagnosis}`);
   }
   if (args.plannedSteps?.length) {
     sections.push(`\nAbout to run:\n${args.plannedSteps.map((s) => `- ${s}`).join("\n")}`);
@@ -383,16 +418,32 @@ export async function communicate(args: {
         .join("\n\n")}`,
     );
   }
+  if (args.history?.length) {
+    sections.push(
+      `\nThe conversation so far (oldest first — do not repeat yourself):\n${args.history
+        .map((m) => `${m.from === "agent" ? "You" : args.reporterFirstName}: ${m.text}`)
+        .join("\n")}`,
+    );
+  }
+  if (args.userMessage) {
+    sections.push(`\nWhat they just said, which you are answering:\n${args.userMessage}`);
+  }
 
   const text = await gatewayChat({
-    model: COMMUNICATOR_MODEL,
+    // The chat turn is the one the employee is waiting on and reading closely.
+    model: chat ? CHAT_MODEL : COMMUNICATOR_MODEL,
     system: `${COMMUNICATOR_PROMPT}\n\n${momentInstruction(args.moment)}`,
     user: sections.join("\n"),
     temperature: 0.3,
-    // Short on purpose: the desk must stay fast enough to speak while the
-    // strategist is still thinking. A late reassurance is worth less than none.
-    timeoutMs: 15_000,
-    call: "communicate",
+    // Background updates are short on purpose: the desk must stay fast enough
+    // to speak while the strategist is still thinking, and a late reassurance is
+    // worth less than none. A chat turn has a person waiting on it instead, so
+    // it can afford the bigger model's latency.
+    timeoutMs: chat ? 30_000 : 15_000,
+    // Conversational turns are billed separately from background updates: they
+    // run a different model, and lumping them together would hide which of the
+    // two is actually spending.
+    call: chat ? "reply" : "communicate",
     ticketId: args.ticketId,
   });
   return text ? text.slice(0, 1800) : null;
@@ -419,83 +470,64 @@ function renderEvidence(e: ReplyEvidence, index: number, logLimit: number, outpu
 }
 
 /**
- * Re-write the Slack reply using the *actual* findings from the executed steps,
- * not the placeholder draft generated at planning time. Returns null if the LLM
- * is unavailable or returns an unusable response — caller should fall back to
- * the original draft.
- */
-export async function synthesizeReply(args: {
-  reporterFirstName: string;
-  subject: string;
-  body: string;
-  evidence: ReplyEvidence[];
-  /** Which ticket to bill this call to. */
-  ticketId?: string;
-}): Promise<string | null> {
-  if (args.evidence.length === 0) return null;
-
-  const evidenceText = args.evidence.map((e, i) => renderEvidence(e, i, 30, 2000)).join("\n\n");
-
-  const systemPrompt = `You write the final Slack reply an IT support copilot sends to the user after running a diagnostic/fix plan.
-
-Rules:
-- Reply directly to the user by first name. Warm, concise, plain text. No markdown headers.
-- If the user asked a *question* (hostname, RAM, OS, etc.), answer it with the EXACT values from the local-agent output. Do not paraphrase or invent.
-- If the user reported a *problem* and you ran fixes, state what you did and what the next step on their side is (reconnect, reopen, etc.).
-- If the diagnostics produced no useful data (the local agent isn't running, or the step returned generic mock output), say so honestly — do not pretend you collected data you didn't.
-- 2–6 short sentences. No corporate fluff.
-
-Output ONLY the Slack message text, nothing else.`;
-
-  const userPrompt = `User's first name: ${args.reporterFirstName}
-User's original message subject: ${args.subject}
-User's original message body: ${args.body}
-
-What we actually executed and observed:
-
-${evidenceText}
-
-Write the Slack reply.`;
-
-  const text = await gatewayChat({
-    model: REPLY_MODEL,
-    system: systemPrompt,
-    user: userPrompt,
-    temperature: 0.3,
-    timeoutMs: 15_000,
-    call: "reply",
-    ticketId: args.ticketId,
-  });
-  return text ? text.trim().slice(0, 1800) : null;
-}
-
-/**
- * Free-form conversational reply in the ticket thread. Grounded strictly in
- * the ticket record; returns newIssue=true when the message is really a
- * fresh problem deserving its own ticket.
+ * The employee said something in the thread and is waiting on an answer.
+ *
+ * This is the same desk voice and the same honesty rules as every other message
+ * they get — it used to be its own one-line prompt with none of them, which is
+ * why chat answered half a question and then asked whether the ticket could be
+ * closed. It is fed the real device evidence and the conversation so far, so it
+ * can answer from what happened rather than from a truncated plan summary.
+ *
+ * Returns null when there is no usable answer. The caller says so honestly; it
+ * never invents a reply and never treats the failure as a new ticket.
  */
 export async function conversationalReply(args: {
-  userMessage: string;
+  ticketId: string;
   firstName: string;
-  ticketSummary: string;
-  /** Which ticket to bill this call to. */
-  ticketId?: string;
-}): Promise<{ reply: string; newIssue: boolean } | null> {
-  const content = await gatewayChat({
-    model: REPLY_MODEL,
-    system: `You are an in-house IT support agent chatting with an employee in Slack about their ticket. Warm, concise (1-4 sentences), plain text. Answer ONLY from the ticket record — what ran, what was found, current status. Never invent results. If you lack the data, say so and offer to escalate. If their message is actually a NEW unrelated IT problem, set new_issue=true and leave reply empty. Return ONLY JSON: {"reply":"...","new_issue":false}`,
-    user: `Employee first name: ${args.firstName}\n\nTicket record:\n${args.ticketSummary}\n\nEmployee's message: ${args.userMessage}`,
-    temperature: 0.3,
-    call: "communicate",
+  subject: string;
+  body: string;
+  userMessage: string;
+  /** Everything said in this thread so far, oldest first. */
+  history: ChatMsg[];
+  /** What actually ran, with the device's own verdict on each. */
+  evidence: ReplyEvidence[];
+  diagnosis?: string;
+  status: string;
+}): Promise<{ reply: string; intent: ChatIntent } | null> {
+  const content = await communicate({
     ticketId: args.ticketId,
+    moment: "chat",
+    reporterFirstName: args.firstName,
+    subject: args.subject,
+    body: args.body,
+    userMessage: args.userMessage,
+    history: args.history,
+    evidence: args.evidence,
+    diagnosis: args.diagnosis,
+    status: args.status,
   });
   if (!content) return null;
+
   const jsonStr = extractJsonObject(content);
   if (!jsonStr) return null;
+  let parsed: { reply?: unknown; intent?: unknown };
   try {
-    const parsed = JSON.parse(jsonStr) as { reply?: string; new_issue?: boolean };
-    return { reply: parsed.reply ?? "", newIssue: Boolean(parsed.new_issue) };
+    parsed = JSON.parse(jsonStr) as { reply?: unknown; intent?: unknown };
   } catch {
     return null;
   }
+
+  const reply = str(parsed.reply, 1800);
+  // No reply text is not a routing decision — it is a broken call. Returning
+  // null sends the caller down its honest-fallback path instead of letting an
+  // empty message stand in for an answer.
+  if (!reply) return null;
+
+  // An unrecognised intent falls back to "answer": the reply still goes out and
+  // nothing is routed on a label the model invented.
+  const intent = CHAT_INTENTS.includes(parsed.intent as ChatIntent)
+    ? (parsed.intent as ChatIntent)
+    : "answer";
+
+  return { reply, intent };
 }

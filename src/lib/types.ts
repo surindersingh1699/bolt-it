@@ -224,6 +224,15 @@ export interface AgentJob {
   deviceId?: string;
   /** Denormalized for the audit log, so a job record names the host by itself. */
   deviceHostname?: string;
+  /**
+   * Read-only binaries a named technician approved for this ticket.
+   *
+   * Carried on the job rather than encoded in `allowlistedCommand`, so the thing
+   * a model composed and the thing a person decided travel on separate rails and
+   * no phrasing of the first can forge the second. The agent still refuses
+   * anything outside its own curated grantable list.
+   */
+  grantedBinaries?: string[];
   instructions: string;
   allowlistedCommand: string;
   status: AgentJobStatus;
@@ -263,6 +272,15 @@ export interface Ticket {
   /** What the agent tried and concluded across troubleshooting attempts. */
   troubleshootingSummary?: string;
   attempts?: number;
+  /**
+   * Read-only binaries a technician switched on for THIS ticket, by name.
+   *
+   * Scoped to the ticket on purpose: a grant is a judgement about one problem
+   * on one machine at one moment, and a grant that outlived its ticket would
+   * quietly become a permanent widening of the read surface that nobody ever
+   * decided to make.
+   */
+  grantedBinaries?: string[];
   /** Populated by /api/state from the in-memory trace store (not persisted). */
   trace?: import("./trace").TraceEvent[];
   /** Populated by /api/state from the in-memory chat transcript (not persisted). */
