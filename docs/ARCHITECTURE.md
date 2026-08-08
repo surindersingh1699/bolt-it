@@ -57,11 +57,12 @@ START ─► observe ─► strategist (OPUS) ◄──────────�
               researcher ◄─ strategist asks a question ─► back to strategist
 ```
 
-Ten nodes. Four details that are easy to get wrong when editing:
+Ten nodes. Five details that are easy to get wrong when editing:
 
 - **There is no barrier join.** Only `observe` feeds the strategist, so nothing can deadlock and both loops re-enter their own node freely. This is why escalation-style re-entry is a state update rather than a duplicated path.
 - **The inner loop must stay cheap.** `runNextStep` returns to the **operator**, not the strategist. If finished steps went straight back to the strategist, every mechanical retry would cost an opus call. `ticket-graph.test.ts` asserts the edge.
-- **`markAwaitingApproval` is separate from `awaitApproval` on purpose.** On resume, LangGraph re-runs the whole node from the top; anything before `interrupt()` fires twice.
+- **`markAwaitingApproval` is separate from `awaitApproval` on purpose.** On resume, LangGraph re-runs the whole node from the top; anything before `interrupt()` fires twice. It also has to leave the paused step looking gated (`pending` + `approvalMode: "human"`), because that is what the portal renders the approve button against — a `capability_missing` refusal arrives here marked `failed`/`auto` and, left that way, produces a ticket at `awaiting_approval` that no one can approve. The grant hands the step back as `auto`; leaving it `human` sends it straight back to the same gate.
+- **A mechanical failure finishes the round before re-planning.** `shouldDrainRound` — `buildReplyEvidence` hides pending steps from the operator, so handing back mid-round makes it re-propose the checks still queued, and the employee reads the same check twice. A `timeout` or `dependency_unavailable` is exempt: the surface is gone and the rest of the round only collects the same failure.
 - **Only the operator reaches the reviewer.** The strategist cannot put a step on the ticket by itself — it authorises, the operator selects, the reviewer rules, and only then does anything run.
 
 ---

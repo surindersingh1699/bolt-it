@@ -1,6 +1,6 @@
 import { StateGraph, Annotation, START, END, MemorySaver, interrupt, Command } from "@langchain/langgraph";
-import { getTicket, updateTicket, updateStep, listAgentJobs, listDevices } from "@/lib/data";
-import { PlanStep, StepFailure, Ticket } from "@/lib/types";
+import { getTicket, updateTicket, updateStep, listAgentJobs, listDevices, listTickets } from "@/lib/data";
+import { PlanStep, StepFailure, StepFailureKind, Ticket } from "@/lib/types";
 import { REVIEWER_MODEL, reviewPlan } from "@/lib/reviewer";
 import {
   runStrategist,
@@ -727,6 +727,19 @@ async function executeStepAndPersist(
 }
 
 /**
+ * Whether a mechanically-failed step should let the round finish before the
+ * operator is asked to plan again.
+ *
+ * Yes when work is still queued, because the operator cannot see a pending step
+ * and will re-propose it. No when the failure took the execution surface with it
+ * — the rest of the round would only collect the same failure more slowly.
+ */
+export function shouldDrainRound(kind: StepFailureKind, moreQueued: boolean): boolean {
+  if (!moreQueued) return false;
+  return kind !== "timeout" && kind !== "dependency_unavailable";
+}
+
+/**
  * Self-looping execute node. Cleared steps run immediately; only a step the
  * reviewer left at "human" routes to the approval interrupt.
  *
@@ -793,8 +806,31 @@ async function runNextStep(state: TState) {
       });
     }
 
-    // Mechanical. Let the operator read it and decide whether a corrected retry
-    // is worth a round — bounded by MAX_OPERATOR_ROUNDS.
+    // Mechanical, and the round is not over. Finish the steps already queued
+    // before re-planning.
+    //
+    // `buildReplyEvidence` shows the operator only steps that reached a terminal
+    // state, so a step still sitting pending is invisible to it. Handing back
+    // mid-round therefore asks it to plan against a round it cannot fully see,
+    // and it proposes the outstanding checks a second time — which is how one
+    // ticket ended up listing the same proxy check and the same HTTPS test
+    // twice, with the employee reading both.
+    //
+    // Draining first is also just cheaper: the remaining steps are reads that
+    // were already authorised and reviewed, and their results are what make the
+    // operator's next round worth spending.
+    const moreQueued = ticket.plan.some((s) => s.id !== step.id && s.status === "pending");
+    if (shouldDrainRound(kind, moreQueued)) {
+      return new Command({
+        goto: "runNextStep",
+        update: { findings: [`${humanStepLabel(step)} failed — ${kind}: ${detail}`] },
+      });
+    }
+
+    // Nothing left to run, or the surface itself is gone and the rest of the
+    // round would only collect the same failure. Let the operator read it and
+    // decide whether a corrected retry is worth a round — bounded by
+    // MAX_OPERATOR_ROUNDS.
     return new Command({
       goto: "operator",
       update: {
@@ -816,6 +852,14 @@ async function markAwaitingApproval(state: TState) {
   if (!ticket || !state.pendingStepId) return {};
   const step = ticket.plan.find((s) => s.id === state.pendingStepId);
   await updateTicket(state.ticketId, { status: "awaiting_approval" });
+  // The step the graph is parked on must *say* it is waiting on a person, or the
+  // portal has nothing to render an approve button against and the ticket sits at
+  // awaiting_approval with no way out. A capability_missing step arrives here
+  // already marked failed/auto — the reviewer cleared it, the agent refused it.
+  // `failure` is left in place: awaitApproval reads it to decide grant-vs-release.
+  if (step && step.failure?.kind === "capability_missing") {
+    await updateStep(state.ticketId, step.id, { status: "pending", approvalMode: "human" });
+  }
   appendTrace(
     state.ticketId,
     "interrupt",
@@ -874,7 +918,10 @@ async function awaitApproval(state: TState) {
       });
       await updateStep(state.ticketId, step.id, {
         status: "pending",
-        approvalMode: "human",
+        // Back to auto, or runNextStep sees a pending human-gated step and routes
+        // it straight back to markAwaitingApproval — approve, re-ask, forever. The
+        // grant widened which binary may run; it did not add a standing gate.
+        approvalMode: "auto",
         failure: undefined,
         log: [
           ...(step.log ?? []),
@@ -1117,6 +1164,10 @@ declare global {
   var __TICKET_GRAPH_CHECKPOINTER__: MemorySaver | undefined;
   // eslint-disable-next-line no-var
   var __TICKET_GRAPH__: ReturnType<typeof buildGraph> | undefined;
+  // eslint-disable-next-line no-var
+  var __TICKET_GRAPH_LIVE__: Set<string> | undefined;
+  // eslint-disable-next-line no-var
+  var __TICKET_GRAPH_SWEEP_AT__: number | undefined;
 }
 
 const checkpointer: MemorySaver = globalThis.__TICKET_GRAPH_CHECKPOINTER__ ?? new MemorySaver();
@@ -1141,15 +1192,100 @@ function tracingConfig(ticketId: string) {
   };
 }
 
+// ---- crash + orphan recovery -----------------------------------------------
+// Node-level failures already end at humanHandoff with an artifact. These cover
+// the two ways a ticket used to stay stuck with nobody owning it:
+//   1. the run throws out of the graph (a bug, the recursion limit, a transport
+//      failure) — the row kept its last status and nobody was told;
+//   2. the process restarts mid-run — MemorySaver is process memory, so the
+//      checkpoint is gone and a `new`/`executing` row can never resume.
+// Both now end the way every other failure does: the employee is told, and the
+// ticket lands in the IT queue as `escalated` with a note saying what happened.
+
+const liveRuns: Set<string> = globalThis.__TICKET_GRAPH_LIVE__ ?? new Set();
+if (!globalThis.__TICKET_GRAPH_LIVE__) globalThis.__TICKET_GRAPH_LIVE__ = liveRuns;
+
+async function escalateDeadRun(ticketId: string, why: string): Promise<void> {
+  const ticket = await getTicket(ticketId);
+  if (!ticket) return;
+  if (ticket.status === "resolved" || ticket.status === "escalated" || ticket.status === "awaiting_confirmation") return;
+  await updateTicket(ticketId, {
+    status: "escalated",
+    troubleshootingSummary:
+      `Ticket ${ticketId} — escalated because the automated run stopped before reaching a verdict.\n\n` +
+      `Problem as reported: ${ticket.subject}\n` +
+      `Employee: ${ticket.reporter} <${ticket.reporterEmail}>\n\n` +
+      `What happened: ${why}\n` +
+      `No automated work is still running on this ticket; a technician should take over from here.`,
+  });
+  appendTrace(ticketId, "humanHandoff", "completed", `escalated without a graph verdict: ${why}`);
+  const firstName = firstNameOf(ticket.reporter);
+  await say(
+    ticket,
+    "handoff",
+    `Hi ${firstName} — I hit a problem on my side and couldn't finish this one automatically. ` +
+      `I've passed it to the IT team so a person can pick it up. Ticket ${ticketId}.`,
+  );
+}
+
+async function runGuarded(ticketId: string, run: () => Promise<unknown>): Promise<void> {
+  liveRuns.add(ticketId);
+  try {
+    await run();
+  } catch (err) {
+    console.error(`[ticket-graph] run died for ${ticketId}:`, err);
+    const detail = err instanceof Error ? err.message : String(err);
+    await escalateDeadRun(ticketId, `the automation crashed mid-run (${detail})`).catch((e) =>
+      console.error(`[ticket-graph] escalateDeadRun failed for ${ticketId}:`, e),
+    );
+  } finally {
+    liveRuns.delete(ticketId);
+  }
+}
+
+// `new` can sit un-run for the beat between the row insert and `after()` firing;
+// anything past this age with no live run is an orphan, not a slow start.
+const ORPHAN_GRACE_MS = 90_000;
+const SWEEP_EVERY_MS = 30_000;
+
+/**
+ * Escalates tickets whose run no longer exists. Called from /api/state (polled
+ * constantly, throttled here), so recovery needs no cron and no extra process.
+ * `awaiting_approval` / `awaiting_confirmation` are deliberately left alone —
+ * they are waiting on a person, not on a dead run; if the checkpoint behind an
+ * approval died with the process, the resume itself fails into runGuarded.
+ */
+export async function sweepOrphanedTickets(): Promise<void> {
+  const now = Date.now();
+  if (now - (globalThis.__TICKET_GRAPH_SWEEP_AT__ ?? 0) < SWEEP_EVERY_MS) return;
+  globalThis.__TICKET_GRAPH_SWEEP_AT__ = now;
+  try {
+    const tickets = await listTickets();
+    for (const t of tickets) {
+      if (t.status !== "new" && t.status !== "executing" && t.status !== "drafting") continue;
+      if (liveRuns.has(t.id)) continue;
+      if (now - t.updatedAt < ORPHAN_GRACE_MS) continue;
+      await escalateDeadRun(
+        t.id,
+        "the server restarted (or the run was killed) while this ticket was in flight; in-memory run state does not survive that, so the run can never finish on its own",
+      );
+    }
+  } catch (err) {
+    console.error("[ticket-graph] sweepOrphanedTickets failed:", err);
+  }
+}
+
 export async function runTicketGraphFromStart(ticketId: string): Promise<void> {
-  await ticketGraph.invoke({ ticketId }, tracingConfig(ticketId));
+  await runGuarded(ticketId, () => ticketGraph.invoke({ ticketId }, tracingConfig(ticketId)));
 }
 
 export async function resumeTicketGraph(
   ticketId: string,
   decision: { approved: true; approver: Approver },
 ): Promise<void> {
-  await ticketGraph.invoke(new Command({ resume: decision }), tracingConfig(ticketId));
+  await runGuarded(ticketId, () =>
+    ticketGraph.invoke(new Command({ resume: decision }), tracingConfig(ticketId)),
+  );
 }
 
 /**
@@ -1171,18 +1307,20 @@ export async function resumeTicketGraph(
 export async function reopenTicketGraph(ticketId: string, detail: string): Promise<void> {
   const current = await ticketGraph.getState(tracingConfig(ticketId)).catch(() => null);
   const reopens = ((current?.values as TState | undefined)?.reopens ?? 0) + 1;
-  await ticketGraph.invoke(
-    {
-      ticketId,
-      followUps: [detail],
-      reopens,
-      // A fresh budget for a fresh account of the problem. The reopen count is
-      // the bound that matters; carrying an exhausted strategyRound over would
-      // send the second look straight to handoff without ever running.
-      strategyRound: 1,
-      operatorRound: 1,
-      strategy: null,
-    },
-    tracingConfig(ticketId),
+  await runGuarded(ticketId, () =>
+    ticketGraph.invoke(
+      {
+        ticketId,
+        followUps: [detail],
+        reopens,
+        // A fresh budget for a fresh account of the problem. The reopen count is
+        // the bound that matters; carrying an exhausted strategyRound over would
+        // send the second look straight to handoff without ever running.
+        strategyRound: 1,
+        operatorRound: 1,
+        strategy: null,
+      },
+      tracingConfig(ticketId),
+    ),
   );
 }

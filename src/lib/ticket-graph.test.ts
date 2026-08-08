@@ -186,3 +186,32 @@ describe("what the employee is left with at the end", () => {
     expect(code).not.toMatch(/Reply \*yes\* or \*no\*/);
   });
 });
+
+// A step still sitting `pending` is filtered out of `buildReplyEvidence`, so the
+// operator planning a fresh round cannot see it. Handing back the moment one
+// step fails therefore asks it to plan against a round it can only half see, and
+// it proposes the outstanding checks a second time — the employee reads the same
+// proxy check and the same HTTPS test twice on one ticket.
+describe("what happens to the rest of the round when one step fails", () => {
+  it("finishes the steps already queued before the operator plans again", async () => {
+    const { shouldDrainRound } = await import("./ticket-graph");
+    expect(shouldDrainRound("execution", true)).toBe(true);
+    expect(shouldDrainRound("no_effect", true)).toBe(true);
+    expect(shouldDrainRound("conflicting_evidence", true)).toBe(true);
+  });
+
+  it("hands back immediately when the round is already empty", async () => {
+    const { shouldDrainRound } = await import("./ticket-graph");
+    expect(shouldDrainRound("execution", false)).toBe(false);
+    expect(shouldDrainRound("no_effect", false)).toBe(false);
+  });
+
+  // Draining is only worth it when the remaining steps can still produce an
+  // answer. A dead agent or a dead provider gives the same failure four more
+  // times, one job timeout apiece, and the operator waits the whole time.
+  it("does not drain when the failure took the execution surface with it", async () => {
+    const { shouldDrainRound } = await import("./ticket-graph");
+    expect(shouldDrainRound("timeout", true)).toBe(false);
+    expect(shouldDrainRound("dependency_unavailable", true)).toBe(false);
+  });
+});
