@@ -240,6 +240,15 @@ class ITDB {
     if (tickets > 0 || agentJobs > 0) this.emit();
     return { tickets, agentJobs };
   }
+
+  deleteTicket(id: string): boolean {
+    const existed = this.tickets.delete(id);
+    for (const [jid, j] of this.agentJobs) {
+      if (j.ticketId === id) this.agentJobs.delete(jid);
+    }
+    if (existed) this.emit();
+    return existed;
+  }
 }
 
 export const db: ITDB = globalThis.__ITDB__ ?? new ITDB();

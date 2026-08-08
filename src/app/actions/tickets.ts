@@ -4,6 +4,7 @@ import { revalidatePath } from "next/cache";
 import { after } from "next/server";
 import {
   clearTicketsAndJobsForWorkspace,
+  deleteTicket,
   getTicket,
   insertTicket,
   listAgentJobs,
@@ -199,6 +200,30 @@ export async function clearTicketQueue(): Promise<{ tickets: number; agentJobs: 
   const result = await clearTicketsAndJobsForWorkspace(workspaceId);
   safeRevalidate("/");
   return result;
+}
+
+/**
+ * Delete a single ticket and its jobs.
+ *
+ * The employee may remove their own tickets; IT staff may remove any. Anything
+ * else is refused — a delete button is convenience, not a way to reach across
+ * accounts. Idempotent: deleting a ticket that is already gone is a no-op, so a
+ * double-click cannot error.
+ */
+export async function deleteTicketAction(ticketId: string): Promise<void> {
+  const requestingUser = await getCurrentUser();
+  if (!requestingUser) throw new Error("Not signed in.");
+
+  const ticket = await getTicket(ticketId);
+  if (!ticket) return; // already gone
+
+  const ownsIt = ticket.reporterEmail.toLowerCase() === requestingUser.email.toLowerCase();
+  if (!ownsIt && !requestingUser.isITStaff) {
+    throw new Error("You can only delete your own tickets.");
+  }
+
+  await deleteTicket(ticketId);
+  safeRevalidate("/");
 }
 
 export async function escalateTicket(ticketId: string): Promise<void> {

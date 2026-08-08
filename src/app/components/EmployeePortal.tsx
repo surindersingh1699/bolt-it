@@ -11,6 +11,7 @@ import {
   Paperclip,
   Plus,
   SendHorizontal,
+  Trash2,
   X,
   Zap,
 } from "lucide-react";
@@ -19,6 +20,7 @@ import {
   chatWithAgent,
   confirmTicketResolved,
   createTicket,
+  deleteTicketAction,
   escalateAfterUserDenied,
 } from "@/app/actions/tickets";
 import { attachToTicket } from "@/app/actions/attachments";
@@ -195,8 +197,18 @@ function Rail({
 function RailItem({ ticket, active, onClick }: { ticket: Ticket; active: boolean; onClick: () => void }) {
   const { done, total, pct } = progressOf(ticket);
   const busy = BUSY_STATUSES.has(ticket.status);
+  const [confirming, setConfirming] = useState(false);
+  const [pending, startTransition] = useTransition();
+
+  // The poll in StateProvider refreshes the list, so the row simply disappears
+  // once the delete lands — no local removal to keep in sync.
+  const remove = () =>
+    startTransition(async () => {
+      await deleteTicketAction(ticket.id).catch(() => {});
+    });
+
   return (
-    <li>
+    <li className="group relative">
       <button
         onClick={onClick}
         className={clsx(
@@ -237,6 +249,52 @@ function RailItem({ ticket, active, onClick }: { ticket: Ticket; active: boolean
           </div>
         )}
       </button>
+
+      {/* Delete: a sibling of the row button (nesting buttons is invalid), shown
+          on hover, with a two-step inline confirm so a stray click can't wipe a
+          ticket. */}
+      {confirming ? (
+        <div className="absolute right-1.5 top-1.5 flex items-center gap-0.5 rounded-md bg-white/95 px-1 shadow-sm ring-1 ring-neutral-200">
+          <button
+            type="button"
+            onClick={(e) => {
+              e.stopPropagation();
+              remove();
+            }}
+            disabled={pending}
+            title="Delete this ticket"
+            aria-label="Confirm delete"
+            className="rounded p-1 text-red-600 hover:bg-red-50"
+          >
+            {pending ? <Loader2 size={13} className="animate-spin" /> : <Check size={13} strokeWidth={3} />}
+          </button>
+          <button
+            type="button"
+            onClick={(e) => {
+              e.stopPropagation();
+              setConfirming(false);
+            }}
+            title="Keep it"
+            aria-label="Cancel delete"
+            className="rounded p-1 text-neutral-400 hover:bg-neutral-100"
+          >
+            <X size={13} />
+          </button>
+        </div>
+      ) : (
+        <button
+          type="button"
+          onClick={(e) => {
+            e.stopPropagation();
+            setConfirming(true);
+          }}
+          title="Delete ticket"
+          aria-label="Delete ticket"
+          className="absolute right-1.5 top-1.5 rounded p-1 text-neutral-300 opacity-0 transition hover:bg-neutral-100 hover:text-red-500 focus:opacity-100 group-hover:opacity-100"
+        >
+          <Trash2 size={13} />
+        </button>
+      )}
     </li>
   );
 }

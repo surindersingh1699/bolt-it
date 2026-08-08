@@ -933,6 +933,33 @@ export async function reassignWorkspace(
   for (const j of db.listAgentJobs(fromWorkspaceId)) j.workspaceId = toWorkspaceId;
 }
 
+/**
+ * Delete one ticket and every job that belonged to it.
+ *
+ * Both stores, jobs first: a ticket with no jobs is tidier to leave behind than
+ * jobs pointing at a ticket that is gone. Never throws — a failed delete is a
+ * no-op the caller can report, not a crash.
+ */
+export async function deleteTicket(id: string): Promise<void> {
+  const ifg = isInsforgeEnabled() ? getInsforge() : null;
+  if (ifg) {
+    try {
+      await ifg.database.from("agent_jobs").delete().eq("ticket_id", id);
+    } catch (err) {
+      console.warn("[InsForge] deleteTicket jobs threw:", (err as Error).message);
+    }
+    try {
+      const { error } = await ifg.database.from("tickets").delete().eq("id", id);
+      if (error) console.warn("[InsForge] deleteTicket failed:", JSON.stringify(error));
+    } catch (err) {
+      console.warn("[InsForge] deleteTicket threw:", (err as Error).message);
+    }
+    cacheInvalidate("tickets:");
+    cacheInvalidate("agentjobs:");
+  }
+  db.deleteTicket(id);
+}
+
 export async function clearTicketsAndJobsForWorkspace(
   workspaceId: string,
 ): Promise<{ tickets: number; agentJobs: number }> {
