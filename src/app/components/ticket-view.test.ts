@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { PlanStep, Ticket } from "@/lib/types";
-import { summarizeAgentMetrics } from "./ticket-view";
+import { reconcileSelection, summarizeAgentMetrics } from "./ticket-view";
 
 // These numbers get quoted in conversations about whether the agent is working,
 // so the arithmetic is pinned rather than eyeballed in the browser.
@@ -116,5 +116,71 @@ describe("summarizeAgentMetrics", () => {
     expect(m.total).toBe(0);
     expect(m.tokens).toBe(0);
     expect(m.failures).toEqual([]);
+  });
+});
+
+// The bug this exists to prevent: filing a ticket dropped the person on their
+// previous one. `createTicket` returns the new id immediately, but the client
+// polls /api/state every 600ms — so for up to one poll the selected id is not
+// in the list. Treating that as a stale selection "repaired" it to the newest
+// existing ticket, and once the new one finally arrived the repaired selection
+// was itself valid, so nothing ever moved back.
+describe("reconcileSelection", () => {
+  const base = { selectedId: null, awaitingId: null, ids: [] as string[], firstOpenId: null };
+
+  it("holds a just-filed ticket that the poll has not returned yet", () => {
+    const d = reconcileSelection({
+      ...base,
+      selectedId: "T-NEW",
+      awaitingId: "T-NEW",
+      ids: ["T-OLD"],
+      firstOpenId: "T-OLD",
+    });
+    expect(d.kind).toBe("keep");
+    // Still waiting: clearing here would let the very next poll repair it away.
+    expect(d.clearAwaiting).toBe(false);
+  });
+
+  it("stops waiting once the new ticket actually arrives", () => {
+    const d = reconcileSelection({
+      ...base,
+      selectedId: "T-NEW",
+      awaitingId: "T-NEW",
+      ids: ["T-NEW", "T-OLD"],
+      firstOpenId: "T-NEW",
+    });
+    expect(d).toEqual({ kind: "keep", clearAwaiting: true });
+  });
+
+  it("still repairs a selection that is genuinely gone", () => {
+    const d = reconcileSelection({
+      ...base,
+      selectedId: "T-DELETED",
+      ids: ["T-OLD"],
+      firstOpenId: "T-OLD",
+    });
+    expect(d).toEqual({ kind: "select", id: "T-OLD", clearAwaiting: true });
+  });
+
+  // A deleted ticket must not be held forever just because an unrelated create
+  // is outstanding — the guard is keyed on the selection, not on any pending id.
+  it("does not hold a missing selection when a different id is awaited", () => {
+    const d = reconcileSelection({
+      ...base,
+      selectedId: "T-DELETED",
+      awaitingId: "T-OTHER",
+      ids: ["T-OLD"],
+      firstOpenId: "T-OLD",
+    });
+    expect(d.kind).toBe("select");
+  });
+
+  it("keeps a selection that is present", () => {
+    const d = reconcileSelection({ ...base, selectedId: "T-1", ids: ["T-1"], firstOpenId: "T-1" });
+    expect(d).toEqual({ kind: "keep", clearAwaiting: false });
+  });
+
+  it("sends someone with no tickets to the compose screen", () => {
+    expect(reconcileSelection(base)).toEqual({ kind: "compose", clearAwaiting: true });
   });
 });

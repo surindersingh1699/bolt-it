@@ -1978,6 +1978,14 @@ function reportUnreachable(err) {
   );
 }
 
+let starvedReason = null;
+
+function reportStarved(reason) {
+  if (starvedReason === reason) return;
+  starvedReason = reason;
+  console.error(`[local-agent] the server is handing me no work — ${reason}`);
+}
+
 function reportReachable() {
   if (!unreachableSince) return;
   const seconds = Math.round((Date.now() - unreachableSince) / 1000);
@@ -1985,18 +1993,38 @@ function reportReachable() {
   console.log(`[local-agent] ${appUrl} is answering again (was unreachable for ${seconds}s)`);
 }
 
+/**
+ * Who I am, on every request.
+ *
+ * The build id is the only thing that tells two agents apart — `AGENT_VERSION`
+ * is a string that has not changed in months. An agent that predates this
+ * header sends neither, and that absence is itself the signal: the server hands
+ * it no work, because a build old enough to lack these headers is old enough to
+ * lack half the handler table, and the failure it produces on a real ticket is
+ * `Command is not allowlisted` — indistinguishable, from the graph's side, from
+ * a capability that genuinely does not exist.
+ */
+function identityHeaders() {
+  return {
+    Authorization: `Bearer ${token}`,
+    "x-agent-build": AGENT_BUILD,
+    "x-agent-version": AGENT_VERSION,
+  };
+}
+
 async function sendHeartbeat() {
   try {
     await fetch(`${appUrl}/api/agent/heartbeat`, {
       method: "POST",
       headers: {
-        Authorization: `Bearer ${token}`,
+        ...identityHeaders(),
         "Content-Type": "application/json",
       },
       body: JSON.stringify({
         hostname: AGENT_HOSTNAME,
         os: AGENT_OS,
         version: AGENT_VERSION,
+        build: AGENT_BUILD,
         currentJob,
       }),
     });
@@ -2010,7 +2038,7 @@ async function poll() {
   void sendHeartbeat();
   try {
     const res = await fetch(`${appUrl}/api/agent/jobs`, {
-      headers: { Authorization: `Bearer ${token}` },
+      headers: identityHeaders(),
     });
     // Any answer at all, including a refusal, settles the question this tracks.
     // Clearing it only on 200 would leave a machine whose token is wrong
@@ -2021,6 +2049,20 @@ async function poll() {
       return;
     }
     const data = await res.json();
+
+    // The server refused to hand this build any work. Say so once — a silent
+    // idle agent looks identical to a quiet ticket queue, and that is exactly
+    // how an old process kept taking jobs next to a current one for a day.
+    if (data.staleBuild) {
+      reportStarved(data.reason || "this build is not the one the server is serving");
+      if (!currentJob) {
+        console.log(`[local-agent] exiting so the supervisor pulls build ${data.agentBuild}`);
+        process.exit(0);
+      }
+      return;
+    }
+    starvedReason = null;
+
     for (const job of data.jobs ?? []) {
       await handleJob(job);
     }

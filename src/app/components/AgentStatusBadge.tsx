@@ -17,6 +17,10 @@ interface HeartbeatResponse {
   lastPingAt?: number;
   ageMs?: number;
   currentJob?: CurrentJob | null;
+  version?: string;
+  build?: string | null;
+  serverBuild?: string | null;
+  staleBuild?: boolean;
 }
 
 const POLL_INTERVAL_MS = 1500;
@@ -45,41 +49,51 @@ export function AgentStatusBadge() {
   }, []);
 
   const running = state.connected && !!state.currentJob;
-  const tooltip = running
-    ? `Running ${state.currentJob!.command} on ${state.hostname ?? "local agent"}`
-    : state.connected
-      ? `${state.os ?? "unknown OS"} · last ping ${formatAge(state.ageMs ?? 0)}`
-      : state.lastPingAt
-        ? `Last seen ${formatAge(state.ageMs ?? 0)}`
-        : "No machine has connected yet";
+  // A connected agent on the wrong build runs nothing, and saying "connected"
+  // about it is the lie that cost T-4935 three looks.
+  const stale = state.connected && Boolean(state.staleBuild);
+  const buildLine = `agent ${state.version ?? "?"} · build ${state.build ?? "unreported (too old)"}`;
+  const tooltip = stale
+    ? `${buildLine} — the server is serving ${state.serverBuild ?? "another build"} and hands this agent no work. Restart it: schtasks /end /tn "Bolt-it agent"; schtasks /run /tn "Bolt-it agent"`
+    : running
+      ? `Running ${state.currentJob!.command} on ${state.hostname ?? "local agent"} · ${buildLine}`
+      : state.connected
+        ? `${state.os ?? "unknown OS"} · last ping ${formatAge(state.ageMs ?? 0)} · ${buildLine}`
+        : state.lastPingAt
+          ? `Last seen ${formatAge(state.ageMs ?? 0)}`
+          : "No machine has connected yet";
 
   return (
     <div
       title={tooltip}
       className={clsx(
         "hidden items-center gap-2 rounded-full px-3 py-1.5 text-[12px] md:flex",
-        running
-          ? "bg-blue-50 text-blue-700"
-          : state.connected
-            ? "bg-emerald-50 text-emerald-700"
-            : "bg-neutral-100 text-neutral-500",
+        stale
+          ? "bg-amber-50 text-amber-700"
+          : running
+            ? "bg-blue-50 text-blue-700"
+            : state.connected
+              ? "bg-emerald-50 text-emerald-700"
+              : "bg-neutral-100 text-neutral-500",
       )}
     >
-      {running ? (
+      {running && !stale ? (
         <Loader2 size={12} className="animate-spin" />
       ) : (
         <span
           className={clsx(
             "h-2 w-2 rounded-full",
-            state.connected ? "bg-emerald-600" : "bg-neutral-400",
+            stale ? "bg-amber-500" : state.connected ? "bg-emerald-600" : "bg-neutral-400",
           )}
         />
       )}
-      {running
-        ? `Working on ${state.hostname ?? "a machine"}`
-        : state.connected
-          ? `Connected to ${state.hostname ?? "a machine"}`
-          : "No machine connected"}
+      {stale
+        ? `Stale agent on ${state.hostname ?? "a machine"}`
+        : running
+          ? `Working on ${state.hostname ?? "a machine"}`
+          : state.connected
+            ? `Connected to ${state.hostname ?? "a machine"}`
+            : "No machine connected"}
     </div>
   );
 }

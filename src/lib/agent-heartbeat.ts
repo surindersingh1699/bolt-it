@@ -10,6 +10,8 @@ export interface AgentHeartbeat {
   hostname: string;
   os: string;
   version: string;
+  /** The build id the agent reports. Absent on an agent too old to report one. */
+  build: string | null;
   lastPingAt: number;
   currentJob: AgentCurrentJob | null;
 }
@@ -26,12 +28,14 @@ export function recordHeartbeat(input: {
   hostname: string;
   os: string;
   version: string;
+  build?: string | null;
   currentJob?: AgentCurrentJob | null;
 }): void {
   store.current = {
     hostname: input.hostname,
     os: input.os,
     version: input.version,
+    build: input.build ?? null,
     lastPingAt: Date.now(),
     currentJob: input.currentJob ?? null,
   };

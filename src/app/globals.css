@@ -18,6 +18,43 @@ html, body {
   font-family: var(--font-geist-sans), Arial, Helvetica, sans-serif;
 }
 
+/* A message arriving during a live ticket should read as an arrival. Ticket
+   threads update on a 600ms poll, so without this a new bubble simply appears
+   mid-scroll and the eye has nothing to catch. Kept to one short transform —
+   anything longer competes with reading. Honours reduced-motion. */
+@keyframes bolt-message-in {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+.bolt-message-in {
+  animation: bolt-message-in 220ms ease-out both;
+}
+
+/* The wrench line is the agent doing something right now. A slow pulse says
+   "in flight" without another spinner on a screen that already has one. */
+@keyframes bolt-activity-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.55; }
+}
+
+.bolt-activity-live {
+  animation: bolt-activity-pulse 1.8s ease-in-out infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .bolt-message-in,
+  .bolt-activity-live {
+    animation: none;
+  }
+}
+
 ::-webkit-scrollbar {
   width: 10px;
   height: 10px;

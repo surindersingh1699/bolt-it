@@ -12,6 +12,7 @@ import {
   Plus,
   SendHorizontal,
   Trash2,
+  Wrench,
   X,
   Zap,
 } from "lucide-react";
@@ -44,11 +45,29 @@ const BOT_NAME = "Bolt IT";
 const OPEN_STATUSES = new Set(["new", "drafting", "awaiting_approval", "executing", "awaiting_confirmation"]);
 const BUSY_STATUSES = new Set(["new", "drafting", "executing"]);
 
+/**
+ * The desk posts two different things down one channel: sentences written for
+ * the person, and a running note of what the agent is doing right now, marked
+ * with a wrench or a pause. Rendered identically they became one wall of prose
+ * — the reader could not tell the explanation from the progress, and both got
+ * skimmed. The marker is the only thing that separates them, so it is read here
+ * and thrown away before the text is shown.
+ */
+const ACTIVITY_MARKERS = ["\u{1F527}", "⏸"];
+
 interface Row {
   key: string;
   from: "user" | "agent";
   at: number;
   text: string;
+  /** "activity" is a live progress note; "prose" is something said to them. */
+  kind: "prose" | "activity";
+}
+
+function classify(from: "user" | "agent", text: string): { kind: Row["kind"]; text: string } {
+  const marker = from === "agent" && ACTIVITY_MARKERS.find((m) => text.startsWith(m));
+  if (!marker) return { kind: "prose", text };
+  return { kind: "activity", text: text.slice(marker.length).trim().replace(/…$/, "") };
 }
 
 /** How far along a ticket is, for the rail item and the thread header. */
@@ -109,6 +128,16 @@ export function EmployeePortal({ currentUser }: { currentUser: PublicUser }) {
     setComposeNew(false);
     setSelectedId(id);
   };
+  /**
+   * A ticket filed from this browser. Distinct from `openTicket` because the row
+   * does not exist as far as the poll is concerned yet, and the reconciler needs
+   * to be told to hold this selection rather than repair it to the newest
+   * existing ticket — which is what used to drop the person on their last one.
+   */
+  const openCreatedTicket = (id: string) => {
+    awaitingId.current = id;
+    openTicket(id);
+  };
   const startNew = () => {
     setComposeNew(true);
     setSelectedId(null);
@@ -130,10 +159,10 @@ export function EmployeePortal({ currentUser }: { currentUser: PublicUser }) {
             currentUser={currentUser}
             hasTickets={mine.length > 0}
             onBack={mine.length > 0 ? () => setComposeNew(false) : undefined}
-            onCreated={openTicket}
+            onCreated={openCreatedTicket}
           />
         ) : (
-          <TicketThread ticket={selected} currentUser={currentUser} onCreated={openTicket} />
+          <TicketThread ticket={selected} currentUser={currentUser} onCreated={openCreatedTicket} />
         )}
       </main>
     </div>
@@ -394,9 +423,11 @@ function TicketThread({
   const awaiting = ticket.status === "awaiting_confirmation";
 
   const rows = useMemo<Row[]>(() => {
-    const out: Row[] = [{ key: `${ticket.id}-body`, from: "user", at: ticket.createdAt, text: ticket.body }];
+    const out: Row[] = [
+      { key: `${ticket.id}-body`, from: "user", at: ticket.createdAt, text: ticket.body, kind: "prose" },
+    ];
     (ticket.chat ?? []).forEach((m, i) =>
-      out.push({ key: `${ticket.id}-chat-${i}`, from: m.from, at: m.at, text: m.text }),
+      out.push({ key: `${ticket.id}-chat-${i}`, from: m.from, at: m.at, ...classify(m.from, m.text) }),
     );
     return out.sort((a, b) => a.at - b.at);
   }, [ticket]);
@@ -447,11 +478,23 @@ function TicketThread({
         <div className="mx-auto max-w-3xl px-5 py-5">
           {ticket.plan.length > 0 && <ProgressCard ticket={ticket} />}
 
-          <div className="mt-4 space-y-1">
+          <div className="mt-4">
             {rows.map((row, i) => {
               const prev = rows[i - 1];
-              const grouped = prev && prev.from === row.from && row.at - prev.at < 5 * 60 * 1000;
-              return <Message key={row.key} row={row} grouped={Boolean(grouped)} userName={currentUser.name} />;
+              // Grouping now only decides whether the name and avatar repeat.
+              // It used to decide whether the bubble repeated too, and since a
+              // ticket's whole life fits inside the five-minute window, every
+              // agent message merged into the one before it — the wall of text.
+              const grouped = Boolean(prev && prev.from === row.from && prev.kind === row.kind);
+              return (
+                <Message
+                  key={row.key}
+                  row={row}
+                  grouped={grouped}
+                  userName={currentUser.name}
+                  live={row.kind === "activity" && i === rows.length - 1 && busy}
+                />
+              );
             })}
           </div>
 
@@ -552,10 +595,55 @@ function StepRow({ step }: { step: PlanStep }) {
   );
 }
 
-function Message({ row, grouped, userName }: { row: Row; grouped: boolean; userName: string }) {
+/**
+ * One message, one bubble — the shape the staff side already uses.
+ *
+ * The person reading this is not reading a transcript, they are checking on
+ * their own broken laptop between other things. Every message needs its own
+ * edge and its own time, so a glance can find where the last one ended.
+ */
+function Message({
+  row,
+  grouped,
+  userName,
+  live,
+}: {
+  row: Row;
+  grouped: boolean;
+  userName: string;
+  live: boolean;
+}) {
   const isBot = row.from === "agent";
+
+  // A progress note is not a sentence addressed to the reader, so it does not
+  // get a speech bubble. It is a line of work, and it reads as one.
+  if (row.kind === "activity") {
+    return (
+      <div className="bolt-message-in mt-1.5 flex gap-2.5 pl-[46px]">
+        <div
+          className={clsx(
+            "flex min-w-0 items-start gap-2 rounded-lg bg-neutral-50 px-3 py-2 ring-1 ring-neutral-200/70",
+            live && "bolt-activity-live",
+          )}
+        >
+          {live ? (
+            <Loader2 size={13} className="mt-0.5 flex-none animate-spin text-blue-600" />
+          ) : (
+            <Wrench size={13} className="mt-0.5 flex-none text-neutral-400" />
+          )}
+          <span className="min-w-0 break-words text-[13px] leading-5 text-neutral-600">
+            <Mrkdwn text={row.text} />
+          </span>
+          <span className="mt-0.5 flex-none text-[10.5px] tabular-nums text-neutral-400">
+            {clockTime(row.at)}
+          </span>
+        </div>
+      </div>
+    );
+  }
+
   return (
-    <div className={clsx("group flex gap-2.5 rounded px-2 py-0.5", grouped ? "mt-0" : "mt-2.5")}>
+    <div className={clsx("bolt-message-in flex gap-2.5", grouped ? "mt-1" : "mt-3.5")}>
       <div className="w-9 flex-none">
         {!grouped &&
           (isBot ? (
@@ -575,16 +663,25 @@ function Message({ row, grouped, userName }: { row: Row; grouped: boolean; userN
       </div>
       <div className="min-w-0 flex-1">
         {!grouped && (
-          <div className="flex items-baseline gap-2">
-            <span className="text-[14.5px] font-bold text-neutral-900">{isBot ? BOT_NAME : userName}</span>
+          <div className="mb-1 flex items-baseline gap-2">
+            <span className="text-[13.5px] font-bold text-neutral-900">{isBot ? BOT_NAME : userName}</span>
             {isBot && (
               <span className="rounded bg-neutral-200 px-1 py-px text-[10px] font-semibold text-neutral-600">APP</span>
             )}
-            <span className="text-[11.5px] text-neutral-400">{clockTime(row.at)}</span>
           </div>
         )}
-        <div className="whitespace-pre-wrap break-words text-[14.5px] leading-[1.55] text-neutral-800">
-          <Mrkdwn text={row.text} />
+        <div
+          className={clsx(
+            "inline-block max-w-full rounded-2xl px-4 py-2.5 text-[14px] leading-[1.6]",
+            isBot ? "bg-neutral-100 text-neutral-800" : "bg-blue-600 text-white",
+          )}
+        >
+          <div className="whitespace-pre-wrap break-words">
+            <Mrkdwn text={row.text} />
+          </div>
+          <div className={clsx("mt-1 text-[10.5px] tabular-nums", isBot ? "text-neutral-400" : "text-blue-100")}>
+            {clockTime(row.at)}
+          </div>
         </div>
       </div>
     </div>

@@ -4,6 +4,7 @@ import { z } from "zod";
 import { HEARTBEAT_CONNECTED_WINDOW_MS, readHeartbeat, recordHeartbeat } from "@/lib/agent-heartbeat";
 import { authenticateAgent } from "@/lib/device-auth";
 import { getDevice, updateDevice } from "@/lib/data";
+import { agentBuildId, DEV_BUILD } from "@/lib/agent-bundle";
 
 export const dynamic = "force-dynamic";
 
@@ -38,6 +39,9 @@ const heartbeatSchema = z.object({
   hostname: z.string().min(1).max(253),
   os: z.string().min(1).max(200),
   version: z.string().min(1).max(64),
+  // Only an agent new enough to send it has one. Its absence is what the jobs
+  // route reads as "too old to be handed work".
+  build: z.string().min(1).max(64).nullable().optional(),
   currentJob: z
     .object({
       id: z.string().min(1).max(64),
@@ -96,6 +100,7 @@ export async function GET(req: Request) {
   const hb = readHeartbeat();
   if (!hb) return NextResponse.json({ connected: false });
   const ageMs = Date.now() - hb.lastPingAt;
+  const serverBuild = await agentBuildId();
   return NextResponse.json({
     connected: ageMs < CONNECTED_WINDOW_MS,
     hostname: hb.hostname,
@@ -103,5 +108,11 @@ export async function GET(req: Request) {
     lastPingAt: hb.lastPingAt,
     ageMs,
     currentJob: hb.currentJob,
+    version: hb.version,
+    build: hb.build,
+    serverBuild,
+    // The same rule the jobs route enforces, reported so a person can see why a
+    // connected agent is running nothing.
+    staleBuild: hb.build !== DEV_BUILD && Boolean(serverBuild) && hb.build !== serverBuild,
   });
 }
