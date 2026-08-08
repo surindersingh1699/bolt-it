@@ -135,6 +135,54 @@ export function gatedStepOf(ticket: Ticket): PlanStep | undefined {
   return ticket.plan.find(isGatedStep);
 }
 
+export interface SelectionInput {
+  /** What the portal currently has open. */
+  selectedId: string | null;
+  /** A ticket just filed here, which the poll may not have returned yet. */
+  awaitingId: string | null;
+  /** Every ticket id the poll knows about, newest first. */
+  ids: string[];
+  /** What to fall back to: the newest open ticket, else the newest of any. */
+  firstOpenId: string | null;
+}
+
+export type SelectionDecision =
+  | { kind: "keep"; clearAwaiting: boolean }
+  | { kind: "select"; id: string; clearAwaiting: boolean }
+  | { kind: "compose"; clearAwaiting: boolean };
+
+/**
+ * What the portal should have open once a poll lands.
+ *
+ * The subtle case, and the one this exists for: a ticket the person just filed
+ * is selected the instant `createTicket` returns its id, but the client polls
+ * `/api/state` every 600ms, so for up to one poll the selected id is not in the
+ * list yet. Treating "not in the list" as "stale selection" made the portal
+ * repair it to the newest existing ticket — and by the time the new one arrived,
+ * that repaired selection was itself valid, so nothing ever moved back. Filing a
+ * ticket dropped you on the previous one.
+ *
+ * So an id we are explicitly waiting for is held, not repaired. Everything else
+ * is unchanged: an unknown selection is still corrected, and someone with no
+ * tickets still lands on the compose screen.
+ */
+export function reconcileSelection(input: SelectionInput): SelectionDecision {
+  const { selectedId, awaitingId, ids, firstOpenId } = input;
+
+  if (selectedId && ids.includes(selectedId)) {
+    // It arrived. Stop waiting on it, whether or not it is the one we awaited.
+    return { kind: "keep", clearAwaiting: awaitingId === selectedId };
+  }
+
+  // Selected but not here yet, and we know why. Hold it.
+  if (selectedId && awaitingId === selectedId) {
+    return { kind: "keep", clearAwaiting: false };
+  }
+
+  if (firstOpenId) return { kind: "select", id: firstOpenId, clearAwaiting: true };
+  return { kind: "compose", clearAwaiting: true };
+}
+
 export function timeAgo(ts: number): string {
   const sec = Math.max(0, Math.floor((Date.now() - ts) / 1000));
   if (sec < 60) return `${sec}s ago`;

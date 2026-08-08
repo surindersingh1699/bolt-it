@@ -35,6 +35,7 @@ import {
   employeeStatusLabel,
   initialsOf,
   proofOf,
+  reconcileSelection,
   TONE_PILL,
   toneOf,
 } from "./ticket-view";
@@ -82,14 +83,24 @@ export function EmployeePortal({ currentUser }: { currentUser: PublicUser }) {
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [composeNew, setComposeNew] = useState(false);
 
+  // A ticket this person just filed, which the 600ms poll has not returned yet.
+  // Held in a ref rather than state: it must not itself cause a render, and the
+  // reconciler below has to see the current value on the very next one.
+  const awaitingId = useRef<string | null>(null);
+
   // Keep a valid selection as tickets arrive. Default to the most recently
   // touched one; fall back to the new-issue screen when the person has none.
   useEffect(() => {
     if (composeNew) return;
-    if (selectedId && mine.some((t) => t.id === selectedId)) return;
-    const next = mine.find((t) => OPEN_STATUSES.has(t.status)) ?? mine[0];
-    if (next) setSelectedId(next.id);
-    else setComposeNew(true);
+    const decision = reconcileSelection({
+      selectedId,
+      awaitingId: awaitingId.current,
+      ids: mine.map((t) => t.id),
+      firstOpenId: (mine.find((t) => OPEN_STATUSES.has(t.status)) ?? mine[0])?.id ?? null,
+    });
+    if (decision.clearAwaiting) awaitingId.current = null;
+    if (decision.kind === "select") setSelectedId(decision.id);
+    if (decision.kind === "compose") setComposeNew(true);
   }, [mine, selectedId, composeNew]);
 
   const selected = mine.find((t) => t.id === selectedId) ?? null;

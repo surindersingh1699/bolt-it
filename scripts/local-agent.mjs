@@ -1947,6 +1947,44 @@ function printProof(envelope) {
 
 // ---- server protocol -------------------------------------------------------
 
+/**
+ * Whether the server is reachable is ONE fact, not two.
+ *
+ * The heartbeat and the job poll dial the same host on the same cycle and fail
+ * together, so reporting each of them, every three seconds, produced two lines
+ * of "fetch failed" per cycle forever — and "fetch failed" is undici's generic
+ * message with the actual reason (ECONNREFUSED, EHOSTUNREACH, ETIMEDOUT) hidden
+ * on err.cause. A screen full of it names neither the URL that failed nor why,
+ * which is everything a person needs to fix it.
+ *
+ * So: say it once, with the URL and the real cause, and say it again only when
+ * the answer changes.
+ */
+let unreachableSince = null;
+
+function isNetworkError(err) {
+  return Boolean(err?.cause);
+}
+
+function reportUnreachable(err) {
+  if (unreachableSince) return;
+  unreachableSince = Date.now();
+  const cause = err.cause?.code || err.cause?.message || err.message;
+  console.error(`[local-agent] cannot reach ${appUrl} — ${cause}`);
+  console.error(
+    `[local-agent] the app URL lives in AppUrl in C:\\ProgramData\\BoltIt\\config.json ` +
+      `on Windows, or IT_SUPPORT_APP_URL in the environment. It must be the address of ` +
+      `the machine running the app as seen FROM HERE — not localhost, which is this machine.`,
+  );
+}
+
+function reportReachable() {
+  if (!unreachableSince) return;
+  const seconds = Math.round((Date.now() - unreachableSince) / 1000);
+  unreachableSince = null;
+  console.log(`[local-agent] ${appUrl} is answering again (was unreachable for ${seconds}s)`);
+}
+
 async function sendHeartbeat() {
   try {
     await fetch(`${appUrl}/api/agent/heartbeat`, {
@@ -1963,7 +2001,8 @@ async function sendHeartbeat() {
       }),
     });
   } catch (err) {
-    console.warn(`[local-agent] heartbeat failed: ${err.message}`);
+    // The poll that follows dials the same host. Let it be the one that speaks.
+    if (!isNetworkError(err)) console.warn(`[local-agent] heartbeat failed: ${err.message}`);
   }
 }
 
@@ -1973,6 +2012,10 @@ async function poll() {
     const res = await fetch(`${appUrl}/api/agent/jobs`, {
       headers: { Authorization: `Bearer ${token}` },
     });
+    // Any answer at all, including a refusal, settles the question this tracks.
+    // Clearing it only on 200 would leave a machine whose token is wrong
+    // reporting the host as unreachable, which sends the wrong person to look.
+    reportReachable();
     if (!res.ok) {
       console.error(`[local-agent] poll failed ${res.status}: ${await res.text()}`);
       return;
@@ -1996,7 +2039,8 @@ async function poll() {
       process.exit(0);
     }
   } catch (err) {
-    console.error(`[local-agent] ${err.message}`);
+    if (isNetworkError(err)) reportUnreachable(err);
+    else console.error(`[local-agent] ${err.message}`);
     if (currentJob) {
       currentJob = null;
       void sendHeartbeat();
