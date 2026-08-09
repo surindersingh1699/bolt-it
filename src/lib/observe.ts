@@ -30,11 +30,22 @@ import { AgentJob, Device, Ticket } from "./types";
 import { enqueueProbeJob } from "./agent-jobs";
 import { listDevices } from "./data";
 import { waitForJob } from "./ticket-helpers";
-import { readHeartbeat, HEARTBEAT_CONNECTED_WINDOW_MS } from "./agent-heartbeat";
+import { AgentSurface, readHeartbeat, HEARTBEAT_CONNECTED_WINDOW_MS } from "./agent-heartbeat";
 import { humanLabelFor } from "./agent-jobs";
 
-/** How long the whole bundle gets. One round trip, not one per probe. */
-export const OBSERVE_TIMEOUT_MS = 45_000;
+/**
+ * How long the whole bundle gets. One round trip, not one per probe.
+ *
+ * The agent drains every queued job serially inside one poll, so this is a
+ * budget for the SUM of the probes, not the slowest one. 45s was not enough on a
+ * single-core VM where `collect_system_info` alone takes 6s: the bundle overran
+ * by a second and every probe in it — including the three that had already
+ * answered — was discarded, leaving the strategist to plan against no device
+ * evidence at all. An overrun costs the whole observation, so the budget is set
+ * for the slow machine rather than the fast one; a bundle that finishes early
+ * returns early and pays nothing for the headroom.
+ */
+export const OBSERVE_TIMEOUT_MS = 60_000;
 
 /** One probe's worth of what the machine reported. */
 export interface DeviceFact {
@@ -60,6 +71,15 @@ export interface DeviceFacts {
   reason?: string;
   host?: string;
   facts: DeviceFact[];
+  /**
+   * What the agent on this machine says it can run, as reported by the machine.
+   *
+   * Carried alongside the readings because the planner needs both to plan
+   * something that can actually happen: without it, the strategist authorises
+   * `curl` because the capability exists in the registry, the device refuses it
+   * because the binary is not on its list, and the round is gone.
+   */
+  surface?: AgentSurface | null;
 }
 
 export const NO_FACTS: DeviceFacts = { collected: false, reason: "not attempted", facts: [] };
@@ -98,6 +118,17 @@ const BASE_PROBES: ReadonlyArray<{ capability: string; params?: Record<string, u
   { capability: "diag.system_info" },
   { capability: "diag.process_list" },
   { capability: "diag.network_state" },
+  // A down tunnel leaves almost no trace anywhere else. `network_state` reports
+  // the physical adapter, so on a machine whose VPN is off it reads entirely
+  // healthy — and the strategist, seeing a healthy adapter next to one
+  // unreachable internal site, reaches for DNS, the hosts file and the proxy
+  // instead. T-5009 spent three strategist rounds and two DNS changes doing
+  // exactly that while the actual fault, a stopped tunnel, was never once read.
+  //
+  // It belongs in the bundle rather than in a branch on the ticket text: the
+  // employee is the last person who can be relied on to say the word "VPN", and
+  // this costs one read on a machine that has no tunnel at all.
+  { capability: "diag.vpn_state" },
 ];
 
 /**
@@ -154,7 +185,8 @@ export async function observeDevice(
 ): Promise<DeviceFacts> {
   const devices = await listDevices(ticket.workspaceId).catch(() => [] as Device[]);
   const { device, reason } = liveDeviceFor(devices, ticket.reporterEmail);
-  if (!device) return { collected: false, reason, facts: [] };
+  const surface = readHeartbeat()?.surface ?? null;
+  if (!device) return { collected: false, reason, facts: [], surface };
 
   const bundle = probeBundleFor(ticket);
 
@@ -201,7 +233,32 @@ export async function observeDevice(
     reason: anyLanded ? undefined : `every probe on ${device.hostname} failed or timed out`,
     host: device.hostname,
     facts,
+    surface,
   };
+}
+
+/**
+ * What this machine can actually run, for the planner prompt.
+ *
+ * The capability list in the system prompt says what the SYSTEM has. This says
+ * what THIS DEVICE implements, which is the only list that can be planned
+ * against. Without it the models authorise reads that cannot run there and
+ * spend rounds interpreting the refusal — three looks on T-4935, all of them
+ * theorising about an allowlist that was working correctly.
+ *
+ * A grantable binary is listed as runnable, not as forbidden: it needs a
+ * decision, and at AUTONOMY=full the graph makes that decision itself.
+ */
+export function surfaceAsContext(surface: AgentSurface | null | undefined): string {
+  if (!surface) return "";
+  const { default: allowed, grantable } = surface.binaries;
+  return `\n\n## What this machine can run
+Reported by the agent on the machine itself. A read outside these lists cannot run there, however it is
+phrased — pick a different observation rather than rephrasing a refused one.
+
+Read-only binaries available now (for diag.command_output): ${allowed.join(", ") || "(none reported)"}
+Available once granted, which happens automatically under full autonomy: ${grantable.join(", ") || "(none)"}
+Job handlers this build implements: ${surface.handlers.join(", ")}\n`;
 }
 
 /**
@@ -219,7 +276,7 @@ export function deviceFactsAsContext(facts: DeviceFacts | null): string {
     return (
       `\n\n## What the machine says\nNOTHING WAS OBSERVED — ${facts.reason ?? "no device evidence"}. ` +
       `You are working without device evidence. Say so in your reasoning, and do not assert anything ` +
-      `about the state of the machine that you cannot support.\n`
+      `about the state of the machine that you cannot support.\n` + surfaceAsContext(facts.surface)
     );
   }
 
@@ -243,5 +300,5 @@ ${blocks.join("\n\n")}
 [end device evidence]
 
 You already have these observations. Do not spend a plan step re-reading something that is written above —
-plan the next thing you do not yet know, or the fix this evidence already justifies.\n`;
+plan the next thing you do not yet know, or the fix this evidence already justifies.\n${surfaceAsContext(facts.surface)}`;
 }

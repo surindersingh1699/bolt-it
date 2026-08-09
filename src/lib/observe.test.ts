@@ -23,9 +23,27 @@ function ticketWith(subject: string, body: string): Ticket {
 }
 
 describe("probe bundle selection", () => {
-  it("always reads the universal three, whatever the ticket says", () => {
+  it("always reads the universal set, whatever the ticket says", () => {
     const caps = probeBundleFor(ticketWith("laptop is odd", "no idea")).map((p) => p.capability);
-    expect(caps).toEqual(["diag.system_info", "diag.process_list", "diag.network_state"]);
+    expect(caps).toEqual([
+      "diag.system_info",
+      "diag.process_list",
+      "diag.network_state",
+      "diag.vpn_state",
+    ]);
+  });
+
+  it("reads the tunnel even when the employee never says the word VPN", () => {
+    // T-5009: the ticket said "I cannot access my company page, internet is
+    // fine". `network_state` reported a healthy physical adapter, so the
+    // strategist chased DNS, the hosts file and the proxy for three rounds and
+    // two DNS changes while the stopped tunnel — the actual fault — was never
+    // read. The employee describing the symptom cannot be relied on to name the
+    // cause, so this cannot hang off a keyword in the ticket text.
+    const caps = probeBundleFor(
+      ticketWith("cannot access my company page", "internet in general is good"),
+    ).map((p) => p.capability);
+    expect(caps).toContain("diag.vpn_state");
   });
 
   it("adds the named app's status and logs, which is the round it saves", () => {
