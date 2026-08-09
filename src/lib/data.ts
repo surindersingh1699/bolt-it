@@ -239,12 +239,33 @@ function adAccountPatchToRow(patch: Partial<ADAccount>): DbRow {
   return out;
 }
 
-function agentJobToRow(j: AgentJob): DbRow {
+/**
+ * Every field on the wire, in both directions.
+ *
+ * Three fields used to be missing here — `device_id`, `device_hostname` and
+ * `granted_binaries` — and each was built correctly by `enqueueAgentJob`,
+ * written to the row, and then lost, because a column the mapper does not name
+ * does not exist. The effects were not subtle:
+ *
+ *  - routing: a job came back with no `deviceId`, so the jobs route's
+ *    "only the device this job names" filter matched nothing to enforce;
+ *  - grants: the agent got a job with no `grantedBinaries`, refused the read it
+ *    had just been approved for, and the graph parked on the approval again —
+ *    a technician clicking Approve four times against a loop (T-4935).
+ *
+ * `agent-jobs.test.ts` round-trips a fully populated job through both mappers,
+ * so a field added to `AgentJob` and forgotten here fails a test instead of
+ * disappearing at runtime.
+ */
+export function agentJobToRow(j: AgentJob): DbRow {
   return {
     id: j.id,
     workspace_id: j.workspaceId,
     ticket_id: j.ticketId,
     step_id: j.stepId ?? null,
+    device_id: j.deviceId ?? null,
+    device_hostname: j.deviceHostname ?? null,
+    granted_binaries: j.grantedBinaries ?? null,
     kind: j.kind,
     target_user_email: j.targetUserEmail,
     instructions: j.instructions,
@@ -262,12 +283,15 @@ function agentJobToRow(j: AgentJob): DbRow {
   };
 }
 
-function agentJobFromRow(r: DbRow): AgentJob {
+export function agentJobFromRow(r: DbRow): AgentJob {
   return {
     id: r.id as string,
     workspaceId: r.workspace_id as string,
     ticketId: r.ticket_id as string,
     stepId: (r.step_id as string | null) ?? undefined,
+    deviceId: (r.device_id as string | null) ?? undefined,
+    deviceHostname: (r.device_hostname as string | null) ?? undefined,
+    grantedBinaries: (r.granted_binaries as string[] | null) ?? undefined,
     kind: r.kind as AgentJob["kind"],
     targetUserEmail: r.target_user_email as string,
     instructions: r.instructions as string,
@@ -484,14 +508,43 @@ export async function insertADUser(u: ADUser): Promise<void> {
   db.insertADUser(u);
 }
 
+/**
+ * Cached, because this is the hottest read in the system and it was the only
+ * one making an uncached round trip.
+ *
+ * `auth.ts` resolves the session's directory record on EVERY request, and the
+ * portal polls `/api/state` every 600ms from each open browser. With the agent
+ * heartbeating and polling for jobs on top, this one function was enough to earn
+ * `[InsForge] getADUser: Too many requests from this IP` — and once InsForge
+ * starts rate-limiting, `getTicket` inside `sweepOrphanedTickets` throws too and
+ * live tickets get escalated as dead runs. That is what killed T-9208.
+ *
+ * A directory record is near-static, so this caches the MISS as well as the hit:
+ * an unknown email that is not cached re-queries on every single request, which
+ * is the worst case rather than a rare one. Both writers invalidate `ad_users:`.
+ */
 export async function getADUser(email: string, workspaceId?: string): Promise<ADUser | undefined> {
   const ifg = isInsforgeEnabled() ? getInsforge() : null;
   if (ifg) {
-    let q = ifg.database.from("ad_users").select().eq("email", email);
-    if (workspaceId) q = q.eq("workspace_id", workspaceId);
-    const { data, error } = await q.maybeSingle();
-    ifErr(error, "getADUser");
-    return data ? adUserFromRow(data as DbRow) : undefined;
+    const key = `ad_users:one:${email}:${workspaceId ?? "*"}`;
+    const cached = cacheGet<{ v: ADUser | undefined }>(key);
+    if (cached) return cached.v;
+    try {
+      let q = ifg.database.from("ad_users").select().eq("email", email);
+      if (workspaceId) q = q.eq("workspace_id", workspaceId);
+      const { data, error } = await q.maybeSingle();
+      ifErr(error, "getADUser");
+      const out = data ? adUserFromRow(data as DbRow) : undefined;
+      cacheSet(key, { v: out }, 30_000);
+      return out;
+    } catch (err) {
+      const stale = cacheStale<{ v: ADUser | undefined }>(key);
+      if (stale) {
+        console.warn("[data] getADUser failed, serving stale cache:", (err as Error).message);
+        return stale.v;
+      }
+      throw err;
+    }
   }
   return db.getADUser(email, workspaceId);
 }
@@ -853,6 +906,29 @@ export async function listAgentJobs(
 }
 
 /**
+ * Every device job recorded against one ticket, oldest first.
+ *
+ * Lives here rather than in the two callers because the workspace filter is an
+ * authorization rule, not a convenience: a job's envelope carries the machine's
+ * hostname and the raw output of every command run on it. An authorization rule
+ * written in two places is a rule that will eventually be written correctly in
+ * one of them.
+ *
+ * `workspaceId` is required, not optional like `listAgentJobs` — the surfaces
+ * that call this are read by people, and there is no anonymous mode to fall back
+ * to (see `getCurrentWorkspaceId`).
+ */
+export async function listAgentJobsForTicket(
+  ticketId: string,
+  workspaceId: string,
+): Promise<AgentJob[]> {
+  const jobs = await listAgentJobs(workspaceId);
+  return jobs
+    .filter((j) => j.ticketId === ticketId && j.workspaceId === workspaceId)
+    .sort((a, b) => a.createdAt - b.createdAt);
+}
+
+/**
  * Claim a queued job for one device, atomically.
  *
  * The route used to list queued jobs and then loop calling updateAgentJob on
@@ -884,9 +960,30 @@ export async function claimAgentJob(id: string, deviceId?: string): Promise<Agen
         .select();
       if (!error) {
         const rows = (data as DbRow[]) ?? [];
-        return rows.length > 0 ? agentJobFromRow(rows[0]) : null;
+        if (rows.length > 0) return agentJobFromRow(rows[0]);
+        // Zero rows matched, and that is TWO different situations:
+        //
+        //  - another agent flipped queued→claimed first. A lost race, return null.
+        //  - the job was never in InsForge at all. That happens whenever
+        //    `insertAgentJob` fell back to the in-memory queue — an InsForge
+        //    schema missing a column the row mapper writes does exactly that.
+        //
+        // Treating the second as a lost race is what starved the agent while the
+        // queue looked full: the job was enqueued to memory, `listAgentJobs`
+        // found it there, and every claim was answered by a store that had never
+        // heard of it. Four probes timed out per ticket and the strategist
+        // planned against no device evidence at all.
+        //
+        // A zero-row UPDATE is not an error, so the catch below never saw this.
+        const { data: existing } = await ifg.database
+          .from("agent_jobs")
+          .select("id")
+          .eq("id", id);
+        if (((existing as DbRow[]) ?? []).length > 0) return null;
+        // Not in InsForge — the claim is being made against the wrong store.
       }
-      // fall through to in-memory only on an InsForge error
+      // fall through to in-memory on an InsForge error, or when the job is
+      // not in InsForge at all
     } catch {
       /* fall through */
     }
@@ -898,8 +995,19 @@ export async function updateAgentJob(id: string, patch: Partial<AgentJob>): Prom
   const ifg = isInsforgeEnabled() ? getInsforge() : null;
   if (ifg) {
     try {
-      const { error } = await ifg.database.from("agent_jobs").update(agentJobPatchToRow(patch)).eq("id", id);
-      if (!error) return;
+      // `.select()` so a zero-row UPDATE is distinguishable from a successful
+      // one. Without it this returned on `!error` and the patch was dropped:
+      // the job lived in the in-memory queue (because `insertAgentJob` fell back
+      // there), the agent ran it and posted the result, and the result was
+      // written to a store that had never heard of the job. The step stayed
+      // RUNNING for ever and the observation timed out around it. Same defect as
+      // `claimAgentJob` — a zero-row UPDATE is not an error.
+      const { data, error } = await ifg.database
+        .from("agent_jobs")
+        .update(agentJobPatchToRow(patch))
+        .eq("id", id)
+        .select();
+      if (!error && ((data as DbRow[]) ?? []).length > 0) return;
     } catch {
       /* fall through */
     }
