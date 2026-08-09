@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useTransition } from "react";
+import { useEffect, useState, useTransition } from "react";
 import clsx from "clsx";
 import {
   AlertCircle,
@@ -12,7 +12,8 @@ import {
   MessageSquare,
 } from "lucide-react";
 import { approveAndExecute, escalateTicket } from "@/app/actions/tickets";
-import { PlanStep, PublicUser, Ticket } from "@/lib/types";
+import { AgentJob, PlanStep, PublicUser, Ticket } from "@/lib/types";
+import { Evidence } from "./Evidence";
 import {
   avatarColor,
   clockTime,
@@ -85,6 +86,17 @@ export function TicketDetail({
         )}
 
         <div className="mt-7">
+          {awaiting && gated && (
+            <ApprovalCard
+              key="primary-approval-card"
+              step={gated}
+              canApprove={currentUser.isITStaff}
+              pending={pending}
+              onApprove={() => run(() => approveAndExecute(ticket.id), "Approval failed.")}
+              onEscalate={() => run(() => escalateTicket(ticket.id), "Escalation failed.")}
+            />
+          )}
+
           {ticket.plan.length === 0 ? (
             <div className="flex items-center gap-2 py-3 text-[14px] text-neutral-500">
               <Loader2 size={15} className="animate-spin" />
@@ -92,18 +104,7 @@ export function TicketDetail({
             </div>
           ) : (
             ticket.plan.map((step) =>
-              step === gated && awaiting ? (
-                <ApprovalCard
-                  key={step.id}
-                  step={step}
-                  canApprove={currentUser.isITStaff}
-                  pending={pending}
-                  onApprove={() => run(() => approveAndExecute(ticket.id), "Approval failed.")}
-                  onEscalate={() => run(() => escalateTicket(ticket.id), "Escalation failed.")}
-                />
-              ) : (
-                <StepRow key={step.id} step={step} />
-              ),
+              step === gated && awaiting ? null : <StepRow key={step.id} step={step} />,
             )
           )}
         </div>
@@ -298,6 +299,51 @@ function Banner({ tone, children }: { tone: "green" | "red"; children: React.Rea
 function TechnicalDetail({ ticket }: { ticket: Ticket }) {
   const trace = ticket.trace ?? [];
   const [open, setOpen] = useState(false);
+  // Keyed by ticket AND updatedAt: fetched once when the panel is opened, and
+  // again only when the ticket itself has actually moved. The envelopes are far
+  // too heavy to ride the 600ms /api/state poll, which is why they have their
+  // own route rather than a field on the ticket.
+  const [evidence, setEvidence] = useState<{ key: string; jobs: AgentJob[]; error?: string } | null>(
+    null,
+  );
+  const key = `${ticket.id}:${ticket.updatedAt}`;
+
+  useEffect(() => {
+    if (!open || evidence?.key === key) return;
+    let live = true;
+    // A failed fetch is NOT an empty job list. This turned every 401 into
+    // "Nothing has run on a device for this ticket yet" — on a ticket whose
+    // envelopes were sitting in the database, complete, the whole time. The
+    // route already refuses anonymous reads for exactly this reason ("an empty
+    // list would read as 'this ticket has no evidence', which is a different and
+    // much worse answer than 'you are not signed in'"); swallowing its status
+    // here undid that. The one thing this panel must never do is claim nothing
+    // happened when it simply could not look.
+    fetch(`/api/evidence/${ticket.id}`)
+      .then(async (r) => {
+        if (r.ok) return { jobs: ((await r.json()) as { jobs?: AgentJob[] }).jobs ?? [] };
+        return {
+          jobs: [],
+          error:
+            r.status === 401
+              ? "You are not signed in to this workspace, so the device evidence cannot be read. It is not missing — sign in and reopen this panel."
+              : `The evidence could not be loaded (HTTP ${r.status}). This says nothing about what ran on the machine.`,
+        };
+      })
+      .then((d) => live && setEvidence({ key, ...d }))
+      .catch((err: Error) =>
+        live &&
+        setEvidence({
+          key,
+          jobs: [],
+          error: `The evidence could not be loaded (${err.message}). This says nothing about what ran on the machine.`,
+        }),
+      );
+    return () => {
+      live = false;
+    };
+  }, [open, key, evidence?.key, ticket.id]);
+
   const hasDetail = trace.length > 0 || ticket.plan.some((s) => s.capability) || !!ticket.troubleshootingSummary;
   if (!hasDetail) return null;
 
@@ -323,6 +369,30 @@ function TechnicalDetail({ ticket }: { ticket: Ticket }) {
               {ticket.troubleshootingSummary}
             </pre>
           )}
+
+          <div>
+            <div className="mb-2 flex flex-wrap items-baseline justify-between gap-2">
+              <span className="text-[11px] font-medium uppercase tracking-wider text-neutral-500">
+                Proof from the machine
+              </span>
+              <a
+                href={`/audit/${ticket.id}`}
+                className="text-[11.5px] text-blue-700 hover:underline"
+                target="_blank"
+                rel="noreferrer"
+              >
+                Open the full audit ↗
+              </a>
+            </div>
+            {evidence ? (
+              <Evidence jobs={evidence.jobs} plan={ticket.plan} error={evidence.error} />
+            ) : (
+              <div className="flex items-center gap-2 text-[12px] text-neutral-500">
+                <Loader2 size={13} className="animate-spin" />
+                Reading what the device reported…
+              </div>
+            )}
+          </div>
 
           {ticket.plan.some((s) => s.capability) && (
             <div>

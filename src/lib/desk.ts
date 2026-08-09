@@ -35,6 +35,15 @@ export type CommunicationMoment =
   | "heartbeat"
   | "resolution"
   | "handoff"
+  /**
+   * One candidate fix has landed and the ladder is paused on their answer.
+   *
+   * Not `resolution`: work is NOT finished, more candidates are queued behind
+   * this one, and a "no" here is the ladder working rather than a failure. Told
+   * as `resolution` it would claim the ticket was done and make every honest
+   * "still broken" read like a relapse.
+   */
+  | "rungCheck"
   /** The employee said something back and is waiting on an answer. */
   | "chat";
 
@@ -115,6 +124,15 @@ export function momentInstruction(moment: CommunicationMoment): string {
         "Close by asking them to try the specific thing again — name it, the way they named it. " +
         "Do NOT end on a bare \"is it fixed?\" or \"let me know if this resolved your issue\": there are already Yes/No buttons under your message, so that sentence is both redundant and the reason these messages read like a form. " +
         "If the evidence does not support saying it is fixed, say what changed and ask them to check, without claiming the outcome."
+      );
+    case "rungCheck":
+      return (
+        "MOMENT: one thing has been tried and you need them to check it, before anything else is tried. " +
+        "Say plainly what was just done, in their terms, and ask them to try the specific thing again NOW — name it the way they named it. " +
+        "Be clear that this is one attempt and not the end of the road: if it has not helped there are other things lined up to try, " +
+        "so telling you it is still happening is useful and costs them nothing. Never imply the ticket is finished or that the problem is fixed — " +
+        "you do not know that yet, which is the entire reason you are asking. " +
+        'Do NOT end on a bare "is it fixed?": there are already Yes/No buttons under your message. Ask for the one observation that would settle it.'
       );
     case "handoff":
       return "MOMENT: handing to a human technician. Be straightforward that this one was not solved automatically, say what was ruled out so they know it was taken seriously, and tell them a person now has it with the full history.";

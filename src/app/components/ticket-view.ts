@@ -113,14 +113,39 @@ export const TONE_DOT: Record<Tone, string> = {
  * Proof of effect, in words. `no_effect` is the case that matters: the commands
  * ran and the machine did not move, which is a failure however clean the exit
  * code was. Surfacing it in plain text is what stops a no-op reading as a fix.
+ *
+ * Matched on the VERDICT prefixes rather than on the first `[Proof]` line.
+ * `formatProofLines` writes one line per probe and one per executed command
+ * BEFORE it writes the verdict, so "first [Proof] line" was always
+ * `[Proof] before: resolvers=…` — neither branch fired and this returned null
+ * for every device job there has ever been. The line under a step never
+ * rendered, which is exactly the kind of silence this function exists to break.
+ *
+ * Severity order, not log order: the rollback line is written after the effect
+ * verdict, and a failed rollback is the most serious thing a step can say.
  */
 export function proofOf(step: PlanStep): { changed: boolean; text: string } | null {
-  const line = step.log?.find((l) => l.startsWith("[Proof]"));
-  if (!line) return null;
-  if (line.startsWith("[Proof] EFFECT:")) {
-    return { changed: true, text: line.slice("[Proof] EFFECT:".length).trim() || "The machine changed." };
+  const log = step.log;
+  if (!log) return null;
+  const find = (prefix: string) => log.find((l) => l.startsWith(prefix));
+
+  if (find("[Proof] ROLLBACK FAILED")) {
+    return {
+      changed: false,
+      text: "The change did not take and the undo did not either — this machine needs a person.",
+    };
   }
-  if (line.startsWith("[Proof] NO EFFECT")) {
+  const effect = find("[Proof] EFFECT:");
+  if (effect) {
+    return { changed: true, text: effect.slice("[Proof] EFFECT:".length).trim() || "The machine changed." };
+  }
+  if (find("[Proof] SIMULATED")) {
+    return { changed: false, text: "Dry run — the machine was never touched, so nothing here is evidence of a fix." };
+  }
+  if (find("[Proof] Rolled back")) {
+    return { changed: false, text: "The change did not take, so it was put back the way it was found." };
+  }
+  if (find("[Proof] NO EFFECT")) {
     return { changed: false, text: "Ran cleanly, but nothing on the machine changed." };
   }
   return null;
@@ -132,7 +157,12 @@ export function isGatedStep(step: PlanStep): boolean {
 }
 
 export function gatedStepOf(ticket: Ticket): PlanStep | undefined {
-  return ticket.plan.find(isGatedStep);
+  return (
+    ticket.plan.find(isGatedStep) ??
+    ticket.plan.find((s) => s.approvalMode === "human") ??
+    ticket.plan.find((s) => s.status === "pending") ??
+    ticket.plan[ticket.plan.length - 1]
+  );
 }
 
 export interface SelectionInput {

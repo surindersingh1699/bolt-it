@@ -33,6 +33,14 @@ export function isRealSuccess(status: AgentJobStatus): boolean {
   return status === "succeeded";
 }
 
+/**
+ * A probe whose `command` is a description of a reading, not a shell command.
+ * `probeCacheDir` measures the directory with node's own `fs` so the numbers are
+ * the agent's own reading of the disk rather than a shell string we have to
+ * trust and parse — which means there is nothing for a technician to re-run.
+ */
+const NON_SHELL_PROBE = /^node:fs\s/;
+
 function factLine(facts: Record<string, string | number | boolean | null>): string {
   const entries = Object.entries(facts);
   if (entries.length === 0) return "(no facts captured)";
@@ -71,6 +79,16 @@ export function formatProofLines(job: AgentJob): string[] {
 
   for (const probe of env.probes) {
     lines.push(`[Proof] ${probe.label}: ${factLine(probe.facts)}`);
+    // The command is what makes the facts above checkable rather than claimed:
+    // a technician can run it themselves and compare. `probeCacheDir` measures
+    // with node's own `fs` instead of shelling out, so its `command` is a
+    // description and not something to paste — say which one this is rather
+    // than letting a synthetic string read as a shell command that failed.
+    lines.push(
+      NON_SHELL_PROBE.test(probe.command)
+        ? `[Proof]   read by the agent's own filesystem calls (${probe.command}) — nothing to re-run`
+        : `[Proof]   read by: ${probe.command} (exit ${probe.exitCode}) — run this yourself to check the line above`,
+    );
   }
   for (const cmd of env.commands) {
     const stderr = cmd.stderr.trim().split(/\r?\n/)[0];
@@ -100,6 +118,19 @@ export function formatProofLines(job: AgentJob): string[] {
     );
   } else {
     lines.push(`[Proof] Read-only step — no device state was expected to change.`);
+  }
+
+  // The rollback transaction's own result. Without these lines a write that
+  // failed verification and was then put back reads identically to one that was
+  // left half-applied, and a rollback that ITSELF failed — the one case
+  // `ExecutionEnvelope.rollbackError` exists to name — reached nobody at all.
+  if (env.rolledBack) {
+    lines.push(
+      env.rollbackOk === false
+        ? `[Proof] ROLLBACK FAILED — the change did not take AND the undo did not either. ${env.host} is ` +
+            `now in a state neither the plan nor the undo accounted for: ${env.rollbackError || "no detail reported"}`
+        : `[Proof] Rolled back — the change did not take, so the agent put ${env.host} back the way it found it.`,
+    );
   }
 
   if (env.journalPath) {

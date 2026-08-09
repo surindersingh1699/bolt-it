@@ -1,6 +1,7 @@
 import { describe, it, expect } from "vitest";
-import { PlanStep, Ticket } from "@/lib/types";
-import { reconcileSelection, summarizeAgentMetrics } from "./ticket-view";
+import { AgentJob, ExecutionEnvelope, PlanStep, Ticket } from "@/lib/types";
+import { formatProofLines } from "@/lib/evidence";
+import { proofOf, reconcileSelection, summarizeAgentMetrics } from "./ticket-view";
 
 // These numbers get quoted in conversations about whether the agent is working,
 // so the arithmetic is pinned rather than eyeballed in the browser.
@@ -116,6 +117,117 @@ describe("summarizeAgentMetrics", () => {
     expect(m.total).toBe(0);
     expect(m.tokens).toBe(0);
     expect(m.failures).toEqual([]);
+  });
+});
+
+/**
+ * The bug this exists to prevent: `proofOf` matched the FIRST `[Proof]` line,
+ * but `formatProofLines` writes probe and exec lines before the verdict — so on
+ * every real device job the first match was `[Proof] before: …`, no branch
+ * fired, and the proof line under a step never rendered at all.
+ *
+ * These tests therefore build the log with the real `formatProofLines` rather
+ * than hand-writing it. The two functions are a pair: one writes the block, the
+ * other reads the verdict out of it, and hand-written fixtures would let them
+ * drift apart again without anything going red.
+ */
+describe("proofOf", () => {
+  const envelope = (over: Partial<ExecutionEnvelope> = {}): ExecutionEnvelope => ({
+    jobId: "j-1",
+    command: 'set_dns_servers --service "Wi-Fi" --servers "1.1.1.1"',
+    host: "DESKTOP-7K2",
+    os: "win32",
+    agentVersion: "local-agent/0.6.0",
+    startedAt: 0,
+    finishedAt: 900,
+    durationMs: 900,
+    expectsChange: true,
+    probes: [
+      {
+        label: "before",
+        command: 'netsh interface ipv4 show dnsservers "Wi-Fi"',
+        exitCode: 0,
+        facts: { service: "Wi-Fi", resolvers: "192.168.1.1", mode: "dhcp" },
+      },
+      {
+        label: "after",
+        command: 'netsh interface ipv4 show dnsservers "Wi-Fi"',
+        exitCode: 0,
+        facts: { service: "Wi-Fi", resolvers: "1.1.1.1", mode: "static" },
+      },
+    ],
+    commands: [
+      {
+        argv: ["netsh", "interface", "ipv4", "set", "dnsservers", "Wi-Fi", "static", "1.1.1.1", "primary"],
+        exitCode: 0,
+        stdout: "",
+        stderr: "",
+        durationMs: 220,
+      },
+    ],
+    effect: {
+      changed: true,
+      diff: [{ field: "resolvers", before: "192.168.1.1", after: "1.1.1.1" }],
+      summary: "resolvers 192.168.1.1 → 1.1.1.1, mode dhcp → static",
+    },
+    ...over,
+  });
+
+  const stepFor = (over: Partial<ExecutionEnvelope> = {}): PlanStep => {
+    const env = envelope(over);
+    const job = {
+      allowlistedCommand: env.command,
+      envelope: env,
+    } as AgentJob;
+    return step({ log: formatProofLines(job) });
+  };
+
+  it("reads the verdict past the probe and exec lines that precede it", () => {
+    const lines = stepFor().log ?? [];
+    // The guard: something OTHER than the verdict is the first [Proof] line.
+    expect(lines.find((l) => l.startsWith("[Proof]"))).not.toContain("EFFECT:");
+    expect(proofOf(stepFor())).toEqual({
+      changed: true,
+      text: "resolvers 192.168.1.1 → 1.1.1.1, mode dhcp → static",
+    });
+  });
+
+  it("calls a clean run that moved nothing a failure, not a fix", () => {
+    const flat = stepFor({
+      probes: envelope().probes.map((p) => ({ ...p, facts: { service: "Wi-Fi", resolvers: "1.1.1.1" } })),
+      effect: { changed: false, diff: [], summary: "" },
+    });
+    expect(proofOf(flat)).toEqual({
+      changed: false,
+      text: "Ran cleanly, but nothing on the machine changed.",
+    });
+  });
+
+  it("never lets a dry run read as evidence that something was fixed", () => {
+    const dry = stepFor({ simulated: true, effect: { changed: false, diff: [], summary: "" } });
+    expect(proofOf(dry)?.changed).toBe(false);
+    expect(proofOf(dry)?.text).toMatch(/never touched/i);
+  });
+
+  // Written after the effect verdict, so position-based matching would miss it.
+  // This is the case `ExecutionEnvelope.rollbackError` exists to name: the fix
+  // did not land and the undo did not either.
+  it("surfaces a failed rollback ahead of the no-effect verdict", () => {
+    const stranded = stepFor({
+      effect: { changed: false, diff: [], summary: "" },
+      rolledBack: true,
+      rollbackOk: false,
+      rollbackError: "netsh exited 1",
+    });
+    expect(proofOf(stranded)).toEqual({
+      changed: false,
+      text: "The change did not take and the undo did not either — this machine needs a person.",
+    });
+  });
+
+  it("says nothing at all for a read-only step", () => {
+    expect(proofOf(stepFor({ expectsChange: false, effect: { changed: false, diff: [], summary: "" } }))).toBeNull();
+    expect(proofOf(step({ log: undefined }))).toBeNull();
   });
 });
 

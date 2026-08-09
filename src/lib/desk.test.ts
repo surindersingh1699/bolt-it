@@ -11,6 +11,7 @@ const MOMENTS: CommunicationMoment[] = [
   "working",
   "heartbeat",
   "resolution",
+  "rungCheck",
   "handoff",
   "chat",
 ];
@@ -73,5 +74,26 @@ describe("the resolution moment", () => {
   it("closes on a specific thing to try, not a generic status check", () => {
     expect(resolution).toMatch(/is it fixed\?/i);
     expect(resolution).toMatch(/buttons/i);
+  });
+});
+
+// The ladder pauses on the same ticket status and the same Yes/No buttons as a
+// finished ticket, so the MESSAGE is the only thing telling the employee which
+// of the two this is. Told as a resolution, an honest "still broken" reads like
+// a relapse instead of the ladder working.
+describe("the rung-check moment", () => {
+  const rung = momentInstruction("rungCheck");
+
+  it("does not claim the work is finished", () => {
+    expect(rung).toMatch(/never imply the ticket is finished/i);
+    expect(rung).toMatch(/one attempt/i);
+  });
+
+  it("tells them a 'no' is expected and there is more to try", () => {
+    expect(rung).toMatch(/other things lined up|more.*to try/i);
+  });
+
+  it("still asks for the specific observation rather than a bare yes/no", () => {
+    expect(rung).toMatch(/buttons/i);
   });
 });

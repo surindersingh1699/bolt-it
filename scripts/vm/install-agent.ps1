@@ -96,6 +96,28 @@ while ($true) {
     Write-Host "[bolt-it] running the copy from last time"
   }
 
+  # The tray window: pulled the same way and for the same reason as the agent,
+  # and started beside it so the person at the machine can see what is being
+  # done to their computer without going to look for a log file. It is a
+  # separate process on purpose -- if the window dies, the agent keeps working,
+  # and the next loop starts it again.
+  try {
+    Invoke-WebRequest -Uri "$($cfg.AppUrl)/api/agent/tray" `
+      -Headers @{ Authorization = "Bearer $($cfg.Token)" } `
+      -OutFile "$root\agent-tray.ps1.new" -UseBasicParsing -TimeoutSec 20 | Out-Null
+    Move-Item -Force "$root\agent-tray.ps1.new" "$root\agent-tray.ps1"
+  } catch {
+    Write-Host "[bolt-it] could not pull the tray app ($($_.Exception.Message))"
+  }
+  if (Test-Path "$root\agent-tray.ps1") {
+    if (-not (Get-Process -Name powershell -ErrorAction SilentlyContinue |
+              Where-Object { $_.MainWindowTitle -eq "Bolt-it agent" })) {
+      Start-Process powershell.exe -WindowStyle Hidden -ArgumentList @(
+        "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "$root\agent-tray.ps1"
+      )
+    }
+  }
+
   $started = Get-Date
   node $agent
   $ran = (Get-Date) - $started
@@ -131,4 +153,5 @@ Start-ScheduledTask -TaskName $TaskName
 Write-Host ""
 Write-Host "Installed. The agent is running now and will start again at every logon."
 Write-Host "  restart after editing the agent on the Mac:  schtasks /end /tn `"$TaskName`"; schtasks /run /tn `"$TaskName`""
-Write-Host "  watch what it is doing:                      Get-Content $root\journal\*.jsonl -Wait -Tail 5"
+Write-Host "  watch what it is doing:                      the tray icon, bottom right - double-click it"
+Write-Host "  the same thing in a terminal:                Get-Content $root\journal\*.jsonl -Wait -Tail 5"
