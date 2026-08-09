@@ -846,3 +846,101 @@ moment, not just chat — four near-identical "here's what I'm checking / nothin
 you need to do" updates went out on T-8805 because `working` could not see what
 it had already said. And the strategist is told that a step refused for what it
 is is spent, exactly like a NO EFFECT one.
+
+---
+
+## Fixes are a ladder, tried one at a time, and the employee is the check
+
+**Decision.** The pending step queue is an ordered remediation ladder. `runNextStep` runs every read freely and at most one **change** per pass; a change that lands pauses the run on a LangGraph `interrupt()` and asks the employee whether the problem is gone. "Still broken" resumes onto the next candidate. Ordering is computed from the capability registry in `ladder.ts`, never proposed by a model.
+
+**Why.** This is what a service desk actually does, and the old behaviour was the opposite of it. The strategist authorised up to six steps, the operator dispatched four in one round, and the execute loop drained the queue back to back. Two things were wrong with that and only one of them is obvious:
+
+1. A ticket that a `fix.restart_app` would have settled also had its application cache cleared in the same round — irreversible, and it takes the employee's local state with it. The gentle fix and the destructive one ran together, so being right about the gentle one bought nothing.
+2. Afterwards nothing on the ticket could say **which** fix worked. Four changes and one outcome is one bit of information spread across four candidates, which is exactly the evidence a technician needs and cannot reconstruct.
+
+**Why the order is derived and not asked for.** Every input is already a field on the `CapabilitySpec` — `risk`, `reversible`, `blastRadius`, `requiresElevation`. Asking a model to rank its own fixes would put the ordering back in a prompt, where a confident ticket body can argue with it, and the ordering *is* the safety property. The model contributes one number, `likelihood`, which the registry genuinely cannot know: how likely this candidate is to be the cause of this ticket. It breaks ties inside a cost tier and can never promote an irreversible fix over a reversible one.
+
+**Why a missing probe is a tiebreak and not a cost.** The first draft charged `probe: null` as cost, on the reasoning that a change you cannot verify teaches you nothing. That is true of `exec.cmd` and false of `fix.flush_dns`, which has no probe on purpose — a flushed cache has no diffable before/after fact and repopulates immediately. As a cost it sorted the cheapest and most common network fix in the building *behind* rewriting the machine's resolvers. As a tiebreak it only ever separates two changes already equally safe to be wrong about.
+
+**Why `interrupt()` and not a reopen.** The alternative was to end the run at each rung and re-enter through `reopenTicketGraph`. That would re-observe the machine and spend an opus look to arrive back at a candidate the strategist had already authorised, already had reviewed, and already had queued — per rung. Pausing keeps the whole run alive, so climbing costs **zero** model calls. It also keeps `MAX_REOPENS` meaning what it always meant: the ticket *finished* and the employee came back anyway. Charging a rung against that bound would hand tickets to a person halfway up a ladder the engineer had already reasoned through.
+
+**Why not verify on the machine instead of asking a person.** Considered and rejected as the primary path. A probe answers "did the change land", which the device envelope already reports as VERIFIED CHANGE / NO EFFECT. It does not answer "is the employee's problem gone", and for a large class of tickets nothing on the machine can. The employee saying it is still happening already outranks a VERIFIED CHANGE everywhere else in this system; making them the check between rungs is consistent with that rather than a new idea.
+
+The machine verdict is still used, and it is used to *avoid* bothering them: a fix that came back FAILED or NO EFFECT is spent without anyone being asked. Asking "did that help?" about a command that provably did nothing costs a person a reply and tells us what we already knew.
+
+**Cost.** A ticket with a real ladder now takes as many employee round-trips as it takes rungs. That is the trade, and it is the right one: the alternative is spending irreversible changes on someone's laptop to save them a click.
+
+**Why `rungCheck` is its own desk moment.** The pause reuses `awaiting_confirmation` — it is exactly what the ticket is doing, the portal already renders Yes/No against it, and the orphan sweep already leaves it alone. So the status cannot distinguish "paused mid-ladder" from "finished", and the message is the only thing that can. Told as `resolution` it would claim the work was done, and every honest "still broken" would read as a relapse instead of the ladder working.
+
+## 2026-08-08 — The device tells us what it can do, and one build gets the work
+
+**What changed.** Four things, all one problem: the server planned against a machine it had no accurate picture of.
+
+1. **Build identity gates the queue.** The agent sends `x-agent-build`; the jobs route hands work only to the build being served (or `dev`, a hand-run copy). An agent too old to report a build gets nothing and is told why, then self-exits so the supervisor pulls the current bundle.
+2. **The agent publishes its surface** on every heartbeat — the handlers its build implements, and both binary lists. `unsupportedByDevice` checks a step against it before dispatch; `surfaceAsContext` puts the same lists in the planner prompts.
+3. **A grant is a decision, and the rung decides who makes it** ([grants.ts](../src/lib/grants.ts)). At `AUTONOMY=full` the graph grants a read-only grantable binary itself and retries; below `full` the `interrupt()` stays. One ask per binary per ticket, ever.
+4. **`agent_jobs` gained `device_id`, `device_hostname` and `granted_binaries`** (m19). They were built, written, and lost — no columns existed.
+
+**Why it was worth four changes.** T-2384 and T-4935 both stalled, and neither for the reason the ticket said. Two agents ran on the demo VM — a scheduled task on the current build and an older copy started by hand — and the claim is a race. The old one had no `command_output`/`fs_grep` handler, so identical reads succeeded and failed minutes apart, and the strategist spent three looks reasoning about an allowlist that was correct. Nothing in the system could see the difference, because nothing asked the machine what it was.
+
+The dropped columns compound it in the worst way for trust: a technician approved `netsh`, the grant was recorded on the ticket, the row mapper dropped it, the agent refused the read again, and the graph parked on the same approval. Four clicks against a button that could not work.
+
+**Why the surface is reported and not configured.** A list of "what the fleet can do" kept in the server is a second source of truth, and the whole failure above is what a second source of truth does when it drifts. The machine is the only thing that knows which build it is running. Adding a binary or a handler in future is a record in the agent's table and nothing else — the pre-dispatch check, the prompts and the failure taxonomy all read it from the heartbeat.
+
+**Why auto-grant is not a loosening.** A grant widens WHICH read-only binary may run, for one ticket, and nothing else: it must still be on the curated grantable list, every subcommand and argument filter still applies (`dscacheutil -flushcache` stays refused with the grant held), and the grant rides on the job rather than in the command string. What changed is who signs it at `AUTONOMY=full`, where the premise of the rung is that nobody is watching the queue. A read-only diagnostic parked for thirteen hours waiting for a click is not a safety boundary; it is a stalled ticket wearing one.
+
+**And argv is JSON now.** `diag.command_output` serialised argv by joining on spaces, and the token charset had no backslash, so `reg query "HKCU\...\Internet Settings" /v ProxyServer` reached the machine with its key silently deleted. The device answered `ERROR: Invalid syntax`, the operator "fixed" syntax that was never wrong, and three rounds went to it. Tokens that are not argv-safe now fail the step instead of being dropped from it, and the command carries `--argv ["query","HKCU\\...\\Internet Settings",...]`. Backslash and space are safe here — the agent spawns argv directly and never through a shell.
+
+## 2026-08-08 — The proof was collected and never shown
+
+**What changed.** The device evidence became something a person can check, and two claims the registry was making became things a test enforces.
+
+1. **`proofOf` was dead code and nobody knew.** It matched the first `[Proof]` line in `PlanStep.log`, but `formatProofLines` writes one line per probe and one per command *before* the verdict — so the first match was always `[Proof] before: resolvers=…`, no branch fired, and it returned null for every device job that has ever run. The "Confirmed: / Careful:" line under a step had never rendered on either surface. Now matched on the verdict prefixes, in severity order rather than log order, and the tests build their fixtures with the real `formatProofLines` so the writer and the reader cannot drift apart again.
+2. **`formatProofLines` now prints the probe's command** next to the facts it produced, and the rollback outcome — including `rollbackError`, the one case `ExecutionEnvelope` documents as "a person must see", which had no line at all.
+3. **[Evidence.tsx](../src/app/components/Evidence.tsx) + [/api/evidence/[ticketId]](../src/app/api/evidence/[ticketId]/route.ts) + `/audit/<ticketId>`** — the envelopes rendered: probes with their commands, the field-level diff, every argv with exit code and full stdout, rollback, and the on-machine journal / change-record / undo paths.
+4. **[probe-binding.test.ts](../src/lib/capabilities/probe-binding.test.ts)** imports the real agent module and diffs the registry against `HANDLERS`.
+5. **`fix.set_dns_servers` gained a real `rollback`**; `fix.restart_app` and `fix.toggle_wifi` lost rollback claims they never had.
+
+**Why the panel is not on `/api/state`.** One envelope carries up to 24 commands at 4000 characters of stdout each. `/api/state` is polled every 600ms by every open tab, so putting proof on it would have made the whole page two orders of magnitude heavier to serve a panel that is closed almost all the time. Fetched once, when someone opens it, keyed on the ticket's `updatedAt` so a running ticket still refreshes.
+
+**Why the probe COMMAND is the point.** `resolvers 192.168.1.1 → 1.1.1.1` is a summary, and a summary is exactly as trustworthy as the thing that produced it — which is what the question "how do we know the probes are real?" is actually asking. `netsh interface ipv4 show dnsservers "Wi-Fi"` printed next to it can be pasted into a terminal on the same machine. One is a claim; the other ends the argument. The exception is `probeCacheDir`, which measures with node's own `fs` and has no command to re-run — it says so rather than printing a synthetic string under a "run this yourself" heading.
+
+**Why the caveats are on the page.** Output is redacted twice, and the product-key pattern is blunt enough to blank harmless hyphenated serials; the on-machine journal is written un-redacted and therefore holds more than the page does. Anyone who takes the invitation to go and check WILL hit both. Discovering them unannounced makes an honest system look like it is hiding something, which is worse than the discrepancy.
+
+**Why the registry needed a test against the agent.** `probe: "probeDns"` is a string about a different file, in a different language, that does not ship with the server. `registry.test.ts` could only check the registry against itself, and it passed — while `fix.set_dns_servers` declared `reversible: "recorded"` and named an undo, and `HANDLERS.set_dns_servers` had no `rollback` at all. `executeJob` gates its rollback transaction on `handler.rollback`, so a DNS change that failed verification was left wherever it landed, and [ladder.ts](../src/lib/ladder.ts) went on ordering it as cheap to be wrong about on the strength of an undo that could not run. `fix.restart_app` and `fix.toggle_wifi` were in the same position.
+
+**Why two of the three were fixed by deleting the claim.** Only DNS had a real undo to write: the prior resolver list is captured by the before-probe, and `revertFor` already computed the exact restore command for the change record — it just was not wired to a handler. "Relaunch the app if it was left closed" and "re-enable the adapter if it was left down" describe recovery from a half-finished action, not a state undo; both capabilities are `reversible: "self"`, which was already the whole truth. Implementing rollbacks to satisfy a test would have been writing code to make a wrong record look right.
+
+---
+
+## Research asks what FIXES this, and the planner names the action
+
+**Decision.** The strategist's recommended opening move on a recognisable symptom is a remediation question — "known fixes for YouTube not loading in Chrome on Windows 11" — answered by the existing researcher, and turned into ladder rungs by the strategist. `research.ts` is unchanged. A research round no longer spends a strategist look.
+
+**Why.** A live ticket ran 11 steps, every one a risk-0 read, and authorised zero fixes. It spent all three operator rounds re-proposing one refused proxy read and reached a person having changed nothing. The ladder was already built and had nothing to put on it, because nothing was ever generating candidates.
+
+Real service desks do not derive a fix from first principles against machine readings. They recognise the symptom, look up what usually fixes it, and work down the list. The researcher already existed and was already wired `strategist → researcher → strategist`; it was only ever asked to explain error codes, because the prompt said "never a general question".
+
+**Why the quarantine did not have to move.** The obvious implementation — let findings carry a suggested capability — would have destroyed the property `research.ts` exists for. So the split is: **the source supplies knowledge, the strategist supplies the action.** A page says "clearing the cache usually fixes this"; the strategist decides that maps to `fix.clear_app_cache` and authorises it by id, from the closed list. `ResearchFinding` gains no fields and still has nowhere to put a command. A described fix with no matching capability becomes a `capability_request` — which is also how the capability set learns what to grow next.
+
+**Why a research round stopped costing a look.** It used to increment `strategyRound`. Once asking early became the recommended move, that quietly punished the tickets that followed the advice: three looks became two. `MAX_RESEARCH_ROUNDS` (2) is the real bound and was already enforced before routing, so the worst case is `MAX_STRATEGY_ROUNDS + 2` opus calls rather than an open loop. Cost went up by at most two calls on tickets that use research; it went down on the ones that used to burn looks reading.
+
+**The evidence rule was relaxed, in one direction only.** "A change must trace to an observation" was written when every authorised fix ran in the same round as every other. The ladder changed what being wrong costs: a cheap self-reversible fix is tried alone and the employee is asked immediately, so a wrong guess costs a minute. So a cheap reversible fix now needs only a plausible link to the symptom, while an irreversible, elevated or directory-touching one still needs a real observation.
+
+These two halves are a pair and `strategist.test.ts` asserts both. Delete the first and tickets go back to reading for three rounds and changing nothing. Delete the second and "try the cheap thing on a hunch" becomes "reset their password on a hunch" — the second half is the only reason the first was safe to write.
+
+**Note on the reviewer.** This did not require touching `policy.ts`: `decide()` only refuses on a `block` verdict, so a `needs_evidence` reviewer verdict never blocked these steps anyway. The thing stopping speculative cheap fixes was the strategist's own prompt, not the safety gate.
+
+---
+
+## A step refused for what it is may not be asked for twice
+
+**Decision.** `authorizeOperatorSteps` holds back any `capability` + `params` pair that already ended in `capability_missing` or `policy_block` on this ticket. A round left with nothing but repeats sets `blocked`, which routes to the strategist.
+
+**Why.** The YouTube ticket asked for the same refused `reg.exe` proxy read on three consecutive rounds and spent the entire strategy on it. The operator prompt already said not to repeat a `NO EFFECT` step **and the operator was obeying it** — a step refused for what it *is* reads as neither a `NO EFFECT` nor a failure it caused, so it kept coming back. The lesson is the same one this codebase keeps relearning: a rule a model must remember to apply is not a rule, it is a suggestion.
+
+**Why it is checked before the read-only fast path.** The step this exists to stop is itself a read. `authorizeOperatorSteps` lets any read through unconditionally, deliberately — that is the operator's room to manoeuvre. Checked after that branch, a refused read is allowed every single round and the guard does nothing at all.
+
+**Why only those two failure kinds.** Both share the property that makes them worth remembering: the answer does not depend on when you ask. A binary off the allowlist is off it a minute later; a step refused as unrelated is still unrelated. A timeout, a wrong app name, an offline agent are mechanical, and a corrected retry genuinely might fix them — retrying those is the operator's entire job.
+
+**Why params are part of the identity.** The refusal was about `reg`, not about reading command output. `diag.command_output` with a different binary is a different question, and asking a *different* observation that answers the same question is exactly what the operator is being told to do instead.

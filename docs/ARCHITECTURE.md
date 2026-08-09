@@ -47,7 +47,14 @@ START ─► observe ─► strategist (OPUS) ◄──────────�
         ┌──────────► runNextStep ──► markAwaitingApproval    │
         │                 │           └► awaitApproval       │
         │                 │              interrupt() ────────┘ Command({resume})
-        └── steps left ───┘
+        └── reads left ───┘
+                          │ a FIX landed ─► askEmployeeToVerify
+                          │                  └► awaitEmployeeVerdict
+                          │                     interrupt()
+                          │                       ├─ "still broken" + candidates left
+                          │                       │        └──► runNextStep (next rung)
+                          │                       ├─ "still broken" + none left ─► strategist
+                          │                       └─ "it works" ──► finalize
                           │ round done ──► operator
                           │ refused step ─► strategist
                           ▼
@@ -57,13 +64,14 @@ START ─► observe ─► strategist (OPUS) ◄──────────�
               researcher ◄─ strategist asks a question ─► back to strategist
 ```
 
-Ten nodes. Five details that are easy to get wrong when editing:
+Thirteen nodes (the diagram omits `intentValidator`, which sits between `operator` and `reviewSteps` — see §5). Six details that are easy to get wrong when editing:
 
 - **There is no barrier join.** Only `observe` feeds the strategist, so nothing can deadlock and both loops re-enter their own node freely. This is why escalation-style re-entry is a state update rather than a duplicated path.
 - **The inner loop must stay cheap.** `runNextStep` returns to the **operator**, not the strategist. If finished steps went straight back to the strategist, every mechanical retry would cost an opus call. `ticket-graph.test.ts` asserts the edge.
 - **`markAwaitingApproval` is separate from `awaitApproval` on purpose.** On resume, LangGraph re-runs the whole node from the top; anything before `interrupt()` fires twice. It also has to leave the paused step looking gated (`pending` + `approvalMode: "human"`), because that is what the portal renders the approve button against — a `capability_missing` refusal arrives here marked `failed`/`auto` and, left that way, produces a ticket at `awaiting_approval` that no one can approve. The grant hands the step back as `auto`; leaving it `human` sends it straight back to the same gate.
 - **A mechanical failure finishes the round before re-planning.** `shouldDrainRound` — `buildReplyEvidence` hides pending steps from the operator, so handing back mid-round makes it re-propose the checks still queued, and the employee reads the same check twice. A `timeout` or `dependency_unavailable` is exempt: the surface is gone and the rest of the round only collects the same failure.
 - **Only the operator reaches the reviewer.** The strategist cannot put a step on the ticket by itself — it authorises, the operator selects, the reviewer rules, and only then does anything run.
+- **One change at a time, cheapest-reversible first.** The pending queue *is* a remediation ladder. `runNextStep` runs every read freely and at most one **change** per pass; a change that lands parks the run on the employee's answer before the next one starts. A "still broken" costs zero model calls — the run is paused, not finished, so the next candidate is already authorised, already reviewed and already queued. Ordering is computed in [ladder.ts](../src/lib/ladder.ts) from the capability registry, not proposed by a model. See §10.
 
 ---
 
@@ -73,12 +81,19 @@ Ten nodes. Five details that are easy to get wrong when editing:
 new ─► executing ─► awaiting_approval ─► executing ─► awaiting_confirmation ─► resolved
                                              └─► escalated     │            └─► escalated
                                                                └─► "still broken" ─► executing
-                                                                   (one reopen, then escalated)
+                                                                   (next rung if the ladder
+                                                                    has one — free; otherwise
+                                                                    one reopen, then escalated)
 ```
 
 There is no `drafting` → `awaiting_approval` whole-plan gate. The plan is persisted and the graph walks straight into execution; only individual high-risk steps pause.
 
-`awaiting_confirmation` is not terminal. An employee who says it did not work sends the ticket back through `reopenTicketGraph` on the same `thread_id`: the diagnosis trail and executed history carry over, `observe` re-reads the machine, and the round budget resets because their account of what is still happening is a new problem statement. `MAX_REOPENS` is 1 — the strategist hands off past it. Escalating on the first "no", which is what this used to do, threw away a round that was still available and read their most informative message as a button press.
+`awaiting_confirmation` now carries two different situations, and the ticket status alone does not tell them apart — the **message** does, which is why the ladder has its own desk moment (`rungCheck`) rather than reusing `resolution`:
+
+1. **Paused mid-ladder.** One candidate fix landed and the run is holding the rest. "Still broken" resumes the paused run onto the next candidate: no model call, no re-observation, and **no reopen is spent** — climbing is the ticket working as designed, not the employee returning a finished one. `answerRungVerdict` in [ticket-graph.ts](../src/lib/ticket-graph.ts) is the entry point; it returns `false` when nothing is paused, and the caller falls back to a real reopen (which is also what happens when a server restart takes the checkpoint with it).
+2. **Finished.** Everything ran and the ticket is done.
+
+For case 2, `awaiting_confirmation` is still not terminal. An employee who says it did not work sends the ticket back through `reopenTicketGraph` on the same `thread_id`: the diagnosis trail and executed history carry over, `observe` re-reads the machine, and the round budget resets because their account of what is still happening is a new problem statement. `MAX_REOPENS` is 1 — the strategist hands off past it. Escalating on the first "no", which is what this used to do, threw away a round that was still available and read their most informative message as a button press.
 
 Server Actions in [tickets.ts](../src/app/actions/tickets.ts) are thin wrappers around `graph.invoke(...)`. No business logic lives there. Both entry points run inside `after()` so they survive serverless function termination.
 
@@ -142,6 +157,21 @@ The agent is copied onto the target machine by hand. There is no HTTP-served cop
 
 Auth is one token per device, traded for a single-use enrollment code and stored as a SHA-256. Jobs carry a `deviceId` and are only handed to that machine. The shared `LOCAL_AGENT_TOKEN` survives behind `ALLOW_SHARED_AGENT_TOKEN=1` and can only drain jobs never bound to a device.
 
+### 7.1 Showing the proof
+
+Every job runs `probe → act → probe (→ rollback → probe)`. A probe is a real read on the machine — `pgrep -ix Finder`, `netsh interface ipv4 show dnsservers "Wi-Fi"` — recorded through `runRecorded` with its argv, exit code, stdout and stderr, and reduced to comparable `facts`. The **fact diff between the two reads is the verdict**; an exit code of zero never is.
+
+That was all being captured and none of it was rendered. `formatProofLines` wrote the audit block into `PlanStep.log`, `/api/state` shipped it to the browser on every poll, and no component read it. `proofOf` — the one reader — matched the *first* `[Proof]` line, which is always a probe line, so it returned null for every device job there had ever been.
+
+Now:
+
+- **[Evidence.tsx](../src/app/components/Evidence.tsx)** renders the envelope: each probe with the exact command that produced its facts, the field-level before → after diff, every argv with exit code and full stdout, the rollback outcome, and the journal / change-record / undo paths written on the machine itself.
+- **[/api/evidence/[ticketId]](../src/app/api/evidence/[ticketId]/route.ts)** serves it on demand, workspace-scoped, `401` when signed out. Deliberately not on `/api/state`: one envelope carries up to 24 commands × 4000 characters of stdout, and that route is polled every 600ms by every open tab.
+- Two surfaces, one component — collapsed under `Technical detail` on the staff ticket, and full-width at **`/audit/<ticketId>`** for putting on a screen in front of someone.
+- The redaction caveats are printed on the page. Output is redacted agent-side and again server-side; the product-key pattern is blunt and will blank harmless hyphenated serials, and the on-machine journal is written un-redacted so it legitimately holds more than the page does. Anyone checking the page against the machine hits both, and finding them unannounced looks like concealment.
+
+The claim a viewer is being asked to accept is now checkable at every level: run the probe command yourself, read `~/.bolt-it/journal/<date>.jsonl` on the machine, or check the OS's own log (Windows Application event source `BoltIt`).
+
 ---
 
 ## 8. Invariants
@@ -156,12 +186,36 @@ Auth is one token per device, traded for a single-use enrollment code and stored
 8. Components never write to the store. Component → Server Action → `data.ts`.
 9. Anything simulated says so, in the log line the user sees.
 10. No branching on ticket text or reporter email to force a demo outcome.
-11. **One voice to the employee.** Every message they read — intake, working, heartbeat, resolution, handoff, chat — is `COMMUNICATOR_PROMPT` plus a moment instruction. A second prompt for "the final reply" is how the honesty rules stopped applying to two thirds of the messages last time.
+11. **One voice to the employee.** Every message they read — intake, working, heartbeat, resolution, rungCheck, handoff, chat — is `COMMUNICATOR_PROMPT` plus a moment instruction. A second prompt for "the final reply" is how the honesty rules stopped applying to two thirds of the messages last time.
+12. **One change at a time.** No path runs a second fix while the first is unverified. `nextRungAction` decides, and it is pure.
+13. **What the registry claims, the agent's build must be able to do.** `probe` and `rollback` on a `CapabilitySpec` are strings about another file. `probe-binding.test.ts` imports the real agent and asserts both directions per capability, so a promise and a build cannot drift apart in silence.
 
 ---
 
 ## 9. Known gaps
 
-- `MemorySaver` is in-memory — a restart drops in-flight interrupts. `python-rebuild` uses a Postgres checkpointer.
-- 368 tests. The safety rules in §5 are enforced by policy.test.ts, reviewer.gate.test.ts, intent.test.ts and registry.test.ts.
+- `MemorySaver` is in-memory — a restart drops in-flight interrupts. `python-rebuild` uses a Postgres checkpointer. This now also costs a paused ladder: `answerRungVerdict` finds nothing to resume and falls back to a full reopen, which re-observes and re-diagnoses rather than continuing to the next candidate.
+- 427 tests. The safety rules in §5 are enforced by policy.test.ts, reviewer.gate.test.ts, intent.test.ts and registry.test.ts; the ladder by ladder.test.ts and ticket-graph.test.ts.
 - [data.ts](../src/lib/data.ts) carries ~340 lines of mechanical row↔object mapping and repeats the `isInsforgeEnabled()` branch in ~30 functions.
+
+---
+
+## 10. The remediation ladder
+
+A technician handed five candidate fixes does not run five fixes. They start with the cheapest reversible one, watch, and climb only if it did not help. This system used to do the opposite: the strategist authorised up to six steps, the operator dispatched four in a round, and `runNextStep` drained the queue back to back. A ticket a `fix.restart_app` would have settled also got its application cache cleared — irreversible, taking the employee's local state with it — and afterwards nothing on the ticket could say which of the two had worked.
+
+Three pieces, none of them a prompt:
+
+**Order — [ladder.ts](../src/lib/ladder.ts).** Pure, no I/O, in the shape of `policy.ts`. Cost is derived from the `CapabilitySpec`: `risk * 2` + reversibility (`self` 0, `recorded` 2, `none` 5) + blast radius (`device` 0, `user-session` 1, `directory` 3) + elevation. Reads are 0 and always run first. Sort is cost ascending, then unprovable-last, then likelihood descending, then arrival. So `fix.restart_app` (3) precedes `fix.clear_app_cache` (10), and `ad.reset_password` (15) is last.
+
+The one thing a model contributes is `likelihood` on each authorised step — its belief that *this* candidate is the cause of *this* ticket. It breaks ties **within** a cost tier and can never promote an irreversible fix over a reversible one, however sure it sounds. That is the whole reason the cost is derived rather than asked for: a ticket body can argue with a model's confidence and cannot argue with the registry.
+
+A missing probe is a **tiebreak, not a cost**. `fix.flush_dns` has `probe: null` on purpose — a flushed cache has no diffable before/after fact. Charged as cost it sorted behind `fix.set_dns_servers`, which put rewriting a machine's resolvers ahead of the cheapest and most common network fix in the building.
+
+**One at a time — `nextRungAction` in [ticket-graph.ts](../src/lib/ticket-graph.ts).** Pure and exported, for the same reason `shouldDrainRound` is. Reads run freely; at most one change runs per pass. A change that *lands* sets `landedFix` and the next pass parks. A change that came back `FAILED` or `NO EFFECT` does not — that rung is spent and is climbed immediately, because asking someone "did that help?" about a command that provably did nothing costs them a reply and tells us what we already knew.
+
+**The check — `askEmployeeToVerify` / `awaitEmployeeVerdict`.** A LangGraph `interrupt()`, the same structural pause as the approval gate, and split in two for the same reason (on resume the node re-runs from the top, so the message must live in its own node or it goes out twice). The employee answers through the Yes/No buttons the portal already renders at `awaiting_confirmation`, or by saying so in the thread — `chatWithAgent`'s `still_broken` intent lands in the same place.
+
+Because the run is *paused* rather than finished, "still broken" is the cheapest evidence in the system: the next candidate was already authorised by the strategist, already ruled on by the reviewer and already queued, so climbing costs no model call, no re-observation and no reopen. When the ladder is exhausted and the problem is still there, *that* is a diagnosis problem and it goes back to the strategist for a look — bounded, as always, by `MAX_STRATEGY_ROUNDS`.
+
+What the employee is told matters as much as what runs. The `intake` message lists the reads and the **first** candidate only — the fallbacks behind it usually never happen, and promising them would be the same overstatement the honesty rules forbid everywhere else.
