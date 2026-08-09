@@ -174,13 +174,119 @@ const searchPattern = z
   .max(200)
   .refine((s) => !/["\r\n\0]/.test(s), "pattern may not contain quotes, newlines or nulls");
 
-/** A single argv token: no whitespace, so the audit string is unambiguously the
- *  argv, and no shell metacharacters. */
+/**
+ * A single argv token.
+ *
+ * Backslashes and spaces are IN, and that is a fix rather than a loosening. The
+ * old charset had neither, so `reg query "HKCU\...\Internet Settings" /v
+ * ProxyServer` — the standard way to read a Windows proxy — lost its key to a
+ * silent filter and reached the machine as `reg query /v ProxyServer`. The
+ * device answered `ERROR: Invalid syntax`, the operator "corrected" the syntax
+ * that was never wrong, and T-4935 burned three rounds on it. No spelling of
+ * that command could have worked.
+ *
+ * Nothing is unsafe about either character here: the agent spawns argv directly
+ * and never through a shell, so there is nothing for a metacharacter to act on,
+ * and the quote/newline/null exclusions below are what keep the audit string
+ * unambiguous. The binary allowlist, its subcommand filter and DENIED_ARG are
+ * the actual boundary, and none of them moved.
+ */
+/**
+ * `*` is IN, and the reason is the same one that added backslash and space.
+ *
+ * `Get-PnpDevice -FriendlyName *Camera*` is the standard way to ask Windows
+ * about a device, and the wildcard was the only character stopping it. T-7621
+ * failed on it four times and asked a technician to approve the identical
+ * command each time. A glob cannot act on anything: the agent spawns argv
+ * directly with no shell, so there is nothing to expand it but the binary that
+ * was asked for.
+ *
+ * Quotes, `;`, `|`, `&`, `$`, `(` and `)` stay OUT. Those are the characters
+ * that could turn one command into two if a binary ever re-parses its own
+ * command line — which `powershell` does — and no read needs them.
+ */
+const ARGV_SAFE = /^[A-Za-z0-9._\-/:@=+,%*[\]\\ ]+$/;
+
 const argvToken = z
   .string()
   .min(1)
   .max(256)
-  .regex(/^[A-Za-z0-9._\-/:@=+,%[\]]+$/, "argument contains a character that is not argv-safe");
+  .superRefine((s, ctx) => {
+    if (ARGV_SAFE.test(s)) return;
+    // Name the character. "contains a character that is not argv-safe" sent the
+    // operator to re-spell a command that was spelled correctly; it cannot fix
+    // what it cannot see.
+    const bad = [...s].find((c) => !ARGV_SAFE.test(c));
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message:
+        `${JSON.stringify(bad ?? "")} is not allowed in an argument. ` +
+        `Letters, digits and . _ - / : @ = + , % * [ ] \\ and space are. ` +
+        `Drop the quotes — arguments are passed directly, never through a shell.`,
+    });
+  });
+
+/**
+ * A URL this machine may be asked to fetch.
+ *
+ * Bounded rather than open, because a step's params are composed by a model that
+ * has just read an untrusted ticket body, and an arbitrary outbound GET from
+ * inside the employee's machine is a channel out of it. The query string is the
+ * obvious carrier, so there is none; userinfo is refused because it carries
+ * credentials; the path is capped short. What is left is enough to ask "can you
+ * reach the company portal" and too small to carry a file out.
+ *
+ * The other half of the containment is in the agent: the probe returns the
+ * status and the resolved address and never a byte of the response body.
+ */
+const httpUrl = z
+  .string()
+  .trim()
+  .min(1)
+  .max(200)
+  .refine((s) => /^https?:\/\//i.test(s), "must be an http:// or https:// URL")
+  .refine((s) => !/[?#]/.test(s), "a reachability check may not carry a query string or fragment")
+  .refine((s) => !s.includes("@"), "credentials in a URL are not allowed")
+  .refine((s) => !/["'\\\r\n\0<>|^`{}]/.test(s), "URL contains a character that is not safe to record")
+  .refine((s) => {
+    try {
+      return new URL(s).pathname.length <= 128;
+    } catch {
+      return false;
+    }
+  }, "path is too long for a reachability check");
+
+/** A winget package id — `Publisher.Product`, sometimes with a version suffix. */
+const packageId = z
+  .string()
+  .trim()
+  .min(1)
+  .max(128)
+  .regex(/^[A-Za-z0-9._+-]+$/, "package id may only contain letters, digits, dot, underscore, plus, hyphen");
+
+/** A device's friendly name, as Device Manager shows it. */
+const deviceName = z
+  .string()
+  .trim()
+  .min(1)
+  .max(128)
+  .regex(/^[A-Za-z0-9 ._()-]+$/, "device name contains unsupported characters");
+
+/** The value name under the Run key — what Task Manager's Startup tab lists. */
+const startupItem = z
+  .string()
+  .trim()
+  .min(1)
+  .max(128)
+  .regex(/^[A-Za-z0-9 ._()-]+$/, "startup item name contains unsupported characters");
+
+/** Optional: empty means "whichever tunnel this machine has". */
+const vpnName = z
+  .string()
+  .trim()
+  .max(64)
+  .regex(/^[A-Za-z0-9 ._-]*$/, "VPN connection name contains unsupported characters")
+  .default("");
 
 const emptyParams = z.object({}).strict();
 
@@ -270,21 +376,34 @@ export const CAPABILITY_SPECS: CapabilitySpec[] = [
     id: "diag.command_output",
     kind: "device",
     label: "Read device state with a read-only command",
-    help: 'params {"binary", "args"} — any binary from the read-only allowlist',
+    help:
+      'params {"binary", "args"} — any binary from the read-only allowlist. Pass "args" as an ARRAY ' +
+      'when any argument contains a space: ["query", "HKCU\\\\Software\\\\Microsoft\\\\Windows\\\\CurrentVersion\\\\Internet Settings", "/v", "ProxyServer"]',
     risk: 0,
     os: BOTH,
     requiresElevation: false,
     params: z
       .object({
         binary: z.string().min(1).max(32).regex(/^[a-zA-Z0-9_.-]+$/, "binary name is not allowlist-shaped"),
-        args: z.union([z.string(), z.array(z.string())]).optional(),
+        // A token that is not argv-safe now FAILS the step instead of being
+        // dropped from it. Silently shipping a command with an argument missing
+        // is the worst of the three options: the machine's error is about the
+        // mangled command, so it sends the operator to correct something that
+        // was correct when it was written.
+        args: z
+          .union([
+            z.string().transform((s) => (s.trim() ? s.trim().split(/\s+/) : [])),
+            z.array(z.string()),
+          ])
+          .pipe(z.array(argvToken).max(12))
+          .optional(),
       })
       .strict(),
-    command: (p) => {
-      const raw = Array.isArray(p.args) ? p.args : String(p.args ?? "").split(/\s+/);
-      const args = raw.filter((t) => argvToken.safeParse(t).success).slice(0, 12);
-      return `command_output --binary "${p.binary}" --args "${args.join(" ")}"`;
-    },
+    // JSON, so an argument containing a space survives the trip. The previous
+    // wire format joined argv on spaces and the agent split it on spaces again,
+    // which meant no argument could ever contain one — the second half of why
+    // the registry read above was unfixable from the model's side.
+    command: (p) => `command_output --binary "${p.binary}" --argv ${JSON.stringify(p.args ?? [])}`,
     probe: null,
     rollback: null,
     reversible: "self",
@@ -371,6 +490,68 @@ export const CAPABILITY_SPECS: CapabilitySpec[] = [
     provenance: BUILT_IN,
   }),
   defineCapability({
+    id: "diag.http_check",
+    kind: "device",
+    label: "Check whether the machine can reach a website",
+    help:
+      'params {"url"} — does THIS machine resolve and reach a URL. Reports the address the name ' +
+      "resolved to, the HTTP status and the connection error as separate facts, so a resolver " +
+      "problem and an unreachable server are told apart. Never returns page contents. No query strings",
+    risk: 0,
+    os: BOTH,
+    requiresElevation: false,
+    params: z.object({ url: httpUrl }).strict(),
+    command: (p) => `http_check --url "${p.url}"`,
+    probe: "probeHttp",
+    rollback: null,
+    reversible: "self",
+    blastRadius: "device",
+    provenance: BUILT_IN,
+  }),
+  defineCapability({
+    id: "diag.vpn_state",
+    kind: "device",
+    label: "Read the VPN tunnel state",
+    help:
+      'params {"name"?} — is the tunnel up, what address it holds, and which resolvers name ' +
+      "lookups on it are using. Reports those as separate facts so a dead tunnel and a live tunnel " +
+      'with the wrong DNS are told apart; "connected" on its own cannot',
+    risk: 0,
+    os: BOTH,
+    requiresElevation: false,
+    params: z.object({ name: vpnName }).strict(),
+    command: (p) => `vpn_state --name "${p.name}"`,
+    probe: "probeVpn",
+    rollback: null,
+    reversible: "self",
+    blastRadius: "device",
+    provenance: BUILT_IN,
+  }),
+  defineCapability({
+    id: "diag.device_status",
+    kind: "device",
+    label: "Check whether a hardware device is enabled",
+    help:
+      'params {"device"} — Windows only. Is this device present, enabled, or switched off in ' +
+      'Device Manager. Matched on its friendly name, e.g. {"device": "Camera"}. Reports status, ' +
+      "the Device Manager problem code, and the instance id",
+    // The read half of fix.enable_device, and it exists so the planner never has
+    // to compose `Get-PnpDevice -FriendlyName *Camera*` through
+    // diag.command_output. T-7621 tried exactly that, the wildcard was refused
+    // by the argv filter, and no rewording could have worked. The registry is
+    // where "the system can read a device's status" belongs.
+    risk: 0,
+    os: ["win32"],
+    requiresElevation: false,
+    params: z.object({ device: deviceName }).strict(),
+    command: (p) => `device_status --device "${p.device}"`,
+    probe: "probePnpDevice",
+    rollback: null,
+    reversible: "self",
+    blastRadius: "device",
+    provenance: BUILT_IN,
+  }),
+  defineCapability({
     id: "diag.screenshot",
     kind: "device",
     label: "Ask the employee for a screenshot of their screen",
@@ -421,7 +602,12 @@ export const CAPABILITY_SPECS: CapabilitySpec[] = [
     params: z.object({ app: appName }).strict(),
     command: (p) => `restart_app --app "${p.app}"`,
     probe: "probeProcess",
-    rollback: "relaunch the app if it was left closed",
+    // No undo, and the honest reason: a restart that did not take left the app
+    // exactly where it was, so there is nothing to put back. "Relaunch it if it
+    // was left closed" — what this field used to say — describes recovery from a
+    // half-finished action, not a state undo, and naming it here made the agent
+    // look like it had a rollback it has never had.
+    rollback: null,
     reversible: "self",
     blastRadius: "user-session",
     provenance: BUILT_IN,
@@ -438,7 +624,10 @@ export const CAPABILITY_SPECS: CapabilitySpec[] = [
     params: emptyParams,
     command: () => "toggle_wifi",
     probe: "probeNetwork",
-    rollback: "re-enable the adapter if it was left down",
+    // Same as fix.restart_app: the adapter is cycled down and back up in one
+    // action, so a run that changed nothing never brought it down and has
+    // nothing to restore. `reversible: "self"` is the whole truth here.
+    rollback: null,
     reversible: "self",
     blastRadius: "device",
     provenance: BUILT_IN,
@@ -571,6 +760,47 @@ export const CAPABILITY_SPECS: CapabilitySpec[] = [
     provenance: BUILT_IN,
   }),
 
+  defineCapability({
+    id: "fix.restart_shell",
+    kind: "device",
+    label: "Restart the desktop shell",
+    help:
+      "no params — restarts Explorer on Windows (the Dock on macOS). For a missing taskbar, Start " +
+      "menu or desktop icons when the setting behind them is already correct. Open windows survive",
+    risk: 1,
+    os: BOTH,
+    requiresElevation: false,
+    params: emptyParams,
+    command: () => "restart_shell",
+    probe: "probeProcess",
+    // Same reasoning as fix.restart_app: the shell is stopped and started in one
+    // action, so a run that changed nothing never stopped it and has nothing to
+    // put back. The handler fails the step outright if the shell does not return.
+    rollback: null,
+    reversible: "self",
+    blastRadius: "user-session",
+    provenance: BUILT_IN,
+  }),
+  defineCapability({
+    id: "fix.reconnect_vpn",
+    kind: "device",
+    label: "Reconnect the VPN",
+    help:
+      'params {"name"?} — drops and re-establishes the tunnel. Briefly interrupts anything running ' +
+      "over it. Fixes a tunnel that is down; does nothing for a tunnel that is up but misrouted",
+    risk: 1,
+    os: BOTH,
+    requiresElevation: true,
+    params: z.object({ name: vpnName }).strict(),
+    command: (p) => `reconnect_vpn --name "${p.name}"`,
+    probe: "probeVpn",
+    // Down-then-up in one action. Nothing to restore if it never came down.
+    rollback: null,
+    reversible: "self",
+    blastRadius: "device",
+    provenance: BUILT_IN,
+  }),
+
   // ---------------------------------------------------------------- risk 2
   defineCapability({
     id: "fix.set_proxy",
@@ -679,6 +909,87 @@ export const CAPABILITY_SPECS: CapabilitySpec[] = [
     provenance: BUILT_IN,
   }),
 
+  defineCapability({
+    id: "fix.kill_process",
+    kind: "device",
+    label: "Force-quit an application",
+    help:
+      'params {"app"} — ends a hung or runaway process. Anything unsaved in that app is LOST and ' +
+      "there is no undo, which is why this is risk 2 and not a restart. System processes are refused",
+    // Risk 2 rather than 1 for one reason: a restart hands the app a chance to
+    // save and this does not. The cost of being wrong is the employee's
+    // unwritten work, so it sits above "temporary state" on the ladder.
+    risk: 2,
+    os: BOTH,
+    requiresElevation: false,
+    params: z.object({ app: appName }).strict(),
+    command: (p) => `kill_process --app "${p.app}"`,
+    probe: "probeProcess",
+    rollback: null,
+    reversible: "none",
+    blastRadius: "user-session",
+    provenance: BUILT_IN,
+  }),
+  defineCapability({
+    id: "fix.set_taskbar_autohide",
+    kind: "device",
+    label: "Turn taskbar auto-hide on or off",
+    help:
+      'params {"autoHide"} — the usual cause of "my taskbar disappeared" when the shell is still ' +
+      "running. Restarts the shell so the setting takes effect. Reversible: the prior setting is " +
+      "captured before the change",
+    // Risk 2, not 1: it is written to the registry and survives a reboot, which
+    // is the line between "temporary state" and "configuration".
+    risk: 2,
+    os: BOTH,
+    requiresElevation: false,
+    params: z.object({ autoHide: z.boolean() }).strict(),
+    command: (p) => `set_taskbar_autohide --autohide ${p.autoHide}`,
+    probe: "probeTaskbar",
+    rollback: "re-apply the auto-hide setting captured by the before-probe",
+    reversible: "recorded",
+    blastRadius: "user-session",
+    provenance: BUILT_IN,
+  }),
+  defineCapability({
+    id: "fix.set_startup_item",
+    kind: "device",
+    label: "Enable or disable a startup item",
+    help:
+      'params {"item", "enabled"} — Windows only. Flips whether a Run-key entry launches at logon, ' +
+      "the same switch as Task Manager's Startup tab. The entry itself is never deleted. " +
+      "Reversible: the prior state is captured before the change",
+    risk: 2,
+    os: ["win32"],
+    requiresElevation: false,
+    params: z.object({ item: startupItem, enabled: z.boolean() }).strict(),
+    command: (p) => `set_startup_item --item "${p.item}" --enabled ${p.enabled}`,
+    probe: "probeStartupItems",
+    rollback: "re-apply the startup approval byte captured by the before-probe",
+    reversible: "recorded",
+    blastRadius: "user-session",
+    provenance: BUILT_IN,
+  }),
+  defineCapability({
+    id: "fix.enable_device",
+    kind: "device",
+    label: "Enable a disabled hardware device",
+    help:
+      'params {"device"} — Windows only. Enables hardware switched off in Device Manager (camera, ' +
+      "microphone, adapter), matched on its friendly name. Reversible: disabled again if the change " +
+      "does not verify",
+    risk: 2,
+    os: ["win32"],
+    requiresElevation: true,
+    params: z.object({ device: deviceName }).strict(),
+    command: (p) => `enable_device --device "${p.device}"`,
+    probe: "probePnpDevice",
+    rollback: "disable the device again using the instance id captured by the before-probe",
+    reversible: "recorded",
+    blastRadius: "device",
+    provenance: BUILT_IN,
+  }),
+
   // ---------------------------------------------------------------- risk 3
   defineCapability({
     id: "ad.reset_password",
@@ -694,6 +1005,28 @@ export const CAPABILITY_SPECS: CapabilitySpec[] = [
     rollback: null,
     reversible: "none",
     blastRadius: "directory",
+    provenance: BUILT_IN,
+  }),
+  defineCapability({
+    id: "fix.install_package",
+    kind: "device",
+    label: "Install an application or runtime",
+    help:
+      'params {"package"} — Windows only, a winget package id such as ' +
+      '"Microsoft.VCRedist.2015+.x64". Installs software on the machine, so it is always ' +
+      "human-approved. Reversible: uninstalled again if the install does not verify",
+    risk: 3,
+    os: ["win32"],
+    requiresElevation: true,
+    params: z.object({ package: packageId }).strict(),
+    command: (p) => `install_package --package "${p.package}"`,
+    probe: "probePackage",
+    // The undo only fires when the before-probe found the package ABSENT.
+    // Uninstalling something the employee already had would be a second fault
+    // dressed as a recovery.
+    rollback: "winget uninstall the package, but only when the before-probe found it absent",
+    reversible: "recorded",
+    blastRadius: "device",
     provenance: BUILT_IN,
   }),
   defineCapability({

@@ -1,7 +1,9 @@
 #!/usr/bin/env node
 import os from "node:os";
 import fs from "node:fs";
+import http from "node:http";
 import path from "node:path";
+import dnsp from "node:dns/promises";
 import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { redactDeep, redactSecrets } from "./redact.mjs";
@@ -75,6 +77,34 @@ function humanLabel(command) {
     const m = c.match(/--binary "([^"]+)"/);
     return `Reading device state via ${m?.[1] || "a read-only command"}`;
   }
+  if (c.startsWith("restart_shell")) return "Restarting the desktop shell";
+  if (c.startsWith("set_taskbar_autohide")) {
+    const m = c.match(/--autohide (true|false)/);
+    return `Turning taskbar auto-hide ${m?.[1] === "true" ? "on" : "off"}`;
+  }
+  if (c.startsWith("kill_process ")) {
+    const m = c.match(/--app "([^"]+)"/);
+    return `Ending ${m?.[1] || "a process"}`;
+  }
+  if (c.startsWith("set_startup_item ")) {
+    const m = c.match(/--item "([^"]+)"/);
+    const on = c.match(/--enabled (true|false)/)?.[1] === "true";
+    return `${on ? "Enabling" : "Disabling"} ${m?.[1] || "a startup item"} at startup`;
+  }
+  if (c.startsWith("install_package ")) {
+    const m = c.match(/--package "([^"]+)"/);
+    return `Installing ${m?.[1] || "a package"}`;
+  }
+  if (c.startsWith("enable_device ")) {
+    const m = c.match(/--device "([^"]+)"/);
+    return `Enabling ${m?.[1] || "a device"}`;
+  }
+  if (c.startsWith("device_status ")) {
+    const m = c.match(/--device "([^"]+)"/);
+    return `Checking whether ${m?.[1] || "a device"} is enabled`;
+  }
+  if (c.startsWith("vpn_state")) return "Reading the VPN tunnel state";
+  if (c.startsWith("reconnect_vpn")) return "Reconnecting the VPN";
   if (c.startsWith("exec_cmd")) return "Executing command on VM";
   return "Running sandboxed diagnostic";
 }
@@ -341,6 +371,100 @@ async function winDnsService(ctx, requested) {
   return res.stdout.trim() || "Ethernet";
 }
 
+/** How long a reachability check waits for the host to answer. */
+const HTTP_CHECK_TIMEOUT_MS = 8000;
+
+/**
+ * Can this machine actually reach a URL?
+ *
+ * Two facts, kept apart on purpose, because they have different owners:
+ * whether the NAME resolved, and whether the HOST answered. "portal.acme.internal
+ * did not resolve" is a resolver problem; "it resolved to 192.168.217.1 and the
+ * connection was refused" is a server or firewall problem. A single
+ * "unreachable" merges them and sends a technician to the wrong one — which is
+ * the whole reason `ping` alone was never enough to close an "internet is down"
+ * ticket.
+ *
+ * Done with the agent's own resolver and fetch rather than a shell binary,
+ * deliberately: `curl` is on neither platform's read-only allowlist, and putting
+ * a general-purpose HTTP client on it would leave a fetch-anything tool one
+ * allowlist entry from a fetch-anything-and-print-it tool.
+ *
+ * NOTHING FROM THE RESPONSE BODY IS RETURNED — only the status, the address the
+ * name resolved to, and the error. Page text reaching a planner prompt is
+ * exactly what research.ts exists to quarantine, and this read has no distiller,
+ * so it does not carry body text at all.
+ */
+async function probeHttp(ctx, label, args) {
+  const raw = String(args?.url || "").trim();
+  const facts = {
+    url: raw,
+    dnsResolved: false,
+    address: "none",
+    status: "none",
+    reachable: false,
+    error: "",
+  };
+
+  let parsed;
+  try {
+    parsed = new URL(raw);
+  } catch {
+    facts.error = "not a URL";
+    return { label: `http (${label})`, command: `node:fetch GET ${raw}`, exitCode: -1, facts };
+  }
+
+  const startedAt = Date.now();
+  try {
+    const { address } = await dnsp.lookup(parsed.hostname);
+    facts.dnsResolved = true;
+    facts.address = address;
+  } catch (err) {
+    facts.error = `DNS lookup failed: ${err.code || err.message}`;
+  }
+
+  if (facts.dnsResolved) {
+    try {
+      const res = await fetch(parsed.toString(), {
+        method: "GET",
+        // A redirect is a fact about the host, not something to chase — following
+        // one would fetch a URL nobody authorised.
+        redirect: "manual",
+        signal: AbortSignal.timeout(HTTP_CHECK_TIMEOUT_MS),
+      });
+      facts.status = String(res.status);
+      // Any HTTP answer means the host is reachable. A 404 is a working server
+      // with a missing page, and calling that "unreachable" would be a lie.
+      facts.reachable = true;
+      // Drain and discard: an unconsumed body holds the socket open until the
+      // timeout, and the contents are deliberately never reported.
+      await res.arrayBuffer().catch(() => undefined);
+    } catch (err) {
+      facts.error =
+        err.name === "TimeoutError"
+          ? `no response within ${HTTP_CHECK_TIMEOUT_MS}ms`
+          : err.cause?.code || err.message;
+    }
+  }
+
+  // Recorded like any spawned command so the audit page shows what was attempted
+  // even though no binary ran.
+  ctx.commands.push({
+    argv: ["node:fetch", "GET", parsed.toString()],
+    exitCode: facts.reachable ? 0 : 1,
+    stdout: `dns=${facts.dnsResolved ? facts.address : "unresolved"} status=${facts.status}`,
+    stderr: facts.error,
+    durationMs: Date.now() - startedAt,
+  });
+
+  return {
+    label: `http (${label})`,
+    command: `node:fetch GET ${parsed.toString()}`,
+    exitCode: facts.reachable ? 0 : 1,
+    facts,
+  };
+}
+
 // ---- actions ---------------------------------------------------------------
 // Each action returns { ok, error?, note? }. It never decides whether it
 // "worked" — that verdict comes from the probes taken around it.
@@ -483,6 +607,28 @@ async function actSetDnsServers(ctx, { service, servers }) {
   const res = await runRecorded(ctx, "networksetup", args);
   if (res.code !== 0) return { ok: false, error: res.stderr.trim() || `exit ${res.code}` };
   return { ok: true, note: `set ${svc} DNS to ${list.length ? list.join(", ") : "DHCP-assigned"}` };
+}
+
+/**
+ * Put the resolver list back the way the before-probe found it.
+ *
+ * The registry has advertised `reversible: "recorded"` for set_dns_servers since
+ * it was written, and `revertFor` has printed the exact undo command onto the
+ * ticket — but the handler had no `rollback`, and the transaction in
+ * `executeJob` is gated on `handler.rollback`. So a DNS change that did not take
+ * was left wherever it landed while the ladder went on ordering it as the
+ * cheapest thing to be wrong about.
+ */
+async function rollbackSetDns(ctx, args, before) {
+  const prior = before?.facts;
+  if (!prior || typeof prior.resolvers !== "string") {
+    return { ok: false, error: "no prior resolver list was captured" };
+  }
+  // "dhcp" means there was no override at all, and the way to restore THAT is
+  // the literal "empty" — not an address list, which would install a new
+  // override in the name of undoing one.
+  const servers = prior.mode === "dhcp" || !prior.resolvers ? "empty" : prior.resolvers;
+  return actSetDnsServers(ctx, { service: prior.service ?? args.service, servers });
 }
 
 // Flush the resolver cache. Deliberately expectsChange:false — a cache flush
@@ -653,7 +799,12 @@ const READ_ONLY_BINARIES = IS_WINDOWS
       gpresult: { subcommands: ["/r", "/z"] },
       driverquery: {},
       sc: { subcommands: ["query", "qc", "queryex"] },
-      reg: { subcommands: ["query"] },
+      // `minArgs` because `reg query` on its own is not a read, it is a usage
+      // error — and the machine answers "ERROR: Invalid syntax", which reads to
+      // the operator as a command it spelled wrong. T-5009 re-sent the identical
+      // argv four times chasing that, twice after a strategist round. The
+      // refusal below names the missing part instead, so the retry can differ.
+      reg: { subcommands: ["query"], minArgs: 2 },
       // Session/user listing. qwinsta lists sessions; quser lists the logged-on
       // users on them (name, state, idle time). Both are read-only — they print
       // and change nothing — and "who else is sharing this machine's CPU" is a
@@ -667,6 +818,11 @@ const READ_ONLY_BINARIES = IS_WINDOWS
       route: { subcommands: ["print"] },
       arp: { subcommands: ["-a"] },
       fsutil: { subcommands: ["fsinfo", "volume"] },
+      // Query verbs only. `winget install`/`uninstall`/`upgrade` are writes and
+      // are absent from this list, so they are refused here by the same
+      // subcommand check as everything else — installing goes through the
+      // `install_package` handler, which is risk 3 and gated.
+      winget: { subcommands: ["list", "show", "search"] },
       // Restricted. Unqualified `wmic` is not read-only: `wmic process call
       // create` starts a process, and `wmic product call install` installs
       // software. It was sitting in the READ-ONLY allowlist with no subcommand
@@ -757,7 +913,18 @@ const READ_ONLY_BINARIES = IS_WINDOWS
 // Spaces are excluded deliberately: it keeps every argument a single token, so
 // the audit string in the job record is exactly the argv that ran. Paths
 // containing spaces are the known cost of that, and worth it.
-const SAFE_ARG = /^[A-Za-z0-9._\-/:@=+,%[\]]+$/;
+// Backslash and space are allowed: a Windows registry key has both, and every
+// command here is spawned as argv with no shell, so neither character can act
+// on anything. Quotes, newlines, nulls and shell metacharacters stay out — they
+// buy nothing here and would make the audit line ambiguous. This must stay in
+// step with `argvToken` in src/lib/capabilities/registry.ts: a token the server
+// will build and this rejects is a step that can never run.
+// `*` added in step with `argvToken` in registry.ts: a wildcard is how you ask
+// Windows about a device by name (`Get-PnpDevice -FriendlyName *Camera*`) and it
+// was the only character stopping that read. argv is spawned directly, never
+// through a shell, so there is nothing here to expand a glob but the binary
+// itself. Quotes, ; | & $ ( ) stay out.
+const SAFE_ARG = /^[A-Za-z0-9._\-/:@=+,%*[\]\\ ]+$/;
 
 // Enforced no matter which root a path sits under. Reading a credential store
 // is never diagnostics.
@@ -827,6 +994,12 @@ function validateReadOnlyCommand(binary, argv, granted = []) {
   }
   if (spec.subcommands && !spec.subcommands.includes(argv[0])) {
     return `"${binary}" allows only: ${spec.subcommands.join(", ")}`;
+  }
+  // A command that is missing an operand is not a spelling mistake, and the
+  // binary's own "Invalid syntax" cannot say which. Naming the gap here is what
+  // lets the next attempt be a DIFFERENT command rather than the same one.
+  if (spec.minArgs && argv.length < spec.minArgs) {
+    return `"${binary} ${argv.join(" ")}" is incomplete — ${binary} needs at least ${spec.minArgs} arguments (e.g. the key or path to read)`;
   }
   // Checked across every token rather than just the first. Some binaries take a
   // harmless-looking first argument and the mutating verb later — `dscl . -create`
@@ -1513,6 +1686,536 @@ async function actResetWinsock(ctx) {
   };
 }
 
+// ---- desktop shell -----------------------------------------------------------
+// "My taskbar is gone" has two distinct causes and they need different fixes:
+// the shell process died, or auto-hide got switched on. Restarting the shell
+// does nothing for the second, and flipping auto-hide does nothing for the
+// first, so they are two capabilities rather than one that guesses.
+
+const SHELL_PROCESS = IS_WINDOWS ? "explorer" : "Dock";
+
+async function actRestartShell(ctx) {
+  if (IS_WINDOWS) {
+    await runRecordedPs(ctx, "Stop-Process -Name explorer -Force -ErrorAction SilentlyContinue");
+    await sleep(2500);
+    // Windows usually relaunches the shell on its own. When it does not, start
+    // it — but the check below is what decides whether this worked, because a
+    // pid that changed while the taskbar stayed missing would otherwise diff as
+    // a successful fix.
+    const res = await runRecordedPs(
+      ctx,
+      "if (-not (Get-Process -Name explorer -ErrorAction SilentlyContinue)) { Start-Process explorer.exe }; " +
+        "Start-Sleep -Seconds 3; @(Get-Process -Name explorer -ErrorAction SilentlyContinue).Count",
+    );
+    if (Number((res.stdout || "").trim()) < 1) {
+      return { ok: false, error: "the shell did not come back — the desktop is still without a taskbar" };
+    }
+    return { ok: true, output: "desktop shell restarted" };
+  }
+  await runRecorded(ctx, "killall", ["Dock"]);
+  await sleep(2500);
+  const res = await runRecorded(ctx, "pgrep", ["-ix", "Dock"]);
+  if (!(res.stdout || "").trim()) return { ok: false, error: "the Dock did not come back" };
+  return { ok: true, output: "Dock restarted" };
+}
+
+const TASKBAR_KEY = "HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\StuckRects3";
+
+/**
+ * Auto-hide is one BIT, not a value of its own.
+ *
+ * It lives in bit 0 of byte 8 of the `Settings` REG_BINARY blob under
+ * StuckRects3. The rest of that blob carries the taskbar's edge, size and
+ * monitor, and those move on their own — so the probe reads the single bit
+ * rather than the blob. A fact that drifts by itself is not evidence.
+ */
+async function probeTaskbar(ctx, label) {
+  const facts = { autoHide: "unknown", shell: "unknown" };
+  if (IS_WINDOWS) {
+    const res = await runRecordedPs(
+      ctx,
+      `$v = (Get-ItemProperty -Path '${TASKBAR_KEY}' -ErrorAction SilentlyContinue).Settings; ` +
+        `$hide = if ($v) { [bool]($v[8] -band 0x01) } else { 'unknown' }; ` +
+        `$n = @(Get-Process -Name explorer -ErrorAction SilentlyContinue).Count; ` +
+        `"$hide|$n"`,
+    );
+    const [hide, shell] = (res.stdout || "").trim().split("|");
+    facts.autoHide = hide === "True" ? "on" : hide === "False" ? "off" : "unknown";
+    facts.shell = Number(shell) > 0 ? "running" : "not running";
+    return {
+      label: `taskbar (${label})`,
+      command: `(Get-ItemProperty '${TASKBAR_KEY}').Settings[8] -band 0x01`,
+      exitCode: res.code,
+      facts,
+    };
+  }
+  const res = await runRecorded(ctx, "defaults", ["read", "com.apple.dock", "autohide"]);
+  const shell = await runRecorded(ctx, "pgrep", ["-ix", "Dock"]);
+  facts.autoHide = (res.stdout || "").trim() === "1" ? "on" : "off";
+  facts.shell = (shell.stdout || "").trim() ? "running" : "not running";
+  return {
+    label: `dock (${label})`,
+    command: "defaults read com.apple.dock autohide",
+    exitCode: res.code,
+    facts,
+  };
+}
+
+async function actSetTaskbarAutohide(ctx, args) {
+  const on = String(args.autoHide) === "true";
+  if (IS_WINDOWS) {
+    const bit = on ? "$v[8] -bor 0x01" : "$v[8] -band 0xFE";
+    const res = await runRecordedPs(
+      ctx,
+      `$v = (Get-ItemProperty -Path '${TASKBAR_KEY}' -ErrorAction Stop).Settings; ` +
+        `$v[8] = ${bit}; ` +
+        `Set-ItemProperty -Path '${TASKBAR_KEY}' -Name Settings -Value $v -ErrorAction Stop`,
+    );
+    if (res.code !== 0) return { ok: false, error: res.stderr.trim() || "could not write the taskbar setting" };
+    // The blob is read by the shell at startup, so the setting is inert until
+    // the shell reloads it.
+    await runRecordedPs(ctx, "Stop-Process -Name explorer -Force -ErrorAction SilentlyContinue");
+    await sleep(3000);
+    await runRecordedPs(
+      ctx,
+      "if (-not (Get-Process -Name explorer -ErrorAction SilentlyContinue)) { Start-Process explorer.exe }",
+    );
+    await sleep(2000);
+  } else {
+    const res = await runRecorded(ctx, "defaults", ["write", "com.apple.dock", "autohide", "-bool", on ? "true" : "false"]);
+    if (res.code !== 0) return { ok: false, error: res.stderr.trim() || "defaults write failed" };
+    await runRecorded(ctx, "killall", ["Dock"]);
+    await sleep(2500);
+  }
+  return { ok: true, output: `taskbar auto-hide turned ${on ? "on" : "off"}` };
+}
+
+/** Put the bit back exactly as the before-probe found it. */
+async function rollbackTaskbarAutohide(ctx, _args, before) {
+  const prior = before?.facts?.autoHide;
+  if (prior !== "on" && prior !== "off") {
+    return { ok: false, error: "no prior taskbar state was captured" };
+  }
+  return actSetTaskbarAutohide(ctx, { autoHide: prior === "on" ? "true" : "false" });
+}
+
+// ---- processes ---------------------------------------------------------------
+
+/**
+ * Killing one of these does not end a hung app, it ends the session or the
+ * machine. The registry cannot express "any app except six", so the refusal
+ * lives here, next to the call that would do the damage.
+ */
+const NEVER_KILL = new Set(
+  IS_WINDOWS
+    ? ["explorer", "winlogon", "csrss", "lsass", "services", "smss", "wininit", "system"]
+    : ["windowserver", "loginwindow", "launchd", "kernel_task"],
+);
+
+async function actKillProcess(ctx, { app }) {
+  const candidates = appNameCandidates(app);
+  const blocked = candidates.find((c) => NEVER_KILL.has(String(c).toLowerCase()));
+  if (blocked) {
+    return {
+      ok: false,
+      error: `"${blocked}" is a system process — ending it would take down the session, not the app`,
+    };
+  }
+  if (IS_WINDOWS) {
+    const nameList = candidates.map((c) => `'${c}'`).join(",");
+    const res = await runRecordedPs(
+      ctx,
+      `Stop-Process -Name ${nameList} -Force -ErrorAction SilentlyContinue; ` +
+        `Start-Sleep -Seconds 2; @(Get-Process -Name ${nameList} -ErrorAction SilentlyContinue).Count`,
+    );
+    if (Number((res.stdout || "").trim()) > 0) {
+      return { ok: false, error: `${app} is still running after the stop request` };
+    }
+  } else {
+    await runRecorded(ctx, "pkill", ["-ix", candidates[0]]);
+    await sleep(2000);
+    const still = await runRecorded(ctx, "pgrep", ["-ix", candidates[0]]);
+    if ((still.stdout || "").trim()) return { ok: false, error: `${app} is still running after the kill` };
+  }
+  return {
+    ok: true,
+    output: `${app} was ended`,
+    note: "anything unsaved in that app is gone — this has no undo",
+  };
+}
+
+// ---- startup items -----------------------------------------------------------
+// The Run key says what COULD start; StartupApproved says what actually does.
+// Deleting the Run entry would be the destructive way to stop an item, so the
+// approved byte is what moves here — the same thing Task Manager's Startup tab
+// writes, and reversible by putting the byte back.
+
+const RUN_KEY = "HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\Run";
+const APPROVED_KEY = "HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\StartupApproved\\Run";
+
+async function probeStartupItems(ctx, label, args) {
+  const item = String(args?.item || "").replace(/[^A-Za-z0-9 ._()-]/g, "");
+  const facts = { items: "unknown", enabled: "unknown", enabledItems: "", item, itemState: "unknown" };
+  if (!IS_WINDOWS) {
+    return { label: `startup (${label})`, command: "startup items", exitCode: 0, facts };
+  }
+  const res = await runRecordedPs(
+    ctx,
+    `$names = @((Get-Item -Path '${RUN_KEY}' -ErrorAction SilentlyContinue).Property); ` +
+      `$ap = Get-ItemProperty -Path '${APPROVED_KEY}' -ErrorAction SilentlyContinue; ` +
+      `$on = @(); foreach ($n in $names) { $b = $ap.$n; if (-not $b -or -not ($b[0] -band 0x01)) { $on += $n } }; ` +
+      `$mine = if ('${psEscape(item)}') { $b2 = $ap.'${psEscape(item)}'; ` +
+      `if (-not $b2) { 'enabled' } elseif ($b2[0] -band 0x01) { 'disabled' } else { 'enabled' } } else { 'n/a' }; ` +
+      `"$($names.Count)|$($on.Count)|$(($on | Sort-Object) -join ',')|$mine"`,
+  );
+  const [count, enabled, list, mine] = (res.stdout || "").trim().split("|");
+  facts.items = count ?? "unknown";
+  facts.enabled = enabled ?? "unknown";
+  facts.enabledItems = list ?? "";
+  facts.itemState = mine || "unknown";
+  return {
+    label: `startup (${label})`,
+    command: `(Get-Item '${RUN_KEY}').Property + StartupApproved\\Run`,
+    exitCode: res.code,
+    facts,
+  };
+}
+
+async function actSetStartupItem(ctx, args) {
+  if (!IS_WINDOWS) return { ok: false, error: "startup items are Windows only" };
+  const item = String(args.item || "").replace(/[^A-Za-z0-9 ._()-]/g, "");
+  if (!item) return { ok: false, error: "item name is required" };
+  const enable = String(args.enabled) === "true";
+  // 12 bytes, and only the first one carries the state: 0x02 enabled,
+  // 0x03 disabled. The remaining 11 are a disable timestamp Windows fills in
+  // itself; zeroing them is what Task Manager does too.
+  const first = enable ? "0x02" : "0x03";
+  const res = await runRecordedPs(
+    ctx,
+    `New-Item -Path '${APPROVED_KEY}' -Force | Out-Null; ` +
+      `[byte[]]$b = @(${first},0,0,0,0,0,0,0,0,0,0,0); ` +
+      `Set-ItemProperty -Path '${APPROVED_KEY}' -Name '${psEscape(item)}' -Value $b -Type Binary -ErrorAction Stop`,
+  );
+  if (res.code !== 0) return { ok: false, error: res.stderr.trim() || "could not write the startup approval" };
+  return { ok: true, output: `${item} set to ${enable ? "enabled" : "disabled"} at startup` };
+}
+
+async function rollbackStartupItem(ctx, args, before) {
+  const prior = before?.facts?.itemState;
+  if (prior !== "enabled" && prior !== "disabled") {
+    return { ok: false, error: "no prior startup state was captured for that item" };
+  }
+  return actSetStartupItem(ctx, { item: args.item, enabled: prior === "enabled" ? "true" : "false" });
+}
+
+// ---- packages ----------------------------------------------------------------
+
+async function probePackage(ctx, label, args) {
+  const id = String(args?.package || "").replace(/[^A-Za-z0-9._+-]/g, "");
+  const facts = { package: id, installed: "false", version: "none" };
+  if (!IS_WINDOWS) {
+    return { label: `package:${id} (${label})`, command: "winget list", exitCode: 0, facts };
+  }
+  const res = await runRecorded(ctx, "winget", [
+    "list", "--id", id, "--exact", "--accept-source-agreements", "--disable-interactivity",
+  ]);
+  const out = res.stdout || "";
+  const found = !/No installed package/i.test(out) && new RegExp(id.replace(/[.+]/g, "\\$&"), "i").test(out);
+  facts.installed = found ? "true" : "false";
+  if (found) {
+    const line = out.split(/\r?\n/).find((l) => new RegExp(id.replace(/[.+]/g, "\\$&"), "i").test(l)) || "";
+    facts.version = (line.match(/\b\d+(?:\.\d+){1,3}\b/) || [])[0] || "unknown";
+  }
+  return {
+    label: `package:${id} (${label})`,
+    command: `winget list --id ${id} --exact`,
+    exitCode: res.code,
+    facts,
+  };
+}
+
+async function actInstallPackage(ctx, args) {
+  if (!IS_WINDOWS) return { ok: false, error: "install_package is Windows only (winget)" };
+  const id = String(args.package || "").replace(/[^A-Za-z0-9._+-]/g, "");
+  if (!id) return { ok: false, error: "package id is required" };
+  const res = await runRecorded(ctx, "winget", [
+    "install", "--id", id, "--exact", "--silent",
+    "--accept-package-agreements", "--accept-source-agreements", "--disable-interactivity",
+  ]);
+  if (res.code !== 0) {
+    return { ok: false, error: (res.stderr || res.stdout || "").trim().slice(0, 400) || `winget exited ${res.code}` };
+  }
+  return { ok: true, output: `installed ${id}` };
+}
+
+/** The undo is the uninstall, and it only runs when the install did not verify. */
+async function rollbackPackage(ctx, args, before) {
+  if (before?.facts?.installed === "true") {
+    return { ok: false, error: "the package was already installed before this job — not uninstalling it" };
+  }
+  const id = String(args.package || "").replace(/[^A-Za-z0-9._+-]/g, "");
+  const res = await runRecorded(ctx, "winget", [
+    "uninstall", "--id", id, "--exact", "--silent", "--accept-source-agreements", "--disable-interactivity",
+  ]);
+  return res.code === 0 ? { ok: true } : { ok: false, error: `winget uninstall exited ${res.code}` };
+}
+
+// ---- devices -----------------------------------------------------------------
+
+/**
+ * Find the device a ticket is talking about.
+ *
+ * Two rules, both learned from one machine:
+ *
+ *  - Match the CLASS as well as the friendly name. The webcam on this VM is
+ *    called "VMware Virtual USB Video Device" — the word "camera" appears
+ *    nowhere in it, and a name-only match found "Remote Desktop Camera Bus"
+ *    instead, which is a bus, not a camera.
+ *  - When several match, prefer the one that is NOT OK. A ticket is about
+ *    something broken, so the broken match is the one being asked about. Taking
+ *    the first match reported "your camera is fine" while the disabled device
+ *    sat two rows further down.
+ */
+function pnpLookupPs(name) {
+  const q = psEscape(name);
+  return (
+    `$all = @(Get-PnpDevice -ErrorAction SilentlyContinue | ` +
+    `Where-Object { $_.FriendlyName -like '*${q}*' -or $_.Class -like '*${q}*' }); ` +
+    `$d = $all | Where-Object { $_.Status -ne 'OK' } | Select-Object -First 1; ` +
+    `if (-not $d) { $d = $all | Select-Object -First 1 }; `
+  );
+}
+
+async function probePnpDevice(ctx, label, args) {
+  const name = String(args?.device || "").replace(/[^A-Za-z0-9 ._()-]/g, "");
+  const facts = { device: name, status: "unknown", problem: "none", instanceId: "none" };
+  if (!IS_WINDOWS) {
+    return { label: `device:${name} (${label})`, command: "Get-PnpDevice", exitCode: 0, facts };
+  }
+  const res = await runRecordedPs(
+    ctx,
+    pnpLookupPs(name) +
+      `if ($d) { "$($d.Status)|$($d.Problem)|$($d.InstanceId)|$($d.FriendlyName)" } else { 'absent|none|none|none' }`,
+  );
+  const [status, problem, instanceId, matched] = (res.stdout || "").trim().split("|");
+  facts.status = status || "unknown";
+  facts.problem = problem || "none";
+  facts.instanceId = instanceId || "none";
+  // WHICH device answered. The employee says "camera" and the machine calls it
+  // "VMware Virtual USB Video Device"; without this the ticket reports a status
+  // with no way to tell what it is the status OF.
+  facts.matched = matched || "none";
+  return {
+    label: `device:${name} (${label})`,
+    command: `Get-PnpDevice | where FriendlyName -like '*${name}*' -or Class -like '*${name}*'`,
+    exitCode: res.code,
+    facts,
+  };
+}
+
+async function actEnableDevice(ctx, args) {
+  if (!IS_WINDOWS) return { ok: false, error: "enable_device is Windows only" };
+  const name = String(args.device || "").replace(/[^A-Za-z0-9 ._()-]/g, "");
+  if (!name) return { ok: false, error: "device name is required" };
+  const res = await runRecordedPs(
+    ctx,
+    pnpLookupPs(name) +
+      `if (-not $d) { throw 'no device matched that name' }; ` +
+      `Enable-PnpDevice -InstanceId $d.InstanceId -Confirm:$false -ErrorAction Stop; ` +
+      `$d.FriendlyName`,
+  );
+  if (res.code !== 0) return { ok: false, error: res.stderr.trim() || "Enable-PnpDevice failed" };
+  await sleep(2000);
+  return { ok: true, output: `enabled ${(res.stdout || "").trim() || name}` };
+}
+
+async function rollbackEnableDevice(ctx, args, before) {
+  if (before?.facts?.status === "OK") {
+    return { ok: false, error: "the device was already enabled before this job — leaving it alone" };
+  }
+  const instanceId = before?.facts?.instanceId;
+  if (!instanceId || instanceId === "none") return { ok: false, error: "no device instance was captured" };
+  const res = await runRecordedPs(
+    ctx,
+    `Disable-PnpDevice -InstanceId '${psEscape(instanceId)}' -Confirm:$false -ErrorAction Stop`,
+  );
+  return res.code === 0 ? { ok: true } : { ok: false, error: "Disable-PnpDevice failed" };
+}
+
+// ---- VPN ---------------------------------------------------------------------
+// The ticket that matters here is "connected but nothing works", so the probe
+// reads the three facts that tell those cases apart: is the tunnel up, does it
+// have an address, and where are name lookups going. A `connected` boolean on
+// its own cannot distinguish a dead tunnel from a live one with the wrong DNS,
+// which is the whole diagnosis.
+
+/** Where WireGuard for Windows keeps a tunnel once it has been imported. */
+const WG_CONFIG_DIR = "C:\\Program Files\\WireGuard\\Data\\Configurations";
+
+async function probeVpn(ctx, label, args) {
+  const wanted = String(args?.name || "").replace(/[^A-Za-z0-9 ._-]/g, "");
+  const facts = {
+    vpn: wanted || "auto",
+    // Configured and connected are SEPARATE facts, and the split is the whole
+    // point. WireGuard removes the tunnel's service when it is deactivated, so a
+    // machine with a perfectly good tunnel that is merely switched off looks
+    // byte-for-byte identical to a machine with no VPN at all. T-6852 read that
+    // as "no VPN client is installed on this PC", told the employee so, and
+    // escalated a ticket whose fix was to start a tunnel that was sitting right
+    // there. A configured tunnel is evidence a VPN is expected on this machine.
+    // What VPN software is actually installed, read from the same uninstall
+    // registry the Apps list is built from. Without it the operator goes hunting
+    // through Program Files, Program Files (x86) and fs.find for an executable —
+    // three steps and two rounds on T-6852 — to answer a question one read
+    // settles. "Installed but not connected" is a one-step fix; "not installed"
+    // is a genuine handoff. The probe has to be able to tell them apart.
+    client: "none",
+    configured: "none",
+    connected: "false",
+    tunnel: "none",
+    tunnel_ip: "none",
+    tunnel_dns: "none",
+  };
+  if (IS_WINDOWS) {
+    const res = await runRecordedPs(
+      ctx,
+      `$n = '${psEscape(wanted)}'; ` +
+        `$c = if ($n) { Get-VpnConnection -Name $n -ErrorAction SilentlyContinue } ` +
+        `else { Get-VpnConnection -ErrorAction SilentlyContinue | Select-Object -First 1 }; ` +
+        // WireGuard installs one service per tunnel and has no Get-VpnConnection entry.
+        `$wg = Get-Service -Name 'WireGuardTunnel$*' -ErrorAction SilentlyContinue | Select-Object -First 1; ` +
+        `$name = if ($c) { $c.Name } elseif ($wg) { $wg.Name -replace '^WireGuardTunnel\\$','' } else { 'none' }; ` +
+        `$up = if ($c) { $c.ConnectionStatus -eq 'Connected' } elseif ($wg) { $wg.Status -eq 'Running' } else { $false }; ` +
+        `$a = Get-NetAdapter -ErrorAction SilentlyContinue | Where-Object { $_.InterfaceDescription -match 'WireGuard|WAN Miniport \\(IKEv2\\)|TAP|VPN' -and $_.Status -eq 'Up' } | Select-Object -First 1; ` +
+        `$ip = if ($a) { (Get-NetIPAddress -InterfaceIndex $a.ifIndex -AddressFamily IPv4 -ErrorAction SilentlyContinue | Select-Object -First 1).IPAddress } else { $null }; ` +
+        `$dns = if ($a) { ((Get-DnsClientServerAddress -InterfaceIndex $a.ifIndex -AddressFamily IPv4 -ErrorAction SilentlyContinue).ServerAddresses -join ',') } else { $null }; ` +
+        // Tunnels that EXIST on this machine, running or not: WireGuard configs
+        // on disk plus any Get-VpnConnection entry. Without this a switched-off
+        // VPN is indistinguishable from no VPN.
+        `$cfg = @(Get-ChildItem -Path '${WG_CONFIG_DIR}' -Filter *.conf* -ErrorAction SilentlyContinue | ` +
+        `ForEach-Object { $_.Name -replace '\\.conf(\\.dpapi)?$','' }); ` +
+        `$cfg += @(Get-VpnConnection -ErrorAction SilentlyContinue | ForEach-Object { $_.Name }); ` +
+        // The installed-programs list, same source as Settings > Apps.
+        //
+        // Get-ChildItem + GetValue, NOT Get-ItemProperty: the latter loads every
+        // property of every installed program, which on a single-core VM took
+        // over 30 seconds and blew OBSERVE_TIMEOUT_MS for the whole bundle — so
+        // all four probes came back empty and the strategist planned against no
+        // device evidence at all. This reads one value per key.
+        `$inst = @(Get-ChildItem 'HKLM:\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Uninstall',` +
+        `'HKLM:\\SOFTWARE\\WOW6432Node\\Microsoft\\Windows\\CurrentVersion\\Uninstall' -ErrorAction SilentlyContinue | ` +
+        `ForEach-Object { $_.GetValue('DisplayName') } | ` +
+        `Where-Object { $_ -match 'VPN|WireGuard|OpenVPN|AnyConnect|GlobalProtect|Pulse Secure|FortiClient|Tailscale|Zscaler' }); ` +
+        `"$name|$up|$($a.Name)|$ip|$dns|$(($cfg | Sort-Object -Unique) -join ',')|$(($inst | Sort-Object -Unique) -join ',')"`,
+    );
+    const [name, up, adapter, ip, dns, configured, client] = (res.stdout || "").trim().split("|");
+    facts.client = client || "none";
+    facts.configured = configured || "none";
+    facts.vpn = name || configured || wanted || "none";
+    facts.connected = up === "True" ? "true" : "false";
+    facts.tunnel = adapter || "none";
+    facts.tunnel_ip = ip || "none";
+    facts.tunnel_dns = dns || "none";
+    return {
+      label: `vpn (${label})`,
+      command: `Get-VpnConnection + Get-NetAdapter + Get-DnsClientServerAddress + dir "${WG_CONFIG_DIR}"`,
+      exitCode: res.code,
+      facts,
+    };
+  }
+
+  const list = await runRecorded(ctx, "scutil", ["--nc", "list"]);
+  const line = (list.stdout || "")
+    .split(/\r?\n/)
+    .find((l) => (wanted ? l.includes(wanted) : /^\*?\s*\(/.test(l) && /Connected|Disconnected/.test(l))) || "";
+  facts.vpn = (line.match(/"([^"]+)"/) || [])[1] || wanted || "none";
+  facts.connected = /\(Connected\)/.test(line) ? "true" : "false";
+  const ifc = await runRecorded(ctx, "ifconfig", ["-a"]);
+  const utun = (ifc.stdout || "").split(/\n(?=\w)/).find((b) => /^utun/.test(b) && /inet /.test(b)) || "";
+  facts.tunnel = (utun.match(/^(utun\d+)/) || [])[1] || "none";
+  facts.tunnel_ip = (utun.match(/inet (\d+\.\d+\.\d+\.\d+)/) || [])[1] || "none";
+  // Only when there IS a tunnel. `scutil --dns` prints the system resolver list
+  // whether or not one is up, and reporting that as `tunnel_dns` would tell a
+  // reader the tunnel has resolvers when the tunnel does not exist — the exact
+  // misreading this probe was split into separate facts to prevent.
+  const dns = await runRecorded(ctx, "scutil", ["--dns"]);
+  facts.tunnel_dns =
+    facts.tunnel === "none"
+      ? "none"
+      : [...(dns.stdout || "").matchAll(/nameserver\[\d+\] : (\S+)/g)]
+          .map((m) => m[1])
+          .slice(0, 3)
+          .join(",") || "none";
+  return { label: `vpn (${label})`, command: "scutil --nc list + ifconfig -a + scutil --dns", exitCode: list.code, facts };
+}
+
+async function actReconnectVpn(ctx, args) {
+  const name = String(args.name || "").replace(/[^A-Za-z0-9 ._-]/g, "");
+  if (IS_WINDOWS) {
+    // WireGuard first: it has no rasdial entry, so asking rasdial about it
+    // produces a confusing "no such phonebook entry" rather than a reconnect.
+    const wg = await runRecordedPs(
+      ctx,
+      `$s = Get-Service -Name 'WireGuardTunnel$*' -ErrorAction SilentlyContinue | Select-Object -First 1; ` +
+        `if ($s) { $s.Name } else { '' }`,
+    );
+    const svc = (wg.stdout || "").trim();
+    if (svc) {
+      const res = await runRecordedPs(ctx, `Restart-Service -Name '${psEscape(svc)}' -Force -ErrorAction Stop`);
+      if (res.code !== 0) return { ok: false, error: res.stderr.trim() || "the tunnel service did not restart" };
+      await sleep(4000);
+      return { ok: true, output: `reconnected ${svc}` };
+    }
+
+    // No service, but a tunnel may still be configured: WireGuard DELETES the
+    // per-tunnel service when the tunnel is deactivated, so "switched off" and
+    // "never set up" look the same from Get-Service. Installing the service from
+    // the config on disk is how the GUI's own Activate button starts a tunnel,
+    // and it is the difference between fixing this and escalating it.
+    const cfg = await runRecordedPs(
+      ctx,
+      `$c = Get-ChildItem -Path '${WG_CONFIG_DIR}' -Filter *.conf* -ErrorAction SilentlyContinue | ` +
+        (name ? `Where-Object { $_.Name -like '${psEscape(name)}*' } | ` : "") +
+        `Select-Object -First 1; if ($c) { $c.FullName } else { '' }`,
+    );
+    const cfgPath = (cfg.stdout || "").trim();
+    if (cfgPath) {
+      const res = await runRecordedPs(
+        ctx,
+        `& 'C:\\Program Files\\WireGuard\\wireguard.exe' /installtunnelservice "${cfgPath}"`,
+      );
+      if (res.code !== 0) {
+        return { ok: false, error: (res.stderr || res.stdout || "").trim().slice(0, 300) || "installtunnelservice failed" };
+      }
+      await sleep(5000);
+      return { ok: true, output: `brought up the configured tunnel from ${cfgPath}` };
+    }
+
+    if (!name) {
+      return {
+        ok: false,
+        error: "no tunnel service is running and no WireGuard configuration exists on this machine — there is no VPN to reconnect",
+      };
+    }
+    await runRecorded(ctx, "rasdial", [name, "/disconnect"]);
+    await sleep(1500);
+    const res = await runRecorded(ctx, "rasdial", [name]);
+    if (res.code !== 0) {
+      return { ok: false, error: (res.stdout || res.stderr || "").trim().slice(0, 300) || "rasdial failed" };
+    }
+    await sleep(3000);
+    return { ok: true, output: `reconnected ${name}` };
+  }
+
+  if (!name) return { ok: false, error: "a VPN service name is required on macOS" };
+  await runRecorded(ctx, "scutil", ["--nc", "stop", name]);
+  await sleep(2000);
+  const res = await runRecorded(ctx, "scutil", ["--nc", "start", name]);
+  if (res.code !== 0) return { ok: false, error: "scutil --nc start failed" };
+  await sleep(4000);
+  return { ok: true, output: `reconnected ${name}` };
+}
+
 async function actExecCmd(ctx, { command }) {
   const cmdStr = String(command || "").trim();
   if (!cmdStr) return { ok: false, error: "command argument is empty" };
@@ -1552,6 +2255,7 @@ const HANDLERS = {
     expectsChange: true,
     probe: (ctx, label, args) => probeDns(ctx, label, args.service),
     act: actSetDnsServers,
+    rollback: rollbackSetDns,
   },
   flush_dns: { expectsChange: false, collect: (ctx) => actFlushDns(ctx) },
   collect_system_info: { expectsChange: false, collect: collectSystemInfo },
@@ -1561,6 +2265,7 @@ const HANDLERS = {
     requires: ["app"],
   },
   app_event_logs: { expectsChange: false, collect: collectAppEventLogs, requires: ["app"] },
+  http_check: { expectsChange: false, probe: probeHttp, requires: ["url"] },
   process_list: { expectsChange: false, collect: collectProcessList },
   network_state: { expectsChange: false, collect: collectNetworkState },
   command_output: { expectsChange: false, collect: collectCommandOutput, requires: ["binary"] },
@@ -1596,19 +2301,79 @@ const HANDLERS = {
     rollback: rollbackProxy,
   },
   reset_winsock: { expectsChange: true, probe: probeWinsock, act: actResetWinsock },
+  restart_shell: {
+    expectsChange: true,
+    probe: (ctx, label) => probeProcess(ctx, label, SHELL_PROCESS),
+    act: actRestartShell,
+  },
+  set_taskbar_autohide: {
+    expectsChange: true,
+    probe: probeTaskbar,
+    act: actSetTaskbarAutohide,
+    rollback: rollbackTaskbarAutohide,
+    requires: ["autoHide"],
+  },
+  kill_process: {
+    expectsChange: true,
+    probe: (ctx, label, args) => probeProcess(ctx, label, args.app),
+    act: actKillProcess,
+    requires: ["app"],
+  },
+  set_startup_item: {
+    expectsChange: true,
+    probe: probeStartupItems,
+    act: actSetStartupItem,
+    rollback: rollbackStartupItem,
+    requires: ["item", "enabled"],
+  },
+  install_package: {
+    expectsChange: true,
+    probe: probePackage,
+    act: actInstallPackage,
+    rollback: rollbackPackage,
+    requires: ["package"],
+  },
+  enable_device: {
+    expectsChange: true,
+    probe: probePnpDevice,
+    act: actEnableDevice,
+    rollback: rollbackEnableDevice,
+    requires: ["device"],
+  },
+  device_status: { expectsChange: false, probe: probePnpDevice, requires: ["device"] },
+  vpn_state: { expectsChange: false, probe: probeVpn },
+  reconnect_vpn: { expectsChange: true, probe: probeVpn, act: actReconnectVpn },
 };
+
+/**
+ * `--argv [...]` is the current form and carries argv exactly as built,
+ * including arguments with spaces in them. `--args "a b c"` is the old form,
+ * still read so a job queued by an older server still runs; it cannot express
+ * an argument containing a space, which is why it was replaced.
+ */
+function parseArgv(raw) {
+  const json = raw.match(/--argv (\[.*\])/)?.[1];
+  if (json) {
+    try {
+      const parsed = JSON.parse(json);
+      if (Array.isArray(parsed)) return parsed.map(String);
+    } catch {
+      /* fall through to the old form rather than run a command with no args */
+    }
+  }
+  return (raw.match(/--args "([^"]*)"/)?.[1] ?? "").split(/\s+/).filter(Boolean);
+}
 
 function parseCommand(command) {
   const raw = String(command || "").trim();
   const name = raw.split(/\s+/)[0] ?? "";
-  const argvRaw = raw.match(/--args "([^"]*)"/)?.[1] ?? "";
   return {
     name,
     args: {
       app: raw.match(/--app "([^"]+)"/)?.[1],
       limit: Math.min(Number(raw.match(/--limit (\d+)/)?.[1] ?? 15), 50),
       binary: raw.match(/--binary "([^"]+)"/)?.[1],
-      argv: argvRaw.split(/\s+/).filter(Boolean),
+      argv: parseArgv(raw),
       // Paths and patterns keep their spaces, so they are read from the quoted
       // form rather than split on whitespace like argv.
       fsPath: raw.match(/--path "([^"]*)"/)?.[1],
@@ -1616,8 +2381,21 @@ function parseCommand(command) {
       lines: Math.min(Number(raw.match(/--lines (\d+)/)?.[1] ?? 2000), 5000),
       service: raw.match(/--service "([^"]*)"/)?.[1],
       servers: raw.match(/--servers "([^"]*)"/)?.[1],
+      // Read from the quoted form: a URL has no spaces, but it does have the
+      // `/` and `:` that splitting on whitespace would leave intact and a
+      // trailing-quote scan would not.
+      url: raw.match(/--url "([^"]*)"/)?.[1],
       server: raw.match(/--server "([^"]*)"/)?.[1],
       port: Number(raw.match(/--port (\d+)/)?.[1] ?? 0),
+      package: raw.match(/--package "([^"]+)"/)?.[1],
+      device: raw.match(/--device "([^"]+)"/)?.[1],
+      item: raw.match(/--item "([^"]+)"/)?.[1],
+      // Read as the literal token rather than coerced: an absent flag must stay
+      // undefined so `requires` catches it, and "false" must not become falsy on
+      // the way through.
+      enabled: raw.match(/--enabled (true|false)/)?.[1],
+      autoHide: raw.match(/--autohide (true|false)/)?.[1],
+      name: raw.match(/--name "([^"]*)"/)?.[1],
     },
   };
 }
@@ -1714,7 +2492,15 @@ async function executeJob(job) {
     // Only for handlers that declare a rollback: a `reversible: "none"`
     // capability has nothing to run here, and inventing one would be worse than
     // the problem.
-    if (handler.expectsChange && handler.rollback) {
+    //
+    // Not when the act itself reported failure. This transaction is for "the
+    // action claimed success and the machine disagrees" — an act that says it
+    // failed, next to probes that agree nothing moved, leaves nothing to
+    // reverse, and running the undo anyway can only introduce a change nobody
+    // authorised. `install_package` found this: a refused install fired
+    // `winget uninstall`, which failed, and the rollback's error REPLACED the
+    // real reason on the ticket.
+    if (handler.expectsChange && handler.rollback && result?.ok !== false) {
       const landed = diffProbes(envelope.probes).length > 0;
       if (!landed) {
         envelope.rolledBack = true;
@@ -1993,6 +2779,312 @@ function reportReachable() {
   console.log(`[local-agent] ${appUrl} is answering again (was unreachable for ${seconds}s)`);
 }
 
+// ---- the local console -----------------------------------------------------
+/**
+ * A window, on the machine, for the person sitting at it.
+ *
+ * Everything this agent does already leaves a fingerprint — the journal, the
+ * change records with their undo commands, the OS log — but all of it is a file
+ * path mentioned on a ticket the employee may never open. Someone whose laptop
+ * is being worked on could not see that it was connected, what was running, or
+ * how to stop it, without reading a terminal.
+ *
+ * Three rules hold this up:
+ *
+ *  - **Loopback only.** It binds 127.0.0.1, and every request is checked for a
+ *    loopback Host as well, because binding alone does not stop a hostile page
+ *    from pointing a name at 127.0.0.1 and reading this through the browser the
+ *    person already has open. There is no auth here and there must never need to
+ *    be: nothing off this machine can reach it.
+ *  - **It never serves the token.** Reachability, identity, work and history —
+ *    never the credential that would let a caller impersonate this device.
+ *  - **Pause is real or it is not offered.** It rides on the heartbeat so the
+ *    service sees a paused machine as paused. A local switch the server cannot
+ *    see would mean queued work silently never running, and a technician sent to
+ *    look at the network instead of at the pause.
+ */
+const UI_PORT = Number(process.env.LOCAL_AGENT_UI_PORT || 7337);
+const UI_ENABLED = process.env.LOCAL_AGENT_UI !== "0";
+
+/** Set from the console. Checked in poll() before any job is claimed. */
+let paused = false;
+let lastPollOkAt = null;
+/** Binaries a technician approved for the job most recently handed to us. */
+let lastGrantedBinaries = [];
+
+/** The most recent change records across all tickets, newest first. */
+function recentChanges(limit = 12) {
+  const dir = changesDir();
+  let files;
+  try {
+    files = fs.readdirSync(dir).filter((f) => f.endsWith(".jsonl"));
+  } catch {
+    return [];
+  }
+  const out = [];
+  for (const f of files) {
+    let lines;
+    try {
+      lines = fs.readFileSync(path.join(dir, f), "utf8").split("\n").filter(Boolean);
+    } catch {
+      continue;
+    }
+    for (const line of lines) {
+      // A truncated final line is normal on an append-only file. Skip it.
+      try {
+        out.push(JSON.parse(line));
+      } catch {
+        /* not a complete record yet */
+      }
+    }
+  }
+  return out.sort((a, b) => (b.at ?? 0) - (a.at ?? 0)).slice(0, limit);
+}
+
+function consoleState() {
+  return {
+    server: {
+      url: appUrl,
+      reachable: unreachableSince === null,
+      unreachableSince,
+      lastPollOkAt,
+    },
+    device: {
+      hostname: AGENT_HOSTNAME,
+      os: AGENT_OS,
+      version: AGENT_VERSION,
+      build: AGENT_BUILD,
+    },
+    paused,
+    currentJob,
+    grantedBinaries: lastGrantedBinaries,
+    changes: recentChanges(),
+  };
+}
+
+/**
+ * A request that did not come from this machine's own browser. Binding to
+ * loopback stops the network; this stops a page on another origin from using the
+ * person's own browser as the way in (DNS rebinding).
+ */
+function fromLoopback(req) {
+  const host = (req.headers.host ?? "").replace(/:\d+$/, "").replace(/^\[|\]$/g, "");
+  return host === "127.0.0.1" || host === "localhost" || host === "::1";
+}
+
+function startConsole() {
+  const server = http.createServer((req, res) => {
+    if (!fromLoopback(req)) {
+      res.writeHead(403, { "Content-Type": "text/plain" });
+      res.end("this console answers only on loopback\n");
+      return;
+    }
+    const url = (req.url ?? "/").split("?")[0];
+
+    if (req.method === "GET" && url === "/") {
+      res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
+      res.end(CONSOLE_HTML);
+      return;
+    }
+    if (req.method === "GET" && url === "/api/state") {
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify(consoleState()));
+      return;
+    }
+    if (req.method === "POST" && (url === "/api/pause" || url === "/api/resume")) {
+      paused = url === "/api/pause";
+      console.log(`[local-agent] ${paused ? "paused" : "resumed"} from the local console`);
+      // Tell the server now rather than on the next tick: someone who just hit
+      // pause should see the machine go quiet in the app immediately.
+      void sendHeartbeat();
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ paused }));
+      return;
+    }
+    res.writeHead(404, { "Content-Type": "text/plain" });
+    res.end("not found\n");
+  });
+
+  // A console that cannot bind must never take the agent down with it. The usual
+  // cause is a second agent already running, and that one owns the port.
+  server.on("error", (err) => {
+    console.warn(`[local-agent] local console not started: ${err.message}`);
+  });
+  server.listen(UI_PORT, "127.0.0.1", () => {
+    console.log(`[local-agent] console on http://127.0.0.1:${UI_PORT}`);
+  });
+  return server;
+}
+
+// Built with createElement and textContent throughout, never innerHTML: every
+// value on this page — a hostname, a command, an undo line — comes off the
+// machine or off a job, and none of it is markup.
+const CONSOLE_HTML = `<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>Bolt-it agent</title>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<style>
+  * { box-sizing: border-box; }
+  body { margin:0; font:14px/1.5 -apple-system,Segoe UI,Roboto,sans-serif;
+         background:#0e1116; color:#e6e9ef; -webkit-font-smoothing:antialiased; }
+  .wrap { max-width:560px; margin:0 auto; padding:22px 20px 40px; }
+  .hero { display:flex; align-items:center; gap:14px; padding:18px;
+          border-radius:14px; background:#161b22; border:1px solid #232a35; }
+  .dot { width:12px; height:12px; border-radius:50%; flex:none; }
+  .on { background:#2ea043; animation:pulse 2s infinite; }
+  .off { background:#f85149; }
+  .idle { background:#8b93a1; }
+  @keyframes pulse { 0% { box-shadow:0 0 0 0 rgba(46,160,67,.7); }
+                     70% { box-shadow:0 0 0 9px rgba(46,160,67,0); }
+                     100% { box-shadow:0 0 0 0 rgba(46,160,67,0); } }
+  @media (prefers-reduced-motion: reduce) { .on { animation:none; } }
+  .state { font-size:16px; font-weight:600; }
+  .sub { color:#8b93a1; font-size:12px; margin-top:2px; word-break:break-all; }
+  button { font:inherit; font-weight:600; border:0; border-radius:9px;
+           padding:9px 16px; cursor:pointer; flex:none; }
+  .pause { background:#30363d; color:#e6e9ef; }
+  .resume { background:#2ea043; color:#fff; }
+  section { margin-top:20px; }
+  h2 { font-size:11px; text-transform:uppercase; letter-spacing:.9px;
+       color:#8b93a1; margin:0 0 8px; font-weight:600; }
+  .card { background:#161b22; border:1px solid #232a35; border-radius:12px; padding:14px; }
+  .kv { display:flex; justify-content:space-between; gap:12px; padding:4px 0; }
+  .k { color:#8b93a1; flex:none; }
+  .v { text-align:right; word-break:break-all; }
+  .job { border-left:3px solid #388bfd; padding-left:11px; }
+  .chg { padding:10px 0; border-bottom:1px solid #232a35; }
+  .chg:last-child { border-bottom:0; padding-bottom:0; }
+  .chg-top { display:flex; justify-content:space-between; gap:10px; }
+  .muted { color:#8b93a1; font-size:12px; }
+  code { display:block; margin-top:6px; background:#0e1116; border:1px solid #232a35;
+         border-radius:7px; padding:7px 9px; font:12px/1.45 ui-monospace,Menlo,Consolas,monospace;
+         color:#e3b341; white-space:pre-wrap; word-break:break-all; }
+  .empty { color:#8b93a1; font-size:13px; }
+  .pill { display:inline-block; font-size:11px; padding:2px 8px; margin:2px 4px 2px 0;
+          border-radius:999px; background:#1f2630; color:#c9d1d9; }
+</style></head>
+<body><div class="wrap">
+  <div class="hero">
+    <span class="dot idle" id="dot"></span>
+    <div style="flex:1;min-width:0">
+      <div class="state" id="state">Starting…</div>
+      <div class="sub" id="statesub"></div>
+    </div>
+    <button class="pause" id="toggle">Pause</button>
+  </div>
+  <section><h2>This machine</h2><div class="card" id="device"></div></section>
+  <section><h2>Right now</h2><div class="card" id="job"></div></section>
+  <section><h2>Approved for the current ticket</h2><div class="card" id="grants"></div></section>
+  <section><h2>Changes made here</h2><div class="card" id="changes"></div></section>
+</div>
+<script>
+  function el(tag, cls, text) {
+    var n = document.createElement(tag);
+    if (cls) n.className = cls;
+    if (text != null) n.textContent = String(text);
+    return n;
+  }
+  function clear(n) { while (n.firstChild) n.removeChild(n.firstChild); }
+  function kv(parent, k, v) {
+    var row = el("div", "kv");
+    row.appendChild(el("span", "k", k));
+    row.appendChild(el("span", "v", v));
+    parent.appendChild(row);
+  }
+  function ago(ts) {
+    if (!ts) return "never";
+    var s = Math.round((Date.now() - ts) / 1000);
+    if (s < 60) return s + "s ago";
+    if (s < 3600) return Math.round(s / 60) + "m ago";
+    return Math.round(s / 3600) + "h ago";
+  }
+
+  function paint(d) {
+    var dot = document.getElementById("dot");
+    var state = document.getElementById("state");
+    var sub = document.getElementById("statesub");
+    var btn = document.getElementById("toggle");
+
+    if (d.paused) {
+      dot.className = "dot idle";
+      state.textContent = "Paused";
+      sub.textContent = "No work will run on this machine until you resume.";
+    } else if (d.server.reachable) {
+      dot.className = "dot on";
+      state.textContent = d.currentJob ? "Working" : "Connected";
+      sub.textContent = d.server.url;
+    } else {
+      dot.className = "dot off";
+      state.textContent = "Can't reach IT";
+      sub.textContent = d.server.url + " \\u2014 unreachable since " + ago(d.server.unreachableSince);
+    }
+    btn.textContent = d.paused ? "Resume" : "Pause";
+    btn.className = d.paused ? "resume" : "pause";
+
+    var dev = document.getElementById("device");
+    clear(dev);
+    kv(dev, "Name", d.device.hostname);
+    kv(dev, "System", d.device.os);
+    kv(dev, "Agent", d.device.version);
+    kv(dev, "Build", d.device.build);
+    kv(dev, "Last contact", ago(d.server.lastPollOkAt));
+
+    var job = document.getElementById("job");
+    clear(job);
+    if (d.currentJob) {
+      var box = el("div", "job");
+      box.appendChild(el("div", null, d.currentJob.command));
+      box.appendChild(el("div", "muted", "started " + ago(d.currentJob.startedAt)));
+      job.appendChild(box);
+    } else {
+      job.appendChild(el("div", "empty", "Nothing running."));
+    }
+
+    var grants = document.getElementById("grants");
+    clear(grants);
+    var granted = d.grantedBinaries || [];
+    if (granted.length) {
+      granted.forEach(function (b) { grants.appendChild(el("span", "pill", b)); });
+    } else {
+      grants.appendChild(el("div", "empty", "No extra diagnostics approved."));
+    }
+
+    var changes = document.getElementById("changes");
+    clear(changes);
+    var list = d.changes || [];
+    if (!list.length) {
+      changes.appendChild(el("div", "empty", "Nothing on this machine has been changed."));
+      return;
+    }
+    list.forEach(function (c) {
+      var row = el("div", "chg");
+      var top = el("div", "chg-top");
+      top.appendChild(el("strong", null, c.capability));
+      top.appendChild(el("span", "muted", ago(c.at)));
+      row.appendChild(top);
+      row.appendChild(el("div", "muted", c.effect));
+      row.appendChild(el("div", "muted", "To undo this:"));
+      row.appendChild(el("code", null, c.revert));
+      changes.appendChild(row);
+    });
+  }
+
+  function tick() {
+    fetch("/api/state").then(function (r) { return r.json(); }).then(paint).catch(function () {
+      document.getElementById("dot").className = "dot off";
+      document.getElementById("state").textContent = "Agent not running";
+      document.getElementById("statesub").textContent = "";
+    });
+  }
+
+  document.getElementById("toggle").addEventListener("click", function () {
+    var resuming = this.textContent === "Resume";
+    fetch(resuming ? "/api/resume" : "/api/pause", { method: "POST" }).then(tick);
+  });
+
+  tick();
+  setInterval(tick, 1000);
+</script></body></html>`;
+
 /**
  * Who I am, on every request.
  *
@@ -2004,6 +3096,32 @@ function reportReachable() {
  * `Command is not allowlisted` — indistinguishable, from the graph's side, from
  * a capability that genuinely does not exist.
  */
+/**
+ * What THIS build can actually do, in the machine's own words.
+ *
+ * The server used to plan against a capability registry that describes what the
+ * system can do in principle, with no idea what the agent on the other end
+ * implements. So the strategist authorised `fs.grep` on a machine whose agent
+ * had no `fs_grep` handler, the operator retried it, and three looks went on
+ * theorising about an allowlist that was never the problem.
+ *
+ * Publishing the surface closes that gap for good: whatever handlers and
+ * binaries a future build adds or drops, the server learns them from the device
+ * rather than assuming them. Nothing here is a permission — it is a description,
+ * and the agent still enforces every rule on the way in.
+ */
+function describeSurface() {
+  return {
+    handlers: Object.keys(HANDLERS).sort(),
+    binaries: {
+      // Runnable now, no decision needed.
+      default: Object.keys(READ_ONLY_BINARIES).sort(),
+      // Runnable for one ticket once a technician — or AUTONOMY=full — says so.
+      grantable: Object.keys(GRANTABLE_BINARIES).sort(),
+    },
+  };
+}
+
 function identityHeaders() {
   return {
     Authorization: `Bearer ${token}`,
@@ -2025,6 +3143,11 @@ async function sendHeartbeat() {
         os: AGENT_OS,
         version: AGENT_VERSION,
         build: AGENT_BUILD,
+        surface: describeSurface(),
+        // Paused is reported, not just obeyed. A machine that has stopped taking
+        // work must look stopped to the service, or the next queued job simply
+        // never runs and reads as an unreachable agent.
+        paused,
         currentJob,
       }),
     });
@@ -2036,6 +3159,11 @@ async function sendHeartbeat() {
 
 async function poll() {
   void sendHeartbeat();
+  // Paused: keep the heartbeat going so the machine is still visibly here and
+  // still reports why it is quiet, but claim nothing. Work stays queued on the
+  // server, where a technician can see it, rather than being claimed by an agent
+  // that will not run it.
+  if (paused) return;
   try {
     const res = await fetch(`${appUrl}/api/agent/jobs`, {
       headers: identityHeaders(),
@@ -2044,6 +3172,7 @@ async function poll() {
     // Clearing it only on 200 would leave a machine whose token is wrong
     // reporting the host as unreachable, which sends the wrong person to look.
     reportReachable();
+    lastPollOkAt = Date.now();
     if (!res.ok) {
       console.error(`[local-agent] poll failed ${res.status}: ${await res.text()}`);
       return;
@@ -2094,6 +3223,9 @@ async function handleJob(job) {
   const startedAt = Date.now();
   const label = humanLabel(job.allowlistedCommand);
   currentJob = { id: job.id, command: label, startedAt };
+  // Surfaced in the local console so the person at the keyboard can see which
+  // extra diagnostic a technician approved for the ticket touching their machine.
+  lastGrantedBinaries = Array.isArray(job.grantedBinaries) ? job.grantedBinaries : [];
   void sendHeartbeat();
 
   bigBanner(`▶  ${label.toUpperCase()} on ${AGENT_HOSTNAME}`, ANSI.bgCyan);
@@ -2221,9 +3353,12 @@ export {
   validateReadOnlyCommand,
   resolveTarget,
   READ_ONLY_BINARIES,
+  GRANTABLE_BINARIES,
+  describeSurface,
 };
 
 if (IS_ENTRYPOINT) {
+  if (UI_ENABLED) startConsole();
   await poll();
   setInterval(poll, intervalMs);
 }

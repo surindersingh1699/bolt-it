@@ -219,9 +219,26 @@ describe("buildCommand", () => {
     expect(r).toEqual({ ok: true, command: 'fs_list --path "~/Library/Application Support"' });
   });
 
-  it("drops argv tokens that are not argv-safe rather than passing them through", () => {
-    const r = buildCommand("diag.command_output", { binary: "ps", args: ["axo", "pid;whoami"] });
-    expect(r).toEqual({ ok: true, command: 'command_output --binary "ps" --args "axo"' });
+  // It used to drop them and build the command anyway, which shipped a DIFFERENT
+  // command than the one that was authorised and blamed the machine for the
+  // result. A step that cannot be built correctly must not run at all.
+  it("fails the step on an argv token that is not argv-safe, rather than dropping it", () => {
+    expect(buildCommand("diag.command_output", { binary: "ps", args: ["axo", "pid;whoami"] }).ok).toBe(
+      false,
+    );
+  });
+
+  // The exact read that could never work: the key has backslashes AND a space.
+  it("carries a Windows registry key through intact", () => {
+    const r = buildCommand("diag.command_output", {
+      binary: "reg",
+      args: ["query", "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Internet Settings", "/v", "ProxyServer"],
+    });
+    expect(r).toEqual({
+      ok: true,
+      command:
+        'command_output --binary "reg" --argv ["query","HKCU\\\\Software\\\\Microsoft\\\\Windows\\\\CurrentVersion\\\\Internet Settings","/v","ProxyServer"]',
+    });
   });
 
   it("accepts the literal empty for a DNS reset", () => {

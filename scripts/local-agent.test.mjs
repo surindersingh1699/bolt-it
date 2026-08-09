@@ -47,11 +47,21 @@ describe("validateReadOnlyCommand", () => {
     }
   });
 
-  it("rejects arguments containing spaces, which would break the audit-string guarantee", () => {
-    // The audit string on the ticket is supposed to BE the argv. A token with a
-    // space in it makes those two things ambiguous.
+  // The audit string is still unambiguously the argv — it just carries it as
+  // JSON now (`--argv ["query","...Internet Settings"]`) rather than as a
+  // space-joined string. Banning the space bought that guarantee at the price of
+  // every Windows registry key and every path with a space in it: `reg query
+  // "HKCU\...\Internet Settings"` reached the machine with its key missing, and
+  // no rephrasing by the operator could have fixed it. The JSON form gives the
+  // same guarantee and keeps the argument.
+  it("allows a space inside one argument, because the argv is carried as JSON", () => {
     const bin = IS_WINDOWS ? "hostname" : "uname";
-    expect(validateReadOnlyCommand(bin, ["two words"])).toMatch(/disallowed characters/);
+    expect(validateReadOnlyCommand(bin, ["two words"])).toBeNull();
+  });
+
+  it("still rejects the quote that would make the audit string ambiguous", () => {
+    const bin = IS_WINDOWS ? "hostname" : "uname";
+    expect(validateReadOnlyCommand(bin, ['a" b'])).toMatch(/disallowed characters/);
   });
 
   it("refuses arguments that target a credential store", () => {
@@ -244,6 +254,91 @@ describe("parseCommand", () => {
   it("caps --lines and --limit rather than trusting them", () => {
     expect(parseCommand('fs_read --path "/tmp/x" --lines 999999').args.lines).toBeLessThanOrEqual(5000);
     expect(parseCommand('app_event_logs --app "X" --limit 999').args.limit).toBeLessThanOrEqual(50);
+  });
+});
+
+describe("parseCommand reads the flags the new handlers need", () => {
+  it("keeps a boolean flag as a token, so an absent one stays undefined", () => {
+    // `requires` tests truthiness. Coercing "--enabled false" to the boolean
+    // false here would make an explicit disable look like a missing argument.
+    expect(parseCommand("set_taskbar_autohide --autohide false").args.autoHide).toBe("false");
+    expect(parseCommand("set_taskbar_autohide --autohide true").args.autoHide).toBe("true");
+    expect(parseCommand("set_taskbar_autohide").args.autoHide).toBeUndefined();
+    expect(parseCommand('set_startup_item --item "OneDrive" --enabled false').args).toMatchObject({
+      item: "OneDrive",
+      enabled: "false",
+    });
+  });
+
+  it("parses package, device and VPN names", () => {
+    expect(parseCommand('install_package --package "Microsoft.VCRedist.2015+.x64"').args.package)
+      .toBe("Microsoft.VCRedist.2015+.x64");
+    expect(parseCommand('enable_device --device "Integrated Camera"').args.device).toBe("Integrated Camera");
+    expect(parseCommand('vpn_state --name "Acme VPN"').args.name).toBe("Acme VPN");
+    // Empty is legal for a VPN name and means "whichever tunnel this machine has".
+    expect(parseCommand('vpn_state --name ""').args.name).toBe("");
+  });
+});
+
+describe("the new device handlers run rather than throw", () => {
+  const run = (command) => executeJob({ id: "t", ticketId: "T", allowlistedCommand: command });
+
+  it("vpn_state reads the machine and returns separable facts", async () => {
+    const r = await run('vpn_state --name ""');
+    expect(r.ok, r.error).toBe(true);
+    // The whole point of this probe: a dead tunnel and a live tunnel with the
+    // wrong resolvers must be distinguishable, so these are separate facts.
+    const facts = r.envelope.probes[0].facts;
+    expect(Object.keys(facts)).toEqual(
+      expect.arrayContaining(["connected", "tunnel", "tunnel_ip", "tunnel_dns"]),
+    );
+    expect(r.envelope.expectsChange).toBe(false);
+  });
+
+  it("kill_process refuses a system process before it runs anything", async () => {
+    // The refusal must come from the handler, not from the OS declining the
+    // kill: ending lsass or WindowServer takes down the session, and finding
+    // that out afterwards is not a safety property.
+    const r = await run(`kill_process --app "${IS_WINDOWS ? "lsass" : "WindowServer"}"`);
+    expect(r.ok).toBe(false);
+    expect(r.error).toMatch(/system process/);
+    expect(r.envelope.commands.some((c) => /Stop-Process|pkill/.test(c.argv.join(" ")))).toBe(false);
+  });
+
+  it("enforces required arguments instead of acting on a default", async () => {
+    expect((await run("set_taskbar_autohide")).error).toMatch(/missing --autoHide/);
+    expect((await run('set_startup_item --item "OneDrive"')).error).toMatch(/missing --enabled/);
+    expect((await run("install_package")).error).toMatch(/missing --package/);
+    expect((await run("enable_device")).error).toMatch(/missing --device/);
+  });
+
+  it("says plainly when a capability is not implemented on this platform", async () => {
+    // Windows-only handlers must fail with a reason, never report a change they
+    // did not make. On Windows these reach the real implementation instead.
+    if (IS_WINDOWS) return;
+    for (const command of [
+      'install_package --package "Microsoft.VCRedist.2015+.x64"',
+      'enable_device --device "Integrated Camera"',
+      'set_startup_item --item "OneDrive" --enabled false',
+    ]) {
+      const r = await run(command);
+      expect(r.ok, command).toBe(false);
+      expect(r.error, command).toMatch(/Windows only/);
+      expect(r.envelope.effect.changed, command).toBe(false);
+    }
+  });
+
+  it("never runs an undo for a change that never happened", async () => {
+    // The rollback transaction is for "the act claimed success and the machine
+    // disagrees". When the act itself failed and the probes agree nothing moved,
+    // firing the undo can only make an unauthorised change — and its error
+    // replaces the real reason on the ticket, which is how this was found:
+    // a refused install ran `winget uninstall` and reported THAT failure.
+    if (IS_WINDOWS) return;
+    const r = await run('install_package --package "Microsoft.VCRedist.2015+.x64"');
+    expect(r.error).toMatch(/Windows only/);
+    expect(r.envelope.rolledBack).toBeUndefined();
+    expect(r.envelope.commands.some((c) => c.argv.includes("uninstall"))).toBe(false);
   });
 });
 
