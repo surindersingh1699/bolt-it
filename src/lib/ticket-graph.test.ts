@@ -1,11 +1,12 @@
 import { describe, it, expect } from "vitest";
+import type { PlanStep } from "./types";
 
 // buildGraph() calls .compile() at module import time, so importing this module
 // is itself the assertion: LangGraph validates that every Command({goto}) target
 // is declared in the node's `ends` and that no node is unreachable. A typo in an
 // `ends` array fails here rather than halfway through a live ticket.
 describe("ticket graph wiring", () => {
-  it("is the eleven nodes the two loops actually need, and nothing else", async () => {
+  it("is the thirteen nodes the two loops actually need, and nothing else", async () => {
     const { ticketGraph } = await import("./ticket-graph");
     const nodes = Object.keys((await ticketGraph.getGraphAsync()).nodes)
       .filter((n) => n !== "__start__" && n !== "__end__")
@@ -14,6 +15,11 @@ describe("ticket graph wiring", () => {
     expect(nodes).toEqual(
       [
         "awaitApproval",
+        // The ladder's pause. Two nodes for the same reason the approval gate is
+        // two: on resume LangGraph re-runs the node from the top, so the message
+        // has to live before the interrupt, in its own node.
+        "askEmployeeToVerify",
+        "awaitEmployeeVerdict",
         "finalize",
         "humanHandoff",
         "intentValidator",
@@ -78,6 +84,10 @@ describe("ticket graph wiring", () => {
 
     const intoStrategist = graph.edges.filter((e) => e.target === "strategist").map((e) => e.source).sort();
     expect(intoStrategist).toEqual([
+      // The ladder ran out of candidates and the employee still has the problem.
+      // That is a diagnosis problem, so it costs a look — but only then. A "still
+      // broken" with candidates left never reaches here.
+      "awaitEmployeeVerdict",
       // Its own retry, when it claimed a resolution the evidence did not support.
       "observe",
       "operator",
@@ -99,9 +109,15 @@ describe("ticket graph wiring", () => {
     expect(nodes).toContain("awaitApproval");
 
     // Nothing reaches the executor except the reviewer's output, the resumed
-    // approval, and the executor's own self-loop.
+    // approval, the resumed ladder check, and the executor's own self-loop.
+    // Every one of those has already been through reviewSteps.
     const intoExec = graph.edges.filter((e) => e.target === "runNextStep").map((e) => e.source).sort();
-    expect(intoExec).toEqual(["awaitApproval", "reviewSteps", "runNextStep"]);
+    expect(intoExec).toEqual([
+      "awaitApproval",
+      "awaitEmployeeVerdict",
+      "reviewSteps",
+      "runNextStep",
+    ]);
 
     // And nothing reaches the reviewer except the intent validator: the plan is
     // weighed as a whole before any step is weighed on its own, and the operator
@@ -213,5 +229,99 @@ describe("what happens to the rest of the round when one step fails", () => {
     const { shouldDrainRound } = await import("./ticket-graph");
     expect(shouldDrainRound("timeout", true)).toBe(false);
     expect(shouldDrainRound("dependency_unavailable", true)).toBe(false);
+  });
+});
+
+// The rule that makes this a ladder instead of a batch. It used to be that every
+// authorised fix ran back to back, so a ticket a restart would have settled also
+// had its application cache cleared — and afterwards nothing on the ticket could
+// say which of the two had worked.
+describe("one change at a time", () => {
+  const fix = (id: string): PlanStep => ({
+    id,
+    kind: "device",
+    description: id,
+    capability: "fix.restart_app",
+    status: "pending",
+  });
+  const read = (id: string): PlanStep => ({
+    id,
+    kind: "device",
+    description: id,
+    capability: "diag.app_status",
+    status: "pending",
+  });
+
+  it("will not start a second fix while the first is unverified", async () => {
+    const { nextRungAction } = await import("./ticket-graph");
+    expect(nextRungAction(fix("b"), true)).toBe("verify");
+  });
+
+  it("runs the next fix freely when nothing is waiting on the employee", async () => {
+    const { nextRungAction } = await import("./ticket-graph");
+    expect(nextRungAction(fix("a"), false)).toBe("run");
+  });
+
+  it("still runs reads while a fix is unverified — they are free and they are the evidence", async () => {
+    const { nextRungAction } = await import("./ticket-graph");
+    expect(nextRungAction(read("r"), true)).toBe("run");
+    expect(nextRungAction(read("r"), false)).toBe("run");
+  });
+
+  it("asks the employee at the end of a round in which a fix landed", async () => {
+    const { nextRungAction } = await import("./ticket-graph");
+    expect(nextRungAction(undefined, true)).toBe("verify");
+  });
+
+  it("hands back normally when the round ends with nothing unverified", async () => {
+    const { nextRungAction } = await import("./ticket-graph");
+    expect(nextRungAction(undefined, false)).toBe("handBack");
+  });
+});
+
+// Climbing a rung is not the employee reopening a finished ticket, and it must
+// not be charged as one: the reopen bound exists to stop a third round of the
+// same conversation, while "still broken" halfway up a ladder is the ladder
+// working exactly as designed.
+describe("what climbing the ladder costs", () => {
+  it("answers a paused check by resuming the run, never by reopening it", async () => {
+    const code = await import("node:fs").then((fs) =>
+      fs.readFileSync(new URL("./ticket-graph.ts", import.meta.url), "utf8"),
+    );
+    const body = code.slice(code.indexOf("export async function answerRungVerdict"));
+    // A resume carries the whole run — the queued candidates, the diagnosis, the
+    // evidence. A reopen would re-observe the machine and spend an opus look to
+    // arrive back at a fix that was already authorised and already queued.
+    expect(body).toMatch(/Command\(\{ resume: answer \}\)/);
+    expect(body.slice(0, body.indexOf("\n}"))).not.toMatch(/reopens/);
+  });
+});
+
+// Asking "what fixes this symptom" before authorising a ladder is now the
+// recommended opening move. Charging it a strategist look quietly punished the
+// tickets that followed the advice, leaving them two looks instead of three.
+describe("what a research round costs", () => {
+  it("does not spend a strategist look", async () => {
+    const code = await import("node:fs").then((fs) =>
+      fs.readFileSync(new URL("./ticket-graph.ts", import.meta.url), "utf8"),
+    );
+    const researcher = code.slice(
+      code.indexOf("async function researcher"),
+      code.indexOf("async function strategist"),
+    );
+    expect(researcher).toContain("researchRounds: state.researchRounds + 1");
+    expect(researcher).not.toContain("strategyRound: state.strategyRound + 1");
+  });
+
+  it("is still bounded, so free does not mean unlimited", async () => {
+    const { MAX_RESEARCH_ROUNDS } = await import("./research");
+    // The bound that replaced the look budget. Worst case is
+    // MAX_STRATEGY_ROUNDS + MAX_RESEARCH_ROUNDS opus calls, not an open loop.
+    expect(MAX_RESEARCH_ROUNDS).toBe(2);
+
+    const code = await import("node:fs").then((fs) =>
+      fs.readFileSync(new URL("./ticket-graph.ts", import.meta.url), "utf8"),
+    );
+    expect(code).toContain("state.researchRounds < MAX_RESEARCH_ROUNDS");
   });
 });

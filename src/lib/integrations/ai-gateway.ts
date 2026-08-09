@@ -39,8 +39,10 @@ import {
   OPERATOR_MODEL,
   OPERATOR_TIMEOUT_MS,
   OperatorDecision,
+  SpentStep,
   authorizeOperatorSteps,
   operatorSystemPrompt,
+  spentReason,
 } from "../operator";
 import {
   CHAT_INTENTS,
@@ -69,6 +71,12 @@ function parseSteps(raw: unknown, idPrefix: string): PlanStep[] {
       capability: typeof s.capability === "string" ? s.capability : undefined,
       params: (s.params as Record<string, unknown>) ?? undefined,
       status: "pending" as const,
+      // Clamped rather than trusted. It only ever breaks ties between fixes that
+      // cost the same to be wrong about, so an out-of-range number must not be
+      // able to reorder the ladder past a reversibility difference.
+      ...(typeof s.likelihood === "number" && Number.isFinite(s.likelihood)
+        ? { likelihood: Math.min(1, Math.max(0, s.likelihood)) }
+        : {}),
     };
   });
 }
@@ -232,6 +240,14 @@ export interface OperatorInput {
   round: number;
   maxRounds: number;
   deviceFacts?: DeviceFacts;
+  /**
+   * Steps this ticket already asked for and was refused for what they ARE.
+   *
+   * Named in the prompt as well as enforced in code. The enforcement is what
+   * makes it true; telling the operator is what stops it spending its round
+   * discovering the same refusal a second time.
+   */
+  spent?: SpentStep[];
 }
 
 /**
@@ -263,7 +279,13 @@ ${deviceFactsAsContext(input.deviceFacts ?? null)}
 
 ## What you have run so far, with the device's own verdict
 ${evidenceText || "(nothing yet — this is your first round on this strategy)"}
-
+${
+  input.spent?.length
+    ? `\n## ALREADY REFUSED on this ticket — do not ask for these again\n${input.spent
+        .map((s) => `- ${s.capability}${s.params ? ` ${JSON.stringify(s.params)}` : ""} — ${s.kind}: ${s.detail}`)
+        .join("\n")}\nThese were refused for WHAT THEY ARE, not for how they were phrased or when they ran. The identical request gets the identical answer, and the system will hold it back before it reaches the machine. If you still need what one of them would have told you, ask for a DIFFERENT observation that answers the same question.\n`
+    : ""
+}
 This is round ${input.round} of ${input.maxRounds} on this strategy.${
     input.round >= input.maxRounds
       ? " It is your LAST — after this, hand back to the engineer whatever the state."
@@ -297,7 +319,23 @@ Produce the JSON object.`;
   const proposed = parseSteps(parsed.steps, `o${input.round}`);
   // The boundary that stops a cheap model becoming a second planner. See
   // authorizeOperatorSteps in operator.ts.
-  const { steps, rejected } = authorizeOperatorSteps(proposed, input.authorized);
+  const { steps, rejected, repeated } = authorizeOperatorSteps(
+    proposed,
+    input.authorized,
+    input.spent ?? [],
+  );
+
+  // A round whose ONLY content was already-refused steps has nothing left to
+  // run. Blocking sends it to the strategist with the reason, which is the one
+  // party that can pick a different observation — the operator asking again is
+  // exactly the loop this prevents.
+  const stalled = repeated.length > 0 && steps.length === 0;
+  if (repeated.length > 0) {
+    console.log(
+      `[Operator] held back ${repeated.length} already-refused step(s): ` +
+        repeated.map((s) => s.capability ?? s.kind).join(", "),
+    );
+  }
 
   const note = str(parsed.note, 300);
   return {
@@ -305,9 +343,12 @@ Produce the JSON object.`;
     strategyComplete: Boolean(parsed.strategy_complete),
     // Overreach is not silently dropped: the operator wanted something it may
     // not have, which is a question for the engineer, not a thing to ignore.
-    blocked: Boolean(parsed.blocked) || rejected.length > 0,
-    blockedReason:
-      rejected.length > 0
+    blocked: Boolean(parsed.blocked) || rejected.length > 0 || stalled,
+    blockedReason: stalled
+      ? `every step this round had already been refused on this ticket: ${repeated
+          .map((s) => spentReason(s, input.spent ?? []))
+          .join("; ")}`
+      : rejected.length > 0
         ? `the operator tried to run ${rejected
             .map((s) => s.capability ?? s.kind)
             .join(", ")}, which was not authorised — decide whether that is the right action`

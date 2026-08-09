@@ -1,5 +1,11 @@
 import { describe, it, expect } from "vitest";
-import { authorizeOperatorSteps, OPERATOR_MODEL, operatorSystemPrompt } from "./operator";
+import {
+  authorizeOperatorSteps,
+  OPERATOR_MODEL,
+  operatorSystemPrompt,
+  spentReason,
+  type SpentStep,
+} from "./operator";
 import { CAPABILITIES, capabilityAllowed, isReadOnlyCapability } from "./capabilities";
 import { PlanStep } from "./types";
 
@@ -107,5 +113,74 @@ describe("the operator's prompt", () => {
   it("names every capability, since it must bind params for all of them", () => {
     const prompt = operatorSystemPrompt();
     for (const cap of CAPABILITIES) expect(prompt).toContain(cap);
+  });
+});
+
+// T-YouTube: the operator asked for the same refused `reg.exe` proxy read on
+// three consecutive rounds, spent the whole strategy on it, and the ticket
+// reached a human having changed nothing. The prompt already said not to repeat
+// a NO EFFECT step and the operator was obeying it — a step REFUSED for what it
+// is reads as neither a NO EFFECT nor a failure it caused.
+describe("a step already refused for what it is", () => {
+  const refusedRead: PlanStep = {
+    id: "s1",
+    kind: "device",
+    description: "Check the system HTTP/HTTPS proxy",
+    capability: "diag.command_output",
+    params: { binary: "reg", args: ["query"] },
+    status: "pending",
+  };
+  const spent: SpentStep[] = [
+    {
+      capability: "diag.command_output",
+      params: { binary: "reg", args: ["query"] },
+      kind: "capability_missing",
+      detail: "reg is not on the read-only binary allowlist",
+    },
+  ];
+
+  it("is held back before it reaches the machine", () => {
+    const { steps, repeated } = authorizeOperatorSteps([refusedRead], [], spent);
+    expect(steps).toHaveLength(0);
+    expect(repeated).toHaveLength(1);
+  });
+
+  it("is caught even though it is read-only", () => {
+    // The rule has to be checked BEFORE "reads are always allowed", because the
+    // step this exists to stop IS a read. Checked after, it sails through every
+    // round — which is exactly what happened.
+    expect(isReadOnlyCapability(refusedRead.capability)).toBe(true);
+    const { steps } = authorizeOperatorSteps([refusedRead], [], spent);
+    expect(steps).toHaveLength(0);
+  });
+
+  it("does not hold back the same capability with different arguments", () => {
+    // The refusal was about `reg`, not about reading a command's output. Asking
+    // a DIFFERENT observation that answers the same question is precisely what
+    // the operator is being told to do instead.
+    const other: PlanStep = { ...refusedRead, id: "s2", params: { binary: "ipconfig", args: ["/all"] } };
+    const { steps, repeated } = authorizeOperatorSteps([other], [], spent);
+    expect(steps).toHaveLength(1);
+    expect(repeated).toHaveLength(0);
+  });
+
+  it("compares params by value, not by key order", () => {
+    const reordered: PlanStep = { ...refusedRead, id: "s3", params: { args: ["query"], binary: "reg" } };
+    const { repeated } = authorizeOperatorSteps([reordered], [], spent);
+    expect(repeated).toHaveLength(1);
+  });
+
+  it("still lets a mechanically-failed step be retried", () => {
+    // A timeout, a wrong app name, an offline agent: all things a corrected
+    // retry genuinely might fix, and retrying them is the operator's whole job.
+    // Only capability_missing and policy_block are spent.
+    const timedOut: SpentStep[] = [];
+    const { steps } = authorizeOperatorSteps([refusedRead], [], timedOut);
+    expect(steps).toHaveLength(1);
+  });
+
+  it("explains itself in words the strategist can act on", () => {
+    expect(spentReason(refusedRead, spent)).toContain("already refused");
+    expect(spentReason(refusedRead, spent)).toContain("allowlist");
   });
 });

@@ -19,7 +19,9 @@ import { attachmentsAsDataUris } from "@/lib/attachments";
 import { resolutionSupported } from "@/lib/resolution";
 import { IntentVerdict, validateIntent } from "@/lib/intent";
 import { MAX_STRATEGY_ROUNDS, STRATEGIST_MODEL, Strategy } from "@/lib/strategist";
-import { MAX_OPERATOR_ROUNDS, OPERATOR_MODEL } from "@/lib/operator";
+import { MAX_OPERATOR_ROUNDS, OPERATOR_MODEL, SpentStep } from "@/lib/operator";
+import { isRemediation, likelihoodsFrom, rankRemediations, rungsRemaining } from "@/lib/ladder";
+import { decideGrant, grantableBinaryOf, withGrant } from "@/lib/grants";
 import {
   buildReplyEvidence,
   firstNameOf,
@@ -125,6 +127,21 @@ const TicketGraphState = Annotation.Root({
   findings: Annotation<string[]>({ reducer: append, default: () => [] }),
   pendingStepId: Annotation<string | null>({ reducer: overwrite, default: () => null }),
   approver: Annotation<Approver | null>({ reducer: overwrite, default: () => null }),
+  /**
+   * The id of a change that LANDED and has not yet been put to the employee.
+   *
+   * This one field is the whole ladder. While it is set, `runNextStep` will not
+   * start another change — it parks on the employee's answer first. Cleared the
+   * moment they answer, either way.
+   *
+   * Only a change that actually moved the machine sets it. A fix that came back
+   * FAILED or NO EFFECT is spent without anyone being asked: putting "did that
+   * help?" to someone about a command that provably did nothing costs them a
+   * reply and tells us what we already knew.
+   */
+  landedFix: Annotation<string | null>({ reducer: overwrite, default: () => null }),
+  /** Rungs tried and ruled out by the employee, for the handoff artifact. */
+  rungsTried: Annotation<string[]>({ reducer: append, default: () => [] }),
 });
 
 type TState = typeof TicketGraphState.State;
@@ -187,6 +204,27 @@ function noteCapabilityRequest(ticketId: string, strategy: Strategy): string | n
 async function imagesFor(ticket: Ticket, round: number): Promise<string[]> {
   if (round !== 1) return [];
   return attachmentsAsDataUris(ticket.attachments ?? []).catch(() => []);
+}
+
+/**
+ * Every step this ticket asked for and was refused for what it IS.
+ *
+ * Derived from the plan on each call rather than accumulated in graph state:
+ * the plan is the durable record, so this is correct across a reopen and across
+ * a resumed interrupt with no reducer to keep in step.
+ */
+function spentStepsOf(ticket: Ticket): SpentStep[] {
+  return ticket.plan
+    .filter(
+      (s) =>
+        s.failure?.kind === "capability_missing" || s.failure?.kind === "policy_block",
+    )
+    .map((s) => ({
+      capability: s.capability,
+      params: s.params,
+      kind: s.failure!.kind as "capability_missing" | "policy_block",
+      detail: s.failure!.detail,
+    }));
 }
 
 /** Everything run so far, with the device's own verdict on each. */
@@ -273,7 +311,17 @@ async function researcher(state: TState) {
       research: findings,
       researchQuestion: null,
       researchRounds: state.researchRounds + 1,
-      strategyRound: state.strategyRound + 1,
+      // A research round deliberately does NOT spend a strategist look.
+      //
+      // It used to, and that quietly punished the right behaviour: asking "what
+      // fixes this symptom" before authorising a ladder is now the recommended
+      // opening move, and charging it a look left the tickets that followed the
+      // advice with two looks instead of three.
+      //
+      // The bound that stops this being free forever is MAX_RESEARCH_ROUNDS,
+      // checked in the strategist before it routes here — at most 2 research
+      // visits per ticket, so the worst case is MAX_STRATEGY_ROUNDS + 2 opus
+      // calls rather than an open loop.
       findings: [
         note,
         ...flags.map(
@@ -462,6 +510,9 @@ async function operator(state: TState) {
     round: state.operatorRound,
     maxRounds: MAX_OPERATOR_ROUNDS,
     deviceFacts: state.deviceFacts,
+    // Read off the ticket rather than carried in graph state, so it survives a
+    // reopen and a resumed interrupt without a reducer to keep in sync.
+    spent: spentStepsOf(ticket),
   }).catch(() => null);
 
   // No usable answer from the cheap model. Escalate to the expensive one rather
@@ -631,28 +682,48 @@ async function reviewSteps(state: TState) {
     return {};
   }
 
-  const carried = ticket.plan.filter((s) => !reviewed.some((n) => n.id === s.id));
+  // The pending queue IS the ladder, so the order it is written in is the order
+  // the fixes will be attempted in. Reads first — they are free and they are the
+  // evidence — then changes cheapest-to-be-wrong-about first. Derived from the
+  // capability registry, never from either model's ordering. See ladder.ts.
+  const laddered = rankRemediations(reviewed, likelihoodsFrom(state.strategy?.steps ?? []));
+
+  const carried = ticket.plan.filter((s) => !laddered.some((n) => n.id === s.id));
   await updateTicket(state.ticketId, {
     status: "executing",
     confidence: state.strategy?.confidence ?? 0,
     draftResponse: state.strategy?.customerSummary,
-    plan: [...carried, ...reviewed],
+    plan: [...carried, ...laddered],
   });
 
-  const gated = reviewed.filter((s) => s.approvalMode === "human").length;
-  const blocked = reviewed.filter((s) => s.status === "failed").length;
+  const gated = laddered.filter((s) => s.approvalMode === "human").length;
+  const blocked = laddered.filter((s) => s.status === "failed").length;
+  const rungs = laddered.filter((s) => s.status === "pending" && isRemediation(s));
   appendTrace(
     state.ticketId,
     "reviewSteps",
     "completed",
-    `${reviewed.length} step(s) reviewed by ${REVIEWER_MODEL}: ${reviewed.length - gated} auto, ${gated} need a person` +
-      (blocked ? `, ${blocked} refused outright` : ""),
+    `${laddered.length} step(s) reviewed by ${REVIEWER_MODEL}: ${laddered.length - gated} auto, ${gated} need a person` +
+      (blocked ? `, ${blocked} refused outright` : "") +
+      (rungs.length > 1
+        ? ` · ${rungs.length} candidate fixes queued, tried one at a time: ${rungs
+            .map((s) => s.capability ?? s.kind)
+            .join(" → ")}`
+        : ""),
     Date.now() - t0,
   );
 
   const updated = await getTicket(state.ticketId);
   if (updated) {
-    const labels = reviewed.map((s) => humanStepLabel(s));
+    // What is about to happen, not what MIGHT happen. Everything up to and
+    // including the first candidate fix will run; the candidates behind it are
+    // fallbacks that are only reached if the employee says the first did not
+    // work, and listing them here would promise work that usually never happens
+    // — the same overstatement the honesty rules forbid everywhere else.
+    const firstRung = laddered.findIndex((s) => s.status === "pending" && isRemediation(s));
+    const labels = (firstRung === -1 ? laddered : laddered.slice(0, firstRung + 1)).map((s) =>
+      humanStepLabel(s),
+    );
     const firstName = firstNameOf(ticket.reporter);
     const first = state.strategyRound === 1 && state.operatorRound === 1;
     await say(
@@ -740,6 +811,30 @@ export function shouldDrainRound(kind: StepFailureKind, moreQueued: boolean): bo
 }
 
 /**
+ * What this pass of the execute loop should do next, given the queue and
+ * whether a fix is already sitting unverified.
+ *
+ * The ladder rule, and the whole of it:
+ *
+ *   run      — nothing is waiting on the employee, so execute the next step.
+ *              Reads always land here; they are free and they inform the fix.
+ *   verify   — a change landed and the next thing to run is another change.
+ *              Stop. Ask the employee whether the first one worked before
+ *              spending a second one on their machine.
+ *   handBack — the queue is empty and nothing is unverified. Normal round end.
+ *
+ * Pure and exported so the rule can be tested without a graph, a ticket or a
+ * device — the same reason `shouldDrainRound` is.
+ */
+export type RungAction = "run" | "verify" | "handBack";
+
+export function nextRungAction(next: PlanStep | undefined, hasUnverifiedFix: boolean): RungAction {
+  if (!next) return hasUnverifiedFix ? "verify" : "handBack";
+  if (hasUnverifiedFix && isRemediation(next)) return "verify";
+  return "run";
+}
+
+/**
  * Self-looping execute node. Cleared steps run immediately; only a step the
  * reviewer left at "human" routes to the approval interrupt.
  *
@@ -747,14 +842,26 @@ export function shouldDrainRound(kind: StepFailureKind, moreQueued: boolean): bo
  * working around a wrong app name or a moved path is the operator's whole job.
  * Two failures are exempt, because neither is mechanical: a step the reviewer
  * refused is a diagnosis problem, and it goes to the strategist.
+ *
+ * ONE CHANGE AT A TIME. This loop used to drain the queue: every authorised fix
+ * ran back to back, so a ticket a restart would have settled also had its
+ * application cache cleared, and afterwards nothing could say which had worked.
+ * Now a change that lands parks the loop on `landedFix` until the employee has
+ * said whether it helped — which is what a technician does, and the cheapest
+ * evidence in the system besides.
  */
 async function runNextStep(state: TState) {
   const ticket = await getTicket(state.ticketId);
   if (!ticket) return new Command({ goto: END });
 
   const step = ticket.plan.find((s) => s.status === "pending");
+  const action = nextRungAction(step, Boolean(state.landedFix));
+
+  if (action === "verify") {
+    return new Command({ goto: "askEmployeeToVerify" });
+  }
   // The round is over. Results go back to the operator that asked for them.
-  if (!step) {
+  if (action === "handBack" || !step) {
     return new Command({ goto: "operator", update: { operatorRound: state.operatorRound + 1 } });
   }
 
@@ -797,6 +904,79 @@ async function runNextStep(state: TState) {
     // step goes to, and the technician decides. Refusing it silently is what
     // sent T-8805 to a human having tested nothing.
     if (kind === "capability_missing") {
+      // Under full autonomy a READ that only needs a name on a list is not worth
+      // a person's click. The grant widens WHICH binary may run and nothing else:
+      // it must still be on the agent's curated `GRANTABLE_BINARIES` list, every
+      // subcommand and argument filter still applies, and the grant still travels
+      // on the job rather than in the command string. A binary off that list is
+      // refused with the grant held — auto-granting cannot reach it either.
+      //
+      // The alternative was what T-2384 did: park a healthy ticket on an approval
+      // for `netsh winhttp show proxy` and wait for a technician who was not
+      // watching. That is a stalled ticket dressed up as a safety boundary.
+      const grant = decideGrant(step, ticket.grantedBinaries ?? []);
+      if (grant.kind === "auto") {
+        await updateTicket(state.ticketId, {
+          grantedBinaries: withGrant(ticket.grantedBinaries, grant.binary),
+        });
+        await updateStep(state.ticketId, step.id, {
+          status: "pending",
+          approvalMode: "auto",
+          failure: undefined,
+          log: [...(step.log ?? []), `[Policy] AUTO-GRANT · ${grant.note} — retrying the step`],
+        });
+        appendTrace(
+          state.ticketId,
+          "autoGrant",
+          "completed",
+          `granted the read-only diagnostic ${grant.binary} for this ticket without a person (AUTONOMY=full)`,
+        );
+        return new Command({ goto: "runNextStep" });
+      }
+
+      // Approved once and refused anyway. The gate has already been asked and
+      // answered, so this is a diagnosis problem now, not a decision problem:
+      // hand it to the strategist to answer the same question a different way.
+      if (grant.kind === "spent") {
+        return new Command({
+          goto: state.strategyRound >= MAX_STRATEGY_ROUNDS ? "humanHandoff" : "strategist",
+          update: {
+            strategyRound: state.strategyRound + 1,
+            findings: [
+              `${grant.binary} was approved for this ticket and the machine refused it anyway — ` +
+                `it is spent, and asking for approval again would loop`,
+            ],
+            operatorNotes: [`${grant.binary} refused with the grant already in hand: ${detail}`],
+          },
+        });
+      }
+
+      // Nothing to grant. The step was refused for what it IS — an unknown
+      // capability, a handler this build does not have, or a param the registry
+      // will not accept — and no human decision changes any of those.
+      //
+      // This used to fall into the approval gate anyway, which is a button that
+      // cannot work: T-7621 asked a technician four times to approve
+      // `Get-PnpDevice -FriendlyName '*Camera*'`, and each approval resumed the
+      // SAME step, which failed on the same rejected character, and parked on
+      // the same gate. Only a failure carrying `grantableBinary` is a decision;
+      // everything else here is a plan defect, and the planner is who fixes it.
+      if (grant.kind === "not_a_grant") {
+        return new Command({
+          goto: state.operatorRound >= MAX_OPERATOR_ROUNDS ? "strategist" : "operator",
+          update: {
+            operatorRound: state.operatorRound + 1,
+            strategyRound:
+              state.operatorRound >= MAX_OPERATOR_ROUNDS ? state.strategyRound + 1 : state.strategyRound,
+            findings: [`${humanStepLabel(step)} was refused for what it is — ${detail}`],
+            operatorNotes: [
+              `${step.capability ?? step.kind} cannot run as written (${detail}). No approval changes ` +
+                `that — rewrite the step or choose a different capability.`,
+            ],
+          },
+        });
+      }
+
       return new Command({
         goto: "markAwaitingApproval",
         update: {
@@ -838,6 +1018,24 @@ async function runNextStep(state: TState) {
         findings: [`${humanStepLabel(step)} failed — ${kind}: ${detail}`],
       },
     });
+  }
+
+  // A change that actually moved the machine. Nothing else on this ticket runs
+  // until the employee has said whether it helped — the next pass reads
+  // `landedFix` and parks.
+  //
+  // Only on the success path, and deliberately: a fix that came back FAILED or
+  // NO EFFECT fell through the branch above, which is what lets a spent rung be
+  // climbed immediately instead of costing someone a reply about a command that
+  // provably did nothing.
+  if (isRemediation(step)) {
+    appendTrace(
+      state.ticketId,
+      "ladder",
+      "completed",
+      `${humanStepLabel(step)} landed · pausing here to ask whether it fixed it before trying anything else`,
+    );
+    return new Command({ goto: "runNextStep", update: { landedFix: step.id } });
   }
 
   return new Command({ goto: "runNextStep" });
@@ -907,14 +1105,10 @@ async function awaitApproval(state: TState) {
     // run by default has already failed once, so the approval has to record the
     // grant and put the step back to pending — otherwise the technician clicks
     // approve and nothing happens, which is the worst outcome of the three.
-    const binary =
-      step.failure?.kind === "capability_missing" && typeof step.params?.binary === "string"
-        ? step.params.binary
-        : null;
+    const binary = grantableBinaryOf(step);
     if (binary) {
-      const already = ticket.grantedBinaries ?? [];
       await updateTicket(state.ticketId, {
-        grantedBinaries: already.includes(binary) ? already : [...already, binary],
+        grantedBinaries: withGrant(ticket.grantedBinaries, binary),
       });
       await updateStep(state.ticketId, step.id, {
         status: "pending",
@@ -948,18 +1142,171 @@ async function awaitApproval(state: TState) {
   });
 }
 
+// ---- the ladder's pause ----------------------------------------------------
+// One fix has landed and the next one must not start until the employee has
+// said whether the first worked. Split in two for the same reason the approval
+// gate is: on resume LangGraph re-runs the node from the top, so anything before
+// interrupt() would fire a second time — a duplicate "did that work?" message.
+
+/**
+ * Park the ticket on the employee's answer.
+ *
+ * The status is `awaiting_confirmation`, which is not a compromise: it is
+ * exactly what the ticket is doing, the portal already renders Yes / No buttons
+ * against it, and `sweepOrphanedTickets` already leaves it alone as waiting on a
+ * person rather than on a dead run.
+ *
+ * What is NOT reused is the `resolution` message. Work is not finished, more
+ * candidates are queued behind this one, and saying otherwise would make an
+ * honest "still broken" read like a relapse — hence the `rungCheck` moment.
+ */
+async function askEmployeeToVerify(state: TState) {
+  const ticket = await getTicket(state.ticketId);
+  if (!ticket) return {};
+
+  const landed = ticket.plan.find((s) => s.id === state.landedFix);
+  const remaining = rungsRemaining(ticket.plan);
+
+  await updateTicket(state.ticketId, { status: "awaiting_confirmation" });
+  appendTrace(
+    state.ticketId,
+    "ladder",
+    "interrupted",
+    `${landed ? humanStepLabel(landed) : "a fix"} landed · asking the employee whether it worked` +
+      (remaining > 0 ? ` · ${remaining} more candidate(s) held back until they answer` : " · no fallback left"),
+  );
+
+  const evidence = await evidenceFor(state.ticketId, ticket.workspaceId);
+  const firstName = firstNameOf(ticket.reporter);
+  await say(
+    ticket,
+    "rungCheck",
+    `Hi ${firstName} — I've tried ${landed ? humanStepLabel(landed).toLowerCase() : "one thing"}. ` +
+      `Give it another go and tell me whether it's still happening` +
+      (remaining > 0 ? ` — if it is, I've got ${remaining} more thing(s) lined up to try.` : "."),
+    {
+      agentSummary: state.strategy?.customerSummary || undefined,
+      evidence,
+      findings: state.findings,
+    },
+  );
+  return {};
+}
+
+/**
+ * Wait for the answer, then climb or stop.
+ *
+ * This is the cheapest decision point in the system: a "no" costs zero model
+ * calls and moves straight to the next candidate with the whole run's state
+ * intact, because the run is paused rather than finished. The alternative —
+ * ending the run and re-entering through `reopenTicketGraph` — would re-observe
+ * the machine and spend an opus look to arrive back at a fix that was already
+ * authorised and already queued.
+ *
+ * It also means climbing the ladder does not spend the reopen budget. A reopen
+ * still means what it always meant: the ticket finished, and the employee came
+ * back anyway.
+ */
+async function awaitEmployeeVerdict(state: TState) {
+  const answer = interrupt({
+    ticketId: state.ticketId,
+    kind: "rung_check",
+    stepId: state.landedFix,
+    question: "Did that fix it?",
+  }) as { fixed?: boolean; detail?: string };
+
+  const ticket = await getTicket(state.ticketId);
+  if (!ticket) return new Command({ goto: END });
+
+  const landed = ticket.plan.find((s) => s.id === state.landedFix);
+  const label = landed ? humanStepLabel(landed) : "the last fix";
+
+  // Anything that is not an explicit yes is treated as "still broken". A
+  // malformed resume must climb the ladder, never close the ticket.
+  if (answer?.fixed === true) {
+    // The candidates behind this one are not needed and must not run later. A
+    // pending step is invisible to `buildReplyEvidence` and would be picked up
+    // by the next pass of the execute loop.
+    const untried = ticket.plan.filter((s) => s.status === "pending");
+    for (const s of untried) {
+      await updateStep(state.ticketId, s.id, {
+        status: "skipped",
+        log: [...(s.log ?? []), `[Ladder] Not needed — "${label}" fixed it, confirmed by the employee.`],
+      });
+    }
+    appendTrace(
+      state.ticketId,
+      "ladder",
+      "resumed",
+      `the employee confirmed ${label} worked` +
+        (untried.length > 0 ? ` · ${untried.length} heavier candidate(s) never run` : ""),
+    );
+    return new Command({
+      goto: "finalize",
+      update: { landedFix: null, rungsTried: [`${label} — confirmed by the employee as the fix`] },
+    });
+  }
+
+  const detail = answer?.detail?.trim() || "the employee said it is still happening";
+
+  // Spent, and recorded as spent. The strategist's own rule is that a step which
+  // did not work is never authorised again, and this is the evidence that says
+  // so — the employee outranking a VERIFIED CHANGE.
+  if (landed) {
+    await updateStep(state.ticketId, landed.id, {
+      log: [...(landed.log ?? []), `[Ladder] Landed, but the employee reports the problem is still happening: "${detail}"`],
+    });
+  }
+
+  const remaining = rungsRemaining(ticket.plan);
+  appendTrace(
+    state.ticketId,
+    "ladder",
+    "resumed",
+    `${label} did not fix it — ` +
+      (remaining > 0 ? `trying the next candidate (${remaining} left)` : "no candidates left, back to the engineer"),
+  );
+
+  await updateTicket(state.ticketId, { status: "executing" });
+
+  const update = {
+    landedFix: null,
+    rungsTried: [`${label} — landed, and the employee reported the problem still happening`],
+    followUps: [detail],
+    findings: [`${label} was tried and ruled out by the employee: "${detail}"`],
+  };
+
+  // Another candidate is queued: run it. No model call, no re-observation, no
+  // re-diagnosis — the engineer already authorised this one for this reason.
+  if (remaining > 0) return new Command({ goto: "runNextStep", update });
+
+  // The ladder is spent. That IS a new diagnosis problem, so it goes to the
+  // expensive model — bounded by the same round budget as every other look.
+  return new Command({
+    goto: state.strategyRound >= MAX_STRATEGY_ROUNDS ? "humanHandoff" : "strategist",
+    update: { ...update, strategyRound: state.strategyRound + 1 },
+  });
+}
+
 /** The employee confirms the fix; the ticket is not closed on our say-so. */
 async function finalize(state: TState) {
   const ticket = await getTicket(state.ticketId);
   if (!ticket) return {};
 
-  const summary =
-    state.diagnoses.length > 0
-      ? state.diagnoses.map((d, i) => `Look ${i + 1}: ${d}`).join("\n")
-      : "Single-pass resolution — no follow-up needed.";
+  const summary = [
+    ...state.diagnoses.map((d, i) => `Look ${i + 1}: ${d}`),
+    ...state.rungsTried.map((r) => `Tried: ${r}`),
+  ].join("\n") || "Single-pass resolution — no follow-up needed.";
+
+  // The employee may have closed it themselves on the ladder's own Yes button,
+  // in which case the resolve already happened in the Server Action and this
+  // node is only here to record the summary and skip the untried candidates.
+  // Flipping back to awaiting_confirmation would re-open a ticket they closed
+  // and ask them the same question twice.
+  const alreadyClosed = ticket.status === "resolved";
 
   await updateTicket(state.ticketId, {
-    status: "awaiting_confirmation",
+    ...(alreadyClosed ? {} : { status: "awaiting_confirmation" as const }),
     troubleshootingSummary: summary,
     attempts: state.strategyRound,
   });
@@ -967,12 +1314,14 @@ async function finalize(state: TState) {
     state.ticketId,
     "finalize",
     "completed",
-    `${state.strategyRound} look(s) · asking the employee to confirm the fix worked`,
+    alreadyClosed
+      ? `${state.strategyRound} look(s) · the employee already confirmed the fix worked`
+      : `${state.strategyRound} look(s) · asking the employee to confirm the fix worked`,
   );
 
   const evidence = await evidenceFor(state.ticketId, ticket.workspaceId);
   const hadReplyStep = ticket.plan.some((s) => s.kind === "reply");
-  if (!hadReplyStep) {
+  if (!hadReplyStep && !alreadyClosed) {
     const firstName = firstNameOf(ticket.reporter);
     await say(
       ticket,
@@ -1075,6 +1424,15 @@ function buildHandoffArtifact(state: TState, ticket: Ticket, evidence: ReplyEvid
     for (const r of rejected) lines.push(`  - ${r.hypothesis} — ${r.ruledOutBy}`);
   }
 
+  // The candidates that were actually attempted, in the order they were tried,
+  // each with the employee's own verdict on it. This is the most expensive
+  // evidence on the ticket — it cost a real person a real reply — and it is the
+  // part that tells a technician which fixes are already off the table.
+  if (state.rungsTried.length > 0) {
+    lines.push("", "Fixes attempted one at a time, and what the employee said about each:");
+    state.rungsTried.forEach((r, i) => lines.push(`  ${i + 1}. ${r}`));
+  }
+
   if (state.operatorNotes.length > 0) {
     lines.push("", "What the operator reported while carrying it out:");
     for (const n of state.operatorNotes) lines.push(`  - ${n}`);
@@ -1142,10 +1500,24 @@ function buildGraph() {
     })
     .addNode("reviewSteps", reviewSteps)
     .addNode("runNextStep", runNextStep, {
-      ends: ["runNextStep", "markAwaitingApproval", "operator", "strategist", "humanHandoff", END],
+      ends: [
+        "runNextStep",
+        "markAwaitingApproval",
+        // One change per pass. A landed fix parks here rather than starting the
+        // next candidate — see nextRungAction.
+        "askEmployeeToVerify",
+        "operator",
+        "strategist",
+        "humanHandoff",
+        END,
+      ],
     })
     .addNode("markAwaitingApproval", markAwaitingApproval)
     .addNode("awaitApproval", awaitApproval, { ends: ["runNextStep"] })
+    .addNode("askEmployeeToVerify", askEmployeeToVerify)
+    .addNode("awaitEmployeeVerdict", awaitEmployeeVerdict, {
+      ends: ["runNextStep", "strategist", "finalize", "humanHandoff", END],
+    })
     .addNode("finalize", finalize)
     .addNode("humanHandoff", humanHandoff, { ends: [END] })
     // One context branch, so there is no barrier join and nothing to deadlock
@@ -1154,6 +1526,7 @@ function buildGraph() {
     .addEdge("observe", "strategist")
     .addEdge("reviewSteps", "runNextStep")
     .addEdge("markAwaitingApproval", "awaitApproval")
+    .addEdge("askEmployeeToVerify", "awaitEmployeeVerdict")
     .addEdge("finalize", END)
     .compile({ checkpointer });
 }
@@ -1286,6 +1659,43 @@ export async function resumeTicketGraph(
   await runGuarded(ticketId, () =>
     ticketGraph.invoke(new Command({ resume: decision }), tracingConfig(ticketId)),
   );
+}
+
+/**
+ * Is this ticket paused mid-ladder, waiting to hear whether the last fix worked?
+ *
+ * Read off `next` rather than off the interrupt payload: the node that is about
+ * to run is a fact the graph maintains, while a payload shape is something a
+ * future edit could quietly change. Also answers false when the checkpoint is
+ * gone — a server restart takes MemorySaver with it — which is exactly when the
+ * caller must fall back to a full reopen instead of resuming into nothing.
+ */
+export async function isAwaitingRungVerdict(ticketId: string): Promise<boolean> {
+  const snapshot = await ticketGraph.getState(tracingConfig(ticketId)).catch(() => null);
+  return snapshot?.next?.includes("awaitEmployeeVerdict") ?? false;
+}
+
+/**
+ * The employee's answer to "did that fix it?", delivered to the paused run.
+ *
+ * Returns false when there is nothing paused to answer — the ticket finished
+ * normally, or the process restarted and took the checkpoint with it. The
+ * caller then does what it did before the ladder existed: a full reopen.
+ *
+ * Note what does NOT happen here: no reopen counter moves. Climbing the ladder
+ * is the ticket working as designed, not the employee sending back a finished
+ * ticket, and charging it against MAX_REOPENS would hand the ticket to a person
+ * halfway up a ladder the engineer had already reasoned through.
+ */
+export async function answerRungVerdict(
+  ticketId: string,
+  answer: { fixed: boolean; detail?: string },
+): Promise<boolean> {
+  if (!(await isAwaitingRungVerdict(ticketId))) return false;
+  await runGuarded(ticketId, () =>
+    ticketGraph.invoke(new Command({ resume: answer }), tracingConfig(ticketId)),
+  );
+  return true;
 }
 
 /**

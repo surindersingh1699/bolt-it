@@ -42,6 +42,21 @@ const heartbeatSchema = z.object({
   // Only an agent new enough to send it has one. Its absence is what the jobs
   // route reads as "too old to be handed work".
   build: z.string().min(1).max(64).nullable().optional(),
+  // The device's own account of what its build implements. Bounded so a
+  // compromised or broken agent cannot post an unbounded blob every 3 seconds.
+  surface: z
+    .object({
+      handlers: z.array(z.string().min(1).max(64)).max(100),
+      binaries: z.object({
+        default: z.array(z.string().min(1).max(32)).max(200),
+        grantable: z.array(z.string().min(1).max(32)).max(200),
+      }),
+    })
+    .nullable()
+    .optional(),
+  // Set from the machine's own console by the person sitting at it. Optional so
+  // an older agent, which cannot be paused at all, still validates.
+  paused: z.boolean().optional(),
   currentJob: z
     .object({
       id: z.string().min(1).max(64),
@@ -108,6 +123,9 @@ export async function GET(req: Request) {
     lastPingAt: hb.lastPingAt,
     ageMs,
     currentJob: hb.currentJob,
+    // Why a connected agent is running nothing. Without it, a paused machine and
+    // an idle one are the same picture.
+    paused: hb.paused,
     version: hb.version,
     build: hb.build,
     serverBuild,

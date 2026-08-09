@@ -27,6 +27,7 @@ import { buildCommand, capabilitySpec } from "./capabilities";
 import { autonomyNote, isDryRun } from "./autonomy";
 import { formatProofLines, isRealSuccess } from "./evidence";
 import { getTicket, listAgentJobs } from "./data";
+import { readHeartbeat } from "./agent-heartbeat";
 import { buildReplyEvidence, firstNameOf, postUpdate, waitForAgentJobs, waitForJob } from "./ticket-helpers";
 
 /** How long a step waits for the user's machine before the work counts as not done. */
@@ -60,6 +61,66 @@ const executeBackend: StepExecutor = async (ticket, step) => {
 };
 
 /**
+ * Can the machine on the other end even do this?
+ *
+ * The capability registry describes what this SYSTEM can do. The agent's
+ * published surface describes what THAT BUILD implements. They are not the same
+ * thing the moment a device is running anything but the current bundle, and the
+ * gap is expensive: the step is dispatched, the device answers with prose the
+ * graph cannot categorise (`Command is not allowlisted`), the operator retries
+ * it, and a look is spent theorising about an allowlist that is fine.
+ *
+ * Three answers, and the difference between them is what the graph does next:
+ *
+ *  - handler missing  → this build cannot do it at all. Not grantable; a grant
+ *    would retry the identical step and fail identically. It routes to the
+ *    strategist, which asks for a different observation or requests the
+ *    capability outright.
+ *  - binary grantable → a decision is missing, not a capability. Marked as such
+ *    so `decideGrant` can auto-grant it at AUTONOMY=full.
+ *  - binary unknown   → not a read this agent will ever run. Same as the first.
+ *
+ * A device that reports no surface (a build too old to describe itself) is not
+ * second-guessed: the step is dispatched and the agent's own answer stands.
+ */
+export function unsupportedByDevice(step: PlanStep): StepFailure | null {
+  const surface = readHeartbeat()?.surface;
+  if (!surface) return null;
+
+  const built = buildCommand(step.capability, step.params);
+  if (!built.ok) return null; // enqueueAgentJob reports this better than we can.
+
+  const handler = built.command.split(/\s+/)[0] ?? "";
+  if (!surface.handlers.includes(handler)) {
+    return {
+      kind: "capability_missing",
+      detail:
+        `the agent on this machine has no "${handler}" handler — it is running an older build, ` +
+        `so this read cannot run there however it is phrased`,
+    };
+  }
+
+  const binary = typeof step.params?.binary === "string" ? step.params.binary : null;
+  if (!binary) return null;
+  if (surface.binaries.default.includes(binary)) return null;
+
+  if (surface.binaries.grantable.includes(binary)) {
+    return {
+      kind: "capability_missing",
+      detail: `the read-only diagnostic ${binary} is not enabled by default and needs approval for this ticket`,
+      grantableBinary: binary,
+    };
+  }
+
+  return {
+    kind: "capability_missing",
+    detail:
+      `"${binary}" is not on this machine's read-only binary list and no approval can add it — ` +
+      `answer the same question with a different read, or request the capability`,
+  };
+}
+
+/**
  * Work on the employee's machine, decided BY the machine. No parallel narration
  * from the cloud: the before/after probe diff is the verdict, and a job that
  * changed nothing fails the step however clean its exit code was.
@@ -85,6 +146,15 @@ const executeDevice: StepExecutor = async (ticket, step) => {
       `[Dry Run] Nothing was sent. This step is recorded as simulated, not succeeded.`,
     );
     return { ok: true, log, simulated: true };
+  }
+
+  // What the machine on the other end says it implements. Checking here costs
+  // one in-memory read and saves a round trip, a 30s timeout, and — because the
+  // device's own refusal is prose — a strategist look spent theorising about it.
+  const unsupported = unsupportedByDevice(step);
+  if (unsupported) {
+    log.push(`[Agent Queue] Nothing dispatched — ${unsupported.detail}`);
+    return { ok: false, log, failure: unsupported };
   }
 
   const queued = await enqueueAgentJob(ticket, step);
@@ -151,6 +221,7 @@ const executeDevice: StepExecutor = async (ticket, step) => {
         failure: {
           kind: "capability_missing",
           detail: `the read-only diagnostic ${grantable} is not enabled by default and needs a technician to approve it for this ticket`,
+          grantableBinary: grantable,
         },
       };
     }

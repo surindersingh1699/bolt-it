@@ -16,7 +16,12 @@ import { ensureSeeded } from "@/lib/seed";
 import { getCurrentUser } from "@/lib/auth";
 import { ACME_WORKSPACE_ID, getCurrentWorkspaceId } from "@/lib/workspace";
 import { buildReplyEvidence, firstNameOf, postUpdate } from "@/lib/ticket-helpers";
-import { reopenTicketGraph, runTicketGraphFromStart, resumeTicketGraph } from "@/lib/ticket-graph";
+import {
+  answerRungVerdict,
+  reopenTicketGraph,
+  runTicketGraphFromStart,
+  resumeTicketGraph,
+} from "@/lib/ticket-graph";
 
 export interface CreateTicketInput {
   reporter: string;
@@ -145,6 +150,17 @@ export async function confirmTicketResolved(
     );
   }
   safeRevalidate("/");
+  // If the ticket was paused mid-ladder, the run is still holding the untried
+  // candidates. Telling it the fix worked is what marks them skipped and writes
+  // the summary; without this the heavier fallbacks sit pending forever and the
+  // record never says which fix was the one.
+  after(async () => {
+    try {
+      await answerRungVerdict(ticketId, { fixed: true });
+    } catch (err) {
+      console.error(`[confirmTicketResolved] answerRungVerdict failed for ${ticketId}:`, err);
+    }
+  });
 }
 
 /**
@@ -166,6 +182,13 @@ export async function escalateAfterUserDenied(ticketId: string, detail?: string)
 /**
  * Send the ticket back through the graph with what the employee just told us.
  *
+ * Two things this can mean, and the graph decides which — not this function:
+ *
+ *   - The run is paused mid-ladder on "did that fix it?". Then "still broken"
+ *     is an answer, not a reopen: the next candidate the engineer already
+ *     authorised runs immediately, with no model call and no re-observation.
+ *   - The run finished. Then it is a genuine reopen, exactly as before.
+ *
  * No budget check here on purpose. `reopenTicketGraph` counts the reopens and
  * the strategist hands off once it passes MAX_REOPENS, so the bound lives in
  * one place — a second copy of it here could disagree with the graph's.
@@ -176,6 +199,7 @@ async function takeAnotherLook(ticketId: string, detail: string): Promise<void> 
   await updateTicket(ticketId, { status: "executing" });
   after(async () => {
     try {
+      if (await answerRungVerdict(ticketId, { fixed: false, detail })) return;
       await reopenTicketGraph(ticketId, detail);
     } catch (err) {
       console.error(`[takeAnotherLook] reopenTicketGraph failed for ${ticketId}:`, err);

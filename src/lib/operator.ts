@@ -56,32 +56,92 @@ export interface OperatorDecision {
 }
 
 /**
+ * A step this ticket has already tried and been refused for what it IS.
+ *
+ * Only two failure kinds qualify, and both share the property that makes them
+ * worth remembering: the answer does not depend on when you ask. A binary that
+ * is not on the agent's allowlist is not on it a minute later either, and a step
+ * the safety reviewer refused as unrelated is still unrelated. Everything else —
+ * a timeout, a wrong app name, an offline agent — is a mechanical failure that a
+ * corrected retry genuinely might fix, and retrying those is the operator's job.
+ */
+export interface SpentStep {
+  capability?: string;
+  params?: Record<string, unknown>;
+  kind: "capability_missing" | "policy_block";
+  detail: string;
+}
+
+/**
+ * Params compared by value, not by identity.
+ *
+ * Keys are sorted so `{binary:"reg", args:[...]}` and `{args:[...], binary:"reg"}`
+ * are the same step — the operator re-emits params fresh each round and nothing
+ * guarantees their order.
+ */
+function signatureOf(capability: string | undefined, params: Record<string, unknown> | undefined): string {
+  const entries = Object.entries(params ?? {}).sort(([a], [b]) => a.localeCompare(b));
+  return `${capability ?? ""}::${JSON.stringify(entries)}`;
+}
+
+function isSpent(step: PlanStep, spent: SpentStep[]): boolean {
+  const sig = signatureOf(step.capability, step.params);
+  return spent.some((s) => signatureOf(s.capability, s.params) === sig);
+}
+
+/** Why a repeated step was held back, phrased for the strategist's next input. */
+export function spentReason(step: PlanStep, spent: SpentStep[]): string {
+  const sig = signatureOf(step.capability, step.params);
+  const match = spent.find((s) => signatureOf(s.capability, s.params) === sig);
+  return match
+    ? `${step.capability ?? step.kind} was already refused on this ticket (${match.kind}: ${match.detail}) — the same request gets the same answer`
+    : `${step.capability ?? step.kind} was already tried on this ticket`;
+}
+
+/**
  * Split what the operator proposed into what it may actually run and what it
  * overstepped on.
  *
- * Three rules, in order:
+ * Four rules, in order:
  *  - Unknown capability → rejected. There is no run-anything tool.
+ *  - Already refused for what it is → held back. See SpentStep.
  *  - Read-only → allowed, always. This is the operator's room to manoeuvre.
  *  - Change → allowed only if the strategist authorised that capability.
  *
  * Note it matches on the CAPABILITY, not on the whole step: correcting the app
  * name on an authorised `fix.restart_app` is the operator doing its job, while
  * introducing an unauthorised `fix.clear_app_cache` is not.
+ *
+ * The spent rule is in code rather than in the prompt for the usual reason, and
+ * one specific one: the prompt already says not to repeat a NO EFFECT step, and
+ * the operator obeyed it — a step *refused* for what it is reads as neither a
+ * NO EFFECT nor a failure it caused, so it kept coming back. T-YouTube spent all
+ * three operator rounds re-proposing the same refused `reg.exe` proxy read and
+ * reached a human having changed nothing.
  */
 export function authorizeOperatorSteps(
   proposed: PlanStep[],
   authorized: PlanStep[],
-): { steps: PlanStep[]; rejected: PlanStep[] } {
+  spent: SpentStep[] = [],
+): { steps: PlanStep[]; rejected: PlanStep[]; repeated: PlanStep[] } {
   const authorizedWrites = new Set(
     authorized.map((s) => s.capability).filter((c): c is string => Boolean(c)),
   );
 
   const steps: PlanStep[] = [];
   const rejected: PlanStep[] = [];
+  const repeated: PlanStep[] = [];
 
   for (const step of proposed) {
     if (step.kind === "reply" || !capabilityAllowed(step.capability)) {
       rejected.push(step);
+      continue;
+    }
+    // Checked before the read-only fast path, because the step this exists to
+    // stop IS a read: a refused diagnostic is read-only, so without this it
+    // sails through "reads are always allowed" every single round.
+    if (isSpent(step, spent)) {
+      repeated.push(step);
       continue;
     }
     if (isReadOnlyCapability(step.capability) || authorizedWrites.has(step.capability!)) {
@@ -91,7 +151,7 @@ export function authorizeOperatorSteps(
     rejected.push(step);
   }
 
-  return { steps, rejected };
+  return { steps, rejected, repeated };
 }
 
 export const OPERATOR_PROMPT = `You are the operator on a company's IT service desk. A senior engineer has diagnosed this ticket and authorised a set of actions. Your job is to get them actually done on the employee's machine, and to deal with whatever gets in the way.
@@ -125,6 +185,17 @@ WHAT YOU MAY NOT DO
 - Run a change the engineer did not authorise. Not a different fix, not a "while I'm here" tidy-up, not an adjacent action that seems obviously right. The system rejects these and the ticket loses a round.
 - Repeat an action that came back NO EFFECT. It ran and the machine did not move. Running it again will not move it either — set "blocked" and say so.
 - Decide the problem is solved. When the authorised actions are done, set "strategy_complete": true and let the engineer judge the result.
+
+HOW THE CHANGES YOU DISPATCH ACTUALLY RUN
+
+You may dispatch several authorised changes in one round, but they do not run together. The system orders them — reversible and contained ones first — runs exactly ONE, and then stops and asks the employee whether the problem is gone. If they say yes, the rest are never run at all. If they say no, the next one runs.
+
+So dispatch every authorised change you believe is worth trying. You are queueing candidates, not committing to all of them, and you are not spending anything by including the heavier fallback behind the gentle one.
+
+Two things follow:
+
+- Do not try to sequence the changes yourself across rounds, and do not hold one back "until the first one is confirmed". That is the system's job and it already happens.
+- Reads are different: they all run, in the same round, before the first change. Ask for every read you need.
 
 WHEN TO HAND BACK
 

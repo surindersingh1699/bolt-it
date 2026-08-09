@@ -65,6 +65,16 @@ export interface StepFailure {
   kind: StepFailureKind;
   /** One concrete sentence naming what was observed, for the handoff artifact. */
   detail: string;
+  /**
+   * Set only when the machine refused a read it WOULD run for this ticket if a
+   * decision said so — the agent's `GRANTABLE:<binary>:` marker.
+   *
+   * It is the only thing that makes a step grantable. Inferring it from
+   * `params.binary` instead would make every `capability_missing` on a command
+   * step look grantable, including "this build has no such handler" — which a
+   * grant cannot fix, so the retry would fail identically, forever.
+   */
+  grantableBinary?: string;
 }
 
 /**
@@ -101,6 +111,16 @@ export interface PlanStep {
   approvalMode?: StepApprovalMode;
   riskReason?: string;
   riskSource?: RiskSource;
+  /**
+   * The strategist's belief, 0-1, that this fix is the answer to THIS ticket.
+   *
+   * The only ordering input a model contributes. Everything else about where a
+   * fix sits in the ladder — how reversible it is, who it affects, whether it
+   * can be verified at all — is derived from the capability registry in
+   * ladder.ts, precisely so a ticket body cannot argue with it. Absent on the
+   * operator's steps, which bind parameters rather than authorise.
+   */
+  likelihood?: number;
   /** Set on every step that reaches `status: "failed"`. */
   failure?: StepFailure;
 }
